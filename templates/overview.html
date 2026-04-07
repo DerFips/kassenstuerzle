@@ -1,0 +1,374 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2 class="fw-bold mb-4"><i class="fas fa-chart-bar me-2 text-warning"></i>Gesamtübersicht</h2>
+
+{% if not persons_list %}
+<div class="alert alert-info"><i class="fas fa-info-circle me-2"></i>Noch keine Daten. <a href="/">→ Ausgaben eintragen</a></div>
+{% else %}
+
+<!-- ── Übersichtstabelle (Tabs) ─────────────────────────────────────────────── -->
+<div class="card shadow-sm mb-4">
+  <div class="card-header py-3">
+    <ul class="nav nav-tabs card-header-tabs" id="ovTabs">
+      <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-all">Alle</a></li>
+      {% for pn in persons_list %}
+      <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-{{ pn|replace(' ','_') }}">{{ pn }}</a></li>
+      {% endfor %}
+    </ul>
+  </div>
+  <div class="tab-content card-body p-0">
+    <!-- All-Tab -->
+    <div class="tab-pane fade show active" id="tab-all">
+      <div class="table-responsive">
+      <table class="table table-sm table-hover overview-table mb-0">
+        <thead class="table-secondary">
+          <tr>
+            <th>Monat</th>
+            {% for cn,col in all_cats %}
+            <th class="text-end"><span class="badge rounded-pill me-1" style="background:{{ col }}">&#8203;</span>{{ cn }}</th>
+            {% endfor %}
+            <th class="text-end fw-bold">Gesamt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for yk,mk in month_keys %}
+          {% set ns = namespace(row_total=0, has_data=false) %}
+          {% for pn in persons_list %}{% for cn,_ in all_cats %}{% if structured.get(pn,{}).get((yk,mk),{}).get(cn) %}{% set ns.has_data = true %}{% endif %}{% endfor %}{% endfor %}
+          {% if ns.has_data %}
+          <tr>
+            <td>
+              <a href="/month/{{ yk }}/{{ mk }}" class="text-decoration-none">{{ month_names[mk-1] }} {{ yk }}</a>
+              {% if (yk,mk) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
+            </td>
+            {% for cn,_ in all_cats %}
+              {% set ns2 = namespace(cv=0) %}
+              {% for pn in persons_list %}{% set ns2.cv = ns2.cv + structured.get(pn,{}).get((yk,mk),{}).get(cn,0) %}{% endfor %}
+              {% set ns.row_total = ns.row_total + ns2.cv %}
+              <td class="text-end">{% if ns2.cv %}{{ "%.2f"|format(ns2.cv)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>
+            {% endfor %}
+            <td class="text-end fw-bold">{{ "%.2f"|format(ns.row_total)|replace(".",",") }} €</td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </tbody>
+      </table></div>
+    </div>
+    <!-- Per-Person Tabs -->
+    {% for pn in persons_list %}
+    <div class="tab-pane fade" id="tab-{{ pn|replace(' ','_') }}">
+      <div class="table-responsive">
+      <table class="table table-sm table-hover overview-table mb-0">
+        <thead class="table-secondary">
+          <tr>
+            <th>Monat</th>
+            {% for cn,col in all_cats %}<th class="text-end"><span class="badge rounded-pill me-1" style="background:{{ col }}">&#8203;</span>{{ cn }}</th>{% endfor %}
+            <th class="text-end fw-bold">Gesamt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for yk,mk in month_keys %}
+          {% set ns3 = namespace(rt=0, hd=false) %}
+          {% for cn,_ in all_cats %}{% if structured.get(pn,{}).get((yk,mk),{}).get(cn) %}{% set ns3.hd=true %}{% endif %}{% endfor %}
+          {% if ns3.hd %}
+          <tr>
+            <td>
+              <a href="/month/{{ yk }}/{{ mk }}" class="text-decoration-none">{{ month_names[mk-1] }} {{ yk }}</a>
+              {% if (yk,mk) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
+            </td>
+            {% for cn,_ in all_cats %}
+              {% set cv = structured.get(pn,{}).get((yk,mk),{}).get(cn,0) %}{% set ns3.rt = ns3.rt+cv %}
+              <td class="text-end">{% if cv %}{{ "%.2f"|format(cv)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>
+            {% endfor %}
+            <td class="text-end fw-bold">{{ "%.2f"|format(ns3.rt)|replace(".",",") }} €</td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </tbody>
+      </table></div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<!-- ── Finanzbilanz ─────────────────────────────────────────────────────────── -->
+{% if income_map or exp_totals_by_month %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header py-3">
+    <h5 class="mb-0"><i class="fas fa-scale-balanced me-2 text-success"></i>Finanzbilanz</h5>
+  </div>
+  <div class="table-responsive">
+  <table class="table table-sm table-hover mb-0">
+    <thead class="table-secondary">
+      <tr>
+        <th>Monat</th>
+        <th class="text-end text-success">Einnahmen</th>
+        <th class="text-end text-danger">Ausgaben</th>
+        <th class="text-end">Ersparnis</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% set grand_inc = namespace(v=0) %}
+      {% set grand_exp = namespace(v=0) %}
+      {% for yk,mk in month_keys %}
+        {% set key = yk|string + '-' + mk|string %}
+        {% set inc = income_map.get(key, {}).values()|sum %}
+        {% set exp = exp_totals_by_month.get(key, 0) %}
+        {% set sav = inc - exp %}
+        {% set grand_inc.v = grand_inc.v + inc %}
+        {% set grand_exp.v = grand_exp.v + exp %}
+        {% if inc > 0 or exp > 0 %}
+        <tr>
+          <td>
+            <a href="/month/{{ yk }}/{{ mk }}" class="text-decoration-none">{{ month_names[mk-1] }} {{ yk }}</a>
+            {% if (yk,mk) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
+          </td>
+          <td class="text-end text-success">{% if inc > 0 %}+{{ "%.2f"|format(inc)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          <td class="text-end text-danger">{% if exp > 0 %}{{ "%.2f"|format(exp)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          <td class="text-end fw-semibold {% if sav >= 0 %}text-success{% else %}text-danger{% endif %}">
+            {% if sav >= 0 %}+{% endif %}{{ "%.2f"|format(sav)|replace(".",",") }} €
+          </td>
+        </tr>
+        {% endif %}
+      {% endfor %}
+    </tbody>
+    {% set grand_sav = grand_inc.v - grand_exp.v %}
+    <tfoot class="table-dark fw-bold">
+      <tr>
+        <td>Gesamt</td>
+        <td class="text-end text-success">+{{ "%.2f"|format(grand_inc.v)|replace(".",",") }} €</td>
+        <td class="text-end text-danger">{{ "%.2f"|format(grand_exp.v)|replace(".",",") }} €</td>
+        <td class="text-end {% if grand_sav >= 0 %}text-success{% else %}text-danger{% endif %}">{% if grand_sav >= 0 %}+{% endif %}{{ "%.2f"|format(grand_sav)|replace(".",",") }} €</td>
+      </tr>
+    </tfoot>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+<!-- ── Diagramme ─────────────────────────────────────────────────────────────── -->
+<h4 class="fw-bold mb-2"><i class="fas fa-chart-line me-2 text-primary"></i>Diagramme</h4>
+<div class="d-flex flex-wrap gap-2 mb-3" id="widgetToggles"></div>
+
+<!-- Widget-Grid -->
+<div class="row g-4" id="widgetGrid">
+
+  <!-- Donut -->
+  <div class="col-12 col-xl-5" id="widget-donut">
+    <div class="card shadow-sm h-100">
+      <div class="card-header d-flex justify-content-between align-items-center py-2">
+        <span class="fw-semibold"><i class="fas fa-chart-pie me-2 text-warning"></i>Kategorien-Verteilung</span>
+        <div class="d-flex align-items-center gap-2">
+          <select id="sel-donut" class="form-select form-select-sm" style="width:auto" onchange="renderWidget('donut')"></select>
+          <button class="btn btn-sm btn-outline-secondary px-2" onclick="toggleWidget('donut')"><i class="fas fa-times"></i></button>
+        </div>
+      </div>
+      <div class="card-body p-1"><div id="plot-donut" style="min-height:320px"></div></div>
+    </div>
+  </div>
+
+  <!-- Trend -->
+  <div class="col-12 col-xl-7" id="widget-line">
+    <div class="card shadow-sm h-100">
+      <div class="card-header d-flex justify-content-between align-items-center py-2">
+        <span class="fw-semibold"><i class="fas fa-chart-line me-2 text-primary"></i>Ausgaben-Trend</span>
+        <button class="btn btn-sm btn-outline-secondary px-2" onclick="toggleWidget('line')"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="card-body p-1"><div id="plot-line" style="min-height:320px"></div></div>
+    </div>
+  </div>
+
+  <!-- Stacked Bar -->
+  <div class="col-12" id="widget-stacked">
+    <div class="card shadow-sm">
+      <div class="card-header d-flex justify-content-between align-items-center py-2">
+        <span class="fw-semibold"><i class="fas fa-chart-bar me-2 text-success"></i>Kategorien pro Monat</span>
+        <button class="btn btn-sm btn-outline-secondary px-2" onclick="toggleWidget('stacked')"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="card-body p-1"><div id="plot-stacked" style="min-height:350px"></div></div>
+    </div>
+  </div>
+
+</div><!-- /widgetGrid -->
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
+<script>
+const WIDGET_ORDER = ['donut','line','stacked'];
+const WIDGET_META  = {
+  donut:   { title:'Kategorien', icon:'fa-chart-pie',  color:'warning' },
+  line:    { title:'Trend',      icon:'fa-chart-line', color:'primary' },
+  stacked: { title:'Stacked Bar',icon:'fa-chart-bar',  color:'success' },
+};
+const DEFAULT_ACTIVE = ['donut','line','stacked'];
+const LS_KEY = 'kassenstürzle_widgets';
+
+let chartData  = null;
+let activeSet  = new Set(JSON.parse(localStorage.getItem(LS_KEY) || JSON.stringify(DEFAULT_ACTIVE)));
+const rendered = new Set();
+
+function buildToggles() {
+  const div = document.getElementById('widgetToggles');
+  div.innerHTML = '';
+  WIDGET_ORDER.forEach(id => {
+    const meta = WIDGET_META[id], on = activeSet.has(id);
+    const btn  = document.createElement('button');
+    btn.id        = `wbtn-${id}`;
+    btn.className = `btn btn-sm ${on ? 'btn-'+meta.color : 'btn-outline-secondary'}`;
+    btn.innerHTML = `<i class="fas ${meta.icon} me-1"></i>${meta.title}`;
+    btn.onclick   = () => toggleWidget(id);
+    btn.title     = on ? 'Widget ausblenden' : 'Widget einblenden';
+    div.appendChild(btn);
+  });
+}
+
+function applyVisibility() {
+  WIDGET_ORDER.forEach(id => {
+    document.getElementById('widget-'+id).style.display = activeSet.has(id) ? '' : 'none';
+  });
+  if (chartData) {
+    activeSet.forEach(id => { if (!rendered.has(id)) { renderWidget(id); rendered.add(id); } });
+  }
+  buildToggles();
+}
+
+function toggleWidget(id) {
+  if (activeSet.has(id)) { activeSet.delete(id); rendered.delete(id); }
+  else                    { activeSet.add(id); }
+  localStorage.setItem(LS_KEY, JSON.stringify([...activeSet]));
+  buildToggles();
+  applyVisibility();
+}
+
+// ── Plotly helpers ────────────────────────────────────────────────────────────
+function isDark() { return document.documentElement.getAttribute('data-bs-theme')==='dark'; }
+function getBaseLayout() {
+  const d = isDark();
+  return {
+    paper_bgcolor: d ? '#212529' : 'rgba(0,0,0,0)',
+    plot_bgcolor:  d ? '#212529' : 'rgba(0,0,0,0)',
+    font: { family:'system-ui,-apple-system,sans-serif', size:11, color: d ? '#dee2e6' : '#212529' },
+    margin: { l:55, r:20, t:40, b:50 }, autosize:true
+  };
+}
+const CFG = { responsive:true, displayModeBar:'hover', displaylogo:false,
+              modeBarButtonsToRemove:['toImage','sendDataToCloud'] };
+
+function layout(title, extra={}) {
+  const d = isDark();
+  const axStyle = d ? {gridcolor:'#444',linecolor:'#555',tickfont:{color:'#adb5bd'}} : {};
+  const base = { ...getBaseLayout(), title:{text:title, font:{size:13, color: d?'#dee2e6':'#212529'}} };
+  return { ...base, ...extra,
+    xaxis: { ...(extra.xaxis||{}), ...axStyle },
+    yaxis: { ...(extra.yaxis||{}), ...axStyle } };
+}
+function mLabel(y, m) { return (chartData.month_names[m-1]||'').slice(0,3)+' '+String(y).slice(2); }
+function catColor(name) { return (chartData.categories.find(c=>c.name===name)||{}).color || '#6c757d'; }
+function noData(id)  { document.getElementById(id).innerHTML = '<p class="text-muted text-center py-5">Keine Daten</p>'; }
+function fillMonthSelects() {
+  const sel = document.getElementById('sel-donut');
+  chartData.months.forEach(([y,m]) => {
+    const o = new Option(mLabel(y,m), `${y}-${m}`);
+    sel.add(o);
+  });
+  if (sel.options.length) sel.value = sel.options[sel.options.length-1].value;
+}
+
+function renderWidget(id) {
+  if      (id==='donut')   renderDonut();
+  else if (id==='line')    renderLine();
+  else if (id==='stacked') renderStacked();
+}
+
+// ── Donut ─────────────────────────────────────────────────────────────────────
+function renderDonut() {
+  const elId = 'plot-donut';
+  const sel  = document.getElementById('sel-donut');
+  const [y,m] = sel.value ? sel.value.split('-').map(Number)
+                           : chartData.months[chartData.months.length-1] || [0,0];
+  const rows = chartData.rows.filter(r=>r.year===y && r.month===m);
+  if (!rows.length) { noData(elId); return; }
+  const totals = {}, colorMap = {};
+  rows.forEach(r => {
+    totals[r.category] = (totals[r.category]||0) + r.amount;
+    if (!colorMap[r.category]) colorMap[r.category] = r.color;
+  });
+  const labels = Object.keys(totals).sort((a,b)=>totals[b]-totals[a]);
+  const PALETTE = ['#636efa','#ef553b','#00cc96','#ab63fa','#ffa15a','#19d3f3','#ff6692','#b6e880'];
+  const colors  = labels.map((l,i) => colorMap[l] || catColor(l) || PALETTE[i%8]);
+  Plotly.react(elId, [{
+    type:'pie', hole:0.42, labels, values:labels.map(l=>totals[l]),
+    marker:{ colors },
+    textinfo:'label+percent',
+    hovertemplate:'<b>%{label}</b><br>%{value:.2f} €  (%{percent})<extra></extra>'
+  }],
+  layout(''), {...CFG, displayModeBar:false});
+}
+
+// ── Trend-Linie ───────────────────────────────────────────────────────────────
+function renderLine() {
+  const elId = 'plot-line';
+  if (!chartData.months.length) { noData(elId); return; }
+  const persons = [...new Set(chartData.rows.map(r=>r.person))].sort();
+  const labels  = chartData.months.map(([y,m])=>mLabel(y,m));
+  const COLORS  = ['#636efa','#ef553b','#00cc96','#ab63fa','#ffa15a'];
+  const traces  = persons.map((p,i) => ({
+    type:'scatter', mode:'lines+markers', name:p,
+    line:{ color:COLORS[i%5], width:2 }, marker:{ size:6 },
+    x: labels,
+    y: chartData.months.map(([y,m])=>
+        chartData.rows.filter(r=>r.year===y&&r.month===m&&r.person===p)
+                      .reduce((s,r)=>s+r.amount,0)),
+    hovertemplate:`<b>${p}</b>: %{y:.2f} €<extra></extra>`
+  }));
+  Plotly.react(elId, traces,
+    layout('', { legend:{orientation:'h',y:-0.2},
+                 xaxis:{tickangle:-30}, yaxis:{ticksuffix:' €'} }), CFG);
+}
+
+// ── Stacked Bar ───────────────────────────────────────────────────────────────
+function renderStacked() {
+  const elId = 'plot-stacked';
+  if (!chartData.months.length) { noData(elId); return; }
+  const labels = chartData.months.map(([y,m])=>mLabel(y,m));
+  const rowCatMap = {};
+  chartData.rows.forEach(r => { if(!rowCatMap[r.category]) rowCatMap[r.category]=r.color; });
+  const allCats = [
+    ...chartData.categories,
+    ...Object.entries(rowCatMap)
+      .filter(([n])=>!chartData.categories.some(c=>c.name===n))
+      .map(([n,c])=>({name:n,color:c}))
+  ].filter(cat => chartData.rows.some(r=>r.category===cat.name));
+  const traces = allCats.map(cat => ({
+    type:'bar', name:cat.name, x:labels,
+    marker:{ color:cat.color },
+    y:chartData.months.map(([y,m])=>
+        chartData.rows.filter(r=>r.year===y&&r.month===m&&r.category===cat.name)
+                      .reduce((s,r)=>s+r.amount,0)),
+    hovertemplate:`<b>${cat.name}</b>: %{y:.2f} €<extra></extra>`
+  }));
+  Plotly.react(elId, traces,
+    layout('', { barmode:'stack', legend:{orientation:'h',y:-0.2},
+                 xaxis:{tickangle:-30}, yaxis:{ticksuffix:' €'} }), CFG);
+}
+
+// ── Re-render on theme change ────────────────────────────────────────────────
+window.addEventListener('ks:themechange', () => {
+  if (!chartData) return;
+  rendered.clear();           // force full re-render with new colors
+  applyVisibility();
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+chartData = {{ chart_data | tojson }};
+WIDGET_ORDER.forEach(id => { document.getElementById('widget-'+id).style.display = 'none'; });
+if (!chartData.rows || !chartData.rows.length) {
+  document.getElementById('widgetToggles').innerHTML =
+    '<span class="text-muted small"><i class="fas fa-info-circle me-1"></i>Noch keine Ausgaben vorhanden.</span>';
+} else {
+  fillMonthSelects();
+  buildToggles();
+  applyVisibility();
+}
+</script>
+{% endblock %}

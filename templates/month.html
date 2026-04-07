@@ -1,0 +1,588 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="d-flex align-items-center justify-content-between mb-4">
+  <a href="/month/{{ prev_year }}/{{ prev_month }}" class="btn btn-outline-secondary btn-sm month-nav-btn">
+    <i class="fas fa-chevron-left"></i>
+  </a>
+  <h2 class="mb-0 fw-bold">{{ month_name }} {{ year }}
+    {% if is_settled %}<span class="badge bg-success fs-6 ms-2" style="vertical-align:middle"><i class="fas fa-check me-1"></i>Beglichen</span>{% endif %}
+  </h2>
+  <a href="/month/{{ next_year }}/{{ next_month }}" class="btn btn-outline-secondary btn-sm month-nav-btn">
+    <i class="fas fa-chevron-right"></i>
+  </a>
+</div>
+
+<!-- ① Ausgaben-Tabelle ──────────────────────────────────────────────────── -->
+<div class="card shadow-sm mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center py-3">
+    <h5 class="mb-0"><i class="fas fa-table me-2 text-primary"></i>Ausgaben</h5>
+    <div class="d-flex gap-2">
+      <button onclick="clearTable('expenseBody', true)" class="btn btn-sm btn-outline-danger" title="Alle Zeilen leeren"><i class="fas fa-xmark"></i></button>
+      <button onclick="insertRecurring()" class="btn btn-sm btn-outline-info" id="recurBtn" title="Wiederkehrende Ausgaben für diesen Monat einfügen"><i class="fas fa-rotate me-1"></i><span class="d-none d-sm-inline">Wiederkehrende</span></button>
+      <button onclick="addRow()" class="btn btn-sm btn-outline-success"><i class="fas fa-plus me-1"></i>Zeile</button>
+      <button onclick="saveExpenses()" class="btn btn-sm btn-primary" id="saveBtn"><i class="fas fa-save me-1"></i>Speichern</button>
+    </div>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover table-sm expense-table mb-0">
+      <thead class="table-dark">
+        <tr>
+          <th style="width:70px">Tag</th>
+          <th>Beschreibung</th>
+          <th style="width:150px">Wer</th>
+          <th style="width:175px">Kategorie</th>
+          <th style="width:120px" class="text-end">Betrag (€)</th>
+          <th style="width:60px" class="text-center" title="Barzahlung"><i class="fas fa-money-bill-wave text-success"></i></th>
+          <th style="width:40px"></th>
+        </tr>
+      </thead>
+      <tbody id="expenseBody"></tbody>
+    </table>
+  </div>
+  <div class="card-footer bg-white d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <small class="text-muted"><span id="rowCount">0</span> Einträge</small>
+    <div class="d-flex gap-3">
+      <small class="text-success"><i class="fas fa-money-bill-wave me-1"></i>Bar: <span id="cashSum">0,00 €</span></small>
+      <strong class="text-primary">Gesamt: <span id="totalSum">0,00 €</span></strong>
+    </div>
+  </div>
+</div>
+
+
+<!-- ② Einnahmen-Tabelle ─────────────────────────────────────────────────── -->
+<div class="card shadow-sm mb-4 border-success">
+  <div class="card-header header-success d-flex justify-content-between align-items-center py-3">
+    <h5 class="mb-0"><i class="fas fa-circle-dollar-to-slot me-2 text-success"></i>Einnahmen</h5>
+    <div class="d-flex gap-2">
+      <button onclick="clearTable('incomeBody', false)" class="btn btn-sm btn-outline-danger" title="Alle Zeilen leeren"><i class="fas fa-xmark"></i></button>
+      <button onclick="addIncomeRow()" class="btn btn-sm btn-outline-success"><i class="fas fa-plus me-1"></i>Zeile</button>
+      <button onclick="saveIncome()" class="btn btn-sm btn-success" id="saveIncomeBtn"><i class="fas fa-save me-1"></i>Speichern</button>
+    </div>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover table-sm income-table mb-0">
+      <thead class="table-success">
+        <tr>
+          <th style="width:70px">Tag</th><th>Beschreibung</th>
+          <th style="width:160px">Von wem</th>
+          <th style="width:130px" class="text-end">Betrag (€)</th><th style="width:40px"></th>
+        </tr>
+      </thead>
+      <tbody id="incomeBody"></tbody>
+    </table>
+  </div>
+  <div class="card-footer d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <small class="text-muted"><span id="incomeCount">0</span> Einträge</small>
+    <strong class="text-success">Gesamt: <span id="incomeTotalSum">0,00 €</span></strong>
+  </div>
+</div>
+
+<!-- ② Monatsübersicht ───────────────────────────────────────────────────── -->
+<div class="card shadow-sm mb-4">
+  <div class="card-header bg-white py-3">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+      <h5 class="mb-0"><i class="fas fa-chart-pie me-2 text-warning"></i>Monatsübersicht – {{ month_name }} {{ year }}</h5>
+      <div class="d-flex align-items-center gap-3 flex-wrap">
+        {% if is_settled %}
+        <small class="text-success"><i class="fas fa-clock me-1"></i>{{ settled_at }}</small>
+        {% endif %}
+        <div class="form-check form-switch mb-0 d-flex align-items-center gap-2">
+          <input class="form-check-input settle-check-input" type="checkbox" role="switch"
+            id="settleCheck" {% if is_settled %}checked{% endif %}
+            onchange="toggleSettle(this.checked)">
+          <label class="form-check-label settle-check-label fw-semibold" for="settleCheck"
+            style="{% if is_settled %}color:#198754{% endif %}">
+            <i class="fas {% if is_settled %}fa-check-circle text-success{% else %}fa-circle-dot text-warning{% endif %} me-1"></i>
+            Abrechnung beglichen
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card-body p-0" id="overviewBody">
+    {% set ps = ov_p.keys()|sort|list %}
+    {% if ov_p and ps %}
+    <div class="table-responsive">
+    <table class="table table-bordered table-sm overview-table mb-0">
+      <thead class="table-secondary">
+        <tr>
+          <th>Kategorie</th>
+          {% for pn in ps %}<th class="text-end">{{ pn }}</th>{% endfor %}
+          <th class="text-end fw-bold">Gesamt</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for cn, col in ov_c %}
+          {% set rt = namespace(v=0) %}{% set rh = namespace(v=false) %}
+          {% for pn in ps %}{% if ov_p[pn].get(cn) %}{% set rh.v = true %}{% endif %}{% endfor %}
+          {% if rh.v %}
+          <tr>
+            <td>
+              <span class="badge rounded-pill me-1" style="background:{{ col }}">&#8203;</span>{{ cn }}
+              {% if cn in ov_settlements %}<i class="fas fa-scale-balanced ms-1 text-warning" style="font-size:.7em"></i>{% endif %}
+            </td>
+            {% for pn in ps %}{% set cv = ov_p[pn].get(cn,0) %}{% set rt.v = rt.v+cv %}
+              <td class="text-end">{% if cv %}{{ "%.2f"|format(cv)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>
+            {% endfor %}
+            <td class="text-end fw-bold">{{ "%.2f"|format(rt.v)|replace(".",",") }} €</td>
+          </tr>
+
+          {# ── Ausgleichs-Unterzeile ── #}
+          {% if cn in ov_settlements %}
+          <tr class="{% if is_settled %}settlement-settled-row{% else %}settlement-sub-row{% endif %}">
+            <td>
+              {% if is_settled %}
+                <i class="fas fa-check-circle me-1 text-success"></i><em>✓ Angerechnet</em>
+              {% else %}
+                <i class="fas fa-scale-balanced me-1 text-warning" style="font-size:.8em"></i><em>⟵ Ausgleich</em>
+              {% endif %}
+            </td>
+            {% for pn in ps %}
+              {% set sv = ov_settlements[cn].get(pn, 0) %}
+              {% if is_settled %}
+                {% set sv = ov_settlements[cn].get(pn, 0) %}
+                {% set adj = 0 - sv %}
+                <td class="text-end small fw-semibold
+                  {% if adj < -0.005 %}text-success{% elif adj > 0.005 %}text-warning{% else %}text-muted{% endif %}">
+                  {% if adj < -0.005 %}
+                    <i class="fas fa-minus me-1" style="font-size:.7em"></i>{{ "%.2f"|format(adj)|replace(".",",") }} €
+                  {% elif adj > 0.005 %}
+                    <i class="fas fa-plus me-1" style="font-size:.7em"></i>+{{ "%.2f"|format(adj)|replace(".",",") }} €
+                  {% else %}—{% endif %}
+                </td>
+              {% else %}
+                <td class="text-end small fw-semibold
+                  {% if sv > 0.005 %}text-success{% elif sv < -0.005 %}text-warning{% else %}text-muted{% endif %}">
+                  {% if sv > 0.005 %}
+                    <i class="fas fa-arrow-down me-1" style="font-size:.7em"></i>+{{ "%.2f"|format(sv)|replace(".",",") }} €
+                  {% elif sv < -0.005 %}
+                    <i class="fas fa-arrow-up me-1" style="font-size:.7em"></i>{{ "%.2f"|format(sv)|replace(".",",") }} €
+                  {% else %}—{% endif %}
+                </td>
+              {% endif %}
+            {% endfor %}
+            <td class="text-end text-muted small">{% if is_settled %}✓{% else %}±0{% endif %}</td>
+          </tr>
+          {% endif %}
+          {% endif %}
+        {% endfor %}
+      </tbody>
+      <tfoot class="table-dark fw-bold"><tr>
+        <td>Gesamt</td>
+        {% set grand = namespace(v=0) %}
+        {% for pn in ps %}{% set pt = namespace(v=0) %}
+          {% for cv in ov_p[pn].values() %}{% set pt.v = pt.v+cv %}{% endfor %}
+          {% set grand.v = grand.v+pt.v %}
+          <td class="text-end">{{ "%.2f"|format(pt.v)|replace(".",",") }} €</td>
+        {% endfor %}
+        <td class="text-end">{{ "%.2f"|format(grand.v)|replace(".",",") }} €</td>
+      </tr></tfoot>
+    </table></div>
+    {% if ov_settlements and not is_settled %}
+    <div class="px-3 py-2 bg-light border-top text-muted" style="font-size:.8rem">
+      <i class="fas fa-circle-info me-1"></i>
+      <span class="text-success fw-semibold">+ Betrag</span> = erhält Geld zurück &nbsp;|&nbsp;
+      <span class="text-warning fw-semibold">− Betrag</span> = zahlt Ausgleich &nbsp;|&nbsp;
+      Checkbox aktivieren wenn alle Zahlungen beglichen wurden – Beträge werden dann aufgerechnet.
+    </div>
+    {% endif %}
+    {% else %}
+    <p class="text-muted text-center py-4 mb-0">
+      <i class="fas fa-info-circle me-1"></i>Noch keine Daten – Ausgaben eintragen und <strong>Speichern</strong> klicken.
+    </p>
+    {% endif %}
+    {% if income_total > 0 or expense_total > 0 %}
+    <div class="d-flex flex-wrap justify-content-between align-items-center px-3 py-2 border-top" id="savingsBar">
+      <div class="d-flex flex-wrap gap-4">
+        <span><i class="fas fa-arrow-up text-success me-1"></i>Einnahmen: <strong class="text-success">+{{ "%.2f"|format(income_total)|replace(".",",") }} €</strong></span>
+        <span><i class="fas fa-arrow-down text-danger me-1"></i>Ausgaben: <strong class="text-danger">{{ "%.2f"|format(expense_total)|replace(".",",") }} €</strong></span>
+      </div>
+      <div class="fw-bold fs-5">
+        Ersparnis:
+        <span id="savingsAmt" class="{% if savings >= 0 %}text-success{% else %}text-danger{% endif %}">
+          {% if savings >= 0 %}+{% endif %}{{ "%.2f"|format(savings)|replace(".",",") }} €
+        </span>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+
+<!-- ③ Geldbeutel ────────────────────────────────────────────────────────── -->
+<div class="card shadow-sm mb-4 border-success">
+  <div class="card-header py-3" class="header-success">
+    <h5 class="mb-0"><i class="fas fa-wallet me-2 text-success"></i>Geldbeutel – {{ month_name }} {{ year }}</h5>
+  </div>
+  <div class="card-body p-0" id="walletBody">
+    {% if wallet %}
+    <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-secondary">
+        <tr><th>Person</th><th class="text-end">Anfang</th><th class="text-end text-danger">Barausgaben</th><th class="text-end">Ende</th></tr>
+      </thead>
+      <tbody>
+        {% for w in wallet %}
+        <tr>
+          <td><i class="fas fa-user me-2 text-muted"></i><strong>{{ w.name }}</strong></td>
+          <td class="text-end">{{ "%.2f"|format(w.start_balance)|replace(".",",") }} €</td>
+          <td class="text-end text-danger">{% if w.cash_expenses > 0 %}–{{ "%.2f"|format(w.cash_expenses)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          <td class="text-end fw-bold {% if w.end_balance >= 0 %}text-success{% else %}text-danger{% endif %}">{{ "%.2f"|format(w.end_balance)|replace(".",",") }} €</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+    <div class="px-3 py-2 text-muted small border-top bg-light rounded-bottom">
+      <i class="fas fa-info-circle me-1"></i>Endbetrag wird Startwert des Folgemonats.
+    </div>
+    {% else %}
+    <p class="text-muted text-center py-4 mb-0"><i class="fas fa-info-circle me-1"></i>Kein Geldbeutel konfiguriert. <a href="/settings">→ Personen einrichten</a></p>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ④ Abrechnung ────────────────────────────────────────────────────────── -->
+<div class="card shadow-sm {% if is_settled %}border-success{% else %}border-warning{% endif %}">
+  <div class="card-header py-3" style="background:{% if is_settled %}#f0fff4{% else %}#fff8e1{% endif %}">
+    <h5 class="mb-0">
+      <i class="fas {% if is_settled %}fa-check-circle text-success{% else %}fa-scale-balanced text-warning{% endif %} me-2"></i>
+      Abrechnung – {% if is_settled %}Beglichen ✓{% else %}Wer schuldet wem?{% endif %}
+    </h5>
+  </div>
+  <div class="card-body p-0" id="settlementBody">
+    {% set s = settlement %}
+    {% if s is none %}
+      <p class="text-muted text-center py-4 mb-0"><i class="fas fa-info-circle me-1"></i>Keine Split-Kategorien. <a href="/settings">→ Einstellungen</a></p>
+    {% elif s.is_settled %}
+      <div class="text-center py-4 px-3">
+        <div class="text-success mb-2" style="font-size:2.5rem"><i class="fas fa-circle-check"></i></div>
+        <div class="fw-bold text-success fs-5 mb-1">Alle Schulden beglichen</div>
+        <div class="text-muted small">Abgerechnet am {{ settled_at }}</div>
+        <div class="mt-3 text-muted small"><i class="fas fa-undo me-1"></i>Checkbox deaktivieren um die Abrechnung wieder zu öffnen.</div>
+      </div>
+    {% elif not s.cat_details %}
+      <p class="text-success text-center py-4 mb-0"><i class="fas fa-check-circle me-1"></i>Keine gesplitteten Ausgaben diesen Monat.</p>
+    {% elif not s.transactions %}
+      <p class="text-success text-center py-4 mb-0"><i class="fas fa-check-circle me-1"></i>Alles ausgeglichen!</p>
+    {% else %}
+      <div class="p-3 d-flex flex-wrap gap-2">
+        {% for t in s.transactions %}
+        <div class="d-flex align-items-center gap-2 bg-warning bg-opacity-10 border border-warning rounded px-3 py-2 flex-grow-1">
+          <i class="fas fa-arrow-right text-warning"></i>
+          <span><strong>{{ t.from }}</strong> schuldet <strong>{{ t.to }}</strong></span>
+          <span class="ms-auto fw-bold text-warning fs-5">{{ "%.2f"|format(t.amount)|replace(".",",") }} €</span>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="px-3 pb-3 text-muted small">
+        <i class="fas fa-circle-info me-1"></i>Details je Kategorie in der Monatsübersicht (⚖️-Zeilen). Checkbox aktivieren wenn beglichen.
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+const YEAR  = {{ year }};
+const MONTH = {{ month }};
+const PERSONS  = {{ persons | tojson }};
+const CATS     = {{ categories | tojson }};
+const EXISTING = {{ expenses | tojson }};
+let isSettled  = {{ 'true' if is_settled else 'false' }};
+let currentSettlement    = {{ settlement | tojson }};
+let currentOvSettlements = {{ ov_settlements | tojson }};
+const INCOME_INIT = {{ income | tojson }};
+let incTotal  = {{ income_total }};
+let expTotal  = {{ expense_total | default(0) }};
+let savingsVal= {{ savings | default(0) }};
+
+function buildPersonOpts(sel) {
+  let s='<option value="">—</option>';
+  PERSONS.forEach(x=>{s+=`<option value="${x.id}"${x.id==sel?' selected':''}>${x.name}</option>`;});
+  return s;
+}
+function buildCatOpts(sel) {
+  let s='<option value="">—</option>';
+  CATS.forEach(x=>{s+=`<option value="${x.id}"${x.id==sel?' selected':''}>${x.name}${x.is_split?' ⚖️':''}</option>`;});
+  return s;
+}
+function addRow(day='',desc='',pid='',cid='',amt='',isCash=false) {
+  const tr=document.createElement('tr');
+  tr.innerHTML=`
+    <td><input type="number" class="form-control form-control-sm text-center" name="day" value="${day}" min="1" max="31" placeholder="TT"></td>
+    <td><input type="text" class="form-control form-control-sm" name="description" value="${desc}" placeholder="Beschreibung..."></td>
+    <td><select class="form-select form-select-sm" name="person_id">${buildPersonOpts(pid)}</select></td>
+    <td><select class="form-select form-select-sm cat-select" name="category_id" onchange="updateRowColor(this)">${buildCatOpts(cid)}</select></td>
+    <td><input type="number" class="form-control form-control-sm text-end" name="amount" value="${amt}" step="0.01" min="0" placeholder="0,00" oninput="updateFooter()"></td>
+    <td class="text-center align-middle"><div class="form-check d-flex justify-content-center mb-0"><input class="form-check-input cash-check" type="checkbox" name="is_cash" title="Barzahlung" ${isCash?'checked':''} onchange="updateFooter()"></div></td>
+    <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('tr').remove();updateFooter()"><i class="fas fa-times"></i></button></td>`;
+  document.getElementById('expenseBody').appendChild(tr);
+  const s=tr.querySelector('.cat-select'); if(cid) s.value=cid; updateRowColor(s); updateFooter();
+  tr.querySelector('[name=day]').focus();
+}
+function updateRowColor(sel) {
+  const cat=CATS.find(c=>c.id==sel.value);
+  sel.closest('tr').style.borderLeft=cat?`4px solid ${cat.color}`:'4px solid transparent';
+}
+function updateFooter() {
+  const rows=document.querySelectorAll('#expenseBody tr');
+  let total=0,cash=0;
+  rows.forEach(r=>{const v=parseFloat(r.querySelector('[name=amount]')?.value||0);if(!isNaN(v)){total+=v;if(r.querySelector('.cash-check')?.checked)cash+=v;}});
+  document.getElementById('rowCount').textContent=rows.length;
+  document.getElementById('totalSum').textContent=fmt(total);
+  document.getElementById('cashSum').textContent=fmt(cash);
+}
+function collectRows() {
+  return Array.from(document.querySelectorAll('#expenseBody tr')).map(r=>({
+    day:r.querySelector('[name=day]').value, description:r.querySelector('[name=description]').value,
+    person_id:r.querySelector('[name=person_id]').value, category_id:r.querySelector('[name=category_id]').value,
+    amount:r.querySelector('[name=amount]').value, is_cash:r.querySelector('.cash-check')?.checked||false
+  }));
+}
+function sortTable() {
+  const tbody=document.getElementById('expenseBody');
+  const rows=Array.from(tbody.querySelectorAll('tr'));
+  if(rows.length<2) return;
+  const data=rows.map(tr=>({day:parseInt(tr.querySelector('[name=day]').value)||0,description:tr.querySelector('[name=description]').value,person_id:tr.querySelector('[name=person_id]').value,category_id:tr.querySelector('[name=category_id]').value,amount:tr.querySelector('[name=amount]').value,is_cash:tr.querySelector('.cash-check')?.checked||false}));
+  data.sort((a,b)=>a.day!==b.day?a.day-b.day:a.description.localeCompare(b.description,'de',{sensitivity:'base'}));
+  tbody.innerHTML=''; data.forEach(r=>addRow(r.day||'',r.description,r.person_id,r.category_id,r.amount,r.is_cash));
+}
+
+// ── Speichern ─────────────────────────────────────────────────────────────
+async function saveExpenses() {
+  const btn=document.getElementById('saveBtn');
+  btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin me-1"></i>Speichere...';
+  try {
+    const res=await fetch('/api/expenses/save',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({year:YEAR,month:MONTH,expenses:collectRows()})});
+    const data=await res.json();
+    if(data.success){
+      sortTable(); currentOvSettlements=data.ov_settlements||{}; currentSettlement=data.settlement;
+      renderOverview(data.ov_p,data.ov_c,data.ov_settlements,isSettled);
+      renderWallet(data.wallet); renderSettlement(data.settlement);
+      showToast('Ausgaben gespeichert!','success');
+    } else showToast('Fehler','danger');
+  } catch(e){showToast('Fehler: '+e.message,'danger');}
+  btn.disabled=false; btn.innerHTML='<i class="fas fa-save me-1"></i>Speichern';
+}
+
+// ── Abrechnung beglichen ──────────────────────────────────────────────────
+async function toggleSettle(checked) {
+  const cb=document.getElementById('settleCheck');
+  cb.disabled=true;
+  try {
+    const res=await fetch('/api/month/settle',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({year:YEAR,month:MONTH,settled:checked})});
+    const data=await res.json();
+    if(data.success){
+      isSettled=data.settled;
+      currentOvSettlements=data.ov_settlements||{};
+      currentSettlement=data.settlement;
+      // Update heading badge
+      const h=document.querySelector('h2.fw-bold');
+      if(h){
+        let badge=h.querySelector('.badge');
+        if(data.settled){if(!badge){badge=document.createElement('span');badge.className='badge bg-success fs-6 ms-2';badge.style.verticalAlign='middle';h.appendChild(badge);}badge.innerHTML='<i class="fas fa-check me-1"></i>Beglichen';}
+        else if(badge) badge.remove();
+      }
+      // Update settle label
+      const lbl=document.querySelector('.settle-check-label');
+      if(lbl){
+        lbl.style.color=data.settled?'#198754':'';
+        lbl.innerHTML=`<i class="fas ${data.settled?'fa-check-circle text-success':'fa-circle-dot text-warning'} me-1"></i>Abrechnung beglichen`;
+      }
+      renderOverview(data.ov_p,data.ov_c,data.ov_settlements,data.settled);
+      renderSettlement(data.settlement);
+      showToast(data.settled?'✓ Abrechnung als beglichen markiert!':'Abrechnung wieder geöffnet.',data.settled?'success':'warning');
+    }
+  } catch(e){showToast('Fehler: '+e.message,'danger');}
+  cb.disabled=false;
+}
+
+// ── Render: Monatsübersicht ───────────────────────────────────────────────
+function renderOverview(ovp, ovc, ovs, settled) {
+  const card=document.getElementById('overviewBody');
+  ovs=ovs||{}; settled=settled||false;
+  if(!ovp||!Object.keys(ovp).length){card.innerHTML='<p class="text-muted text-center py-4 mb-0">Keine Ausgaben vorhanden.</p>';return;}
+  const persons=Object.keys(ovp).sort();
+  const pTotals={},cTotals={}; let grand=0;
+  persons.forEach(p=>{pTotals[p]=Object.values(ovp[p]).reduce((a,b)=>a+b,0);grand+=pTotals[p];});
+  ovc.forEach(([cn])=>{cTotals[cn]=persons.reduce((a,p)=>a+(ovp[p][cn]||0),0);});
+  let html='<div class="table-responsive"><table class="table table-bordered table-sm overview-table mb-0">';
+  html+='<thead class="table-secondary"><tr><th>Kategorie</th>';
+  persons.forEach(p=>html+=`<th class="text-end">${p}</th>`);
+  html+='<th class="text-end fw-bold">Gesamt</th></tr></thead><tbody>';
+  ovc.forEach(([cn,col])=>{
+    if(!cTotals[cn]) return;
+    const isSplit=!!ovs[cn];
+    html+=`<tr><td><span class="badge rounded-pill me-1" style="background:${col}">&#8203;</span>${cn}`;
+    if(isSplit) html+=` <i class="fas fa-scale-balanced ms-1 text-warning" style="font-size:.7em"></i>`;
+    html+=`</td>`;
+    persons.forEach(p=>{const v=ovp[p][cn]; html+=`<td class="text-end">${v?fmt(v):'<span class="text-muted">—</span>'}</td>`;});
+    html+=`<td class="text-end fw-bold">${fmt(cTotals[cn])}</td></tr>`;
+    // Settlement sub-row
+    if(isSplit){
+      const rowCls=settled?'settlement-settled-row':'settlement-sub-row';
+      html+=`<tr class="${rowCls}"><td>`;
+      html+=settled?'<i class="fas fa-check-circle me-1 text-success"></i><em>✓ Angerechnet</em>':'<i class="fas fa-scale-balanced me-1 text-warning" style="font-size:.8em"></i><em>⟵ Ausgleich</em>';
+      html+=`</td>`;
+      persons.forEach(p=>{
+        if(settled){
+          const sv=(ovs[cn]||{})[p]||0, adj=-sv;
+          const cls=adj<-0.005?'text-success':adj>0.005?'text-warning':'text-muted';
+          const ico=adj<-0.005?'<i class="fas fa-minus me-1" style="font-size:.7em"></i>':adj>0.005?'<i class="fas fa-plus me-1" style="font-size:.7em"></i>':'';
+          const val=adj<-0.005?fmt(adj):adj>0.005?`+${fmt(adj)}`:'—';
+          html+=`<td class="text-end small fw-semibold ${cls}">${ico}${val}</td>`;return;
+        }
+        const sv=(ovs[cn]||{})[p]||0;
+        const cls=sv>0.005?'text-success':sv<-0.005?'text-warning':'text-muted';
+        const ico=sv>0.005?'<i class="fas fa-arrow-down me-1" style="font-size:.7em"></i>':'<i class="fas fa-arrow-up me-1" style="font-size:.7em"></i>';
+        const val=sv>0.005?`+${fmt(sv)}`:sv<-0.005?fmt(sv):'—';
+        html+=`<td class="text-end small fw-semibold ${cls}">${Math.abs(sv)>0.005?ico:''}${val}</td>`;
+      });
+      html+=`<td class="text-end text-muted small">${settled?'✓':'±0'}</td></tr>`;
+    }
+  });
+  html+='</tbody><tfoot class="table-dark fw-bold"><tr><td>Gesamt</td>';
+  persons.forEach(p=>html+=`<td class="text-end">${fmt(pTotals[p])}</td>`);
+  html+=`<td class="text-end">${fmt(grand)}</td></tr></tfoot></table></div>`;
+  if(Object.keys(ovs).length && !settled)
+    html+=`<div class="px-3 py-2 bg-light border-top text-muted" style="font-size:.8rem"><i class="fas fa-circle-info me-1"></i><span class="text-success fw-semibold">+ Betrag</span> = erhält Geld zurück &nbsp;|&nbsp; <span class="text-warning fw-semibold">− Betrag</span> = zahlt Ausgleich &nbsp;|&nbsp; Checkbox aktivieren wenn alles beglichen.</div>`;
+  card.innerHTML=html;
+}
+
+// ── Render: Geldbeutel ────────────────────────────────────────────────────
+function renderWallet(wallet) {
+  const card=document.getElementById('walletBody');
+  if(!wallet||!wallet.length){card.innerHTML='<p class="text-muted text-center py-4 mb-0"><i class="fas fa-info-circle me-1"></i>Kein Geldbeutel konfiguriert. <a href="/settings">→ Personen einrichten</a></p>';return;}
+  let html='<div class="table-responsive"><table class="table table-sm table-hover mb-0"><thead class="table-secondary"><tr><th>Person</th><th class="text-end">Anfang</th><th class="text-end text-danger">Barausgaben</th><th class="text-end">Ende</th></tr></thead><tbody>';
+  wallet.forEach(w=>{const ec=w.end_balance>=0?'text-success':'text-danger';const cs=w.cash_expenses>0?`–${fmt(w.cash_expenses)}`:'<span class="text-muted">—</span>';html+=`<tr><td><i class="fas fa-user me-2 text-muted"></i><strong>${w.name}</strong></td><td class="text-end">${fmt(w.start_balance)}</td><td class="text-end text-danger">${cs}</td><td class="text-end fw-bold ${ec}">${fmt(w.end_balance)}</td></tr>`;});
+  html+='</tbody></table></div><div class="px-3 py-2 text-muted small border-top bg-light rounded-bottom"><i class="fas fa-info-circle me-1"></i>Endbetrag wird Startwert des Folgemonats.</div>';
+  card.innerHTML=html;
+}
+
+// ── Render: Abrechnung ────────────────────────────────────────────────────
+function renderSettlement(s) {
+  const card=document.getElementById('settlementBody');
+  const hdr=card.closest('.card');
+  if(!s){card.innerHTML='<p class="text-muted text-center py-4 mb-0">Keine Split-Kategorien. <a href="/settings">→ Einstellungen</a></p>';return;}
+  if(s.is_settled){
+    hdr.className=hdr.className.replace('border-warning','border-success');
+    const ch=hdr.querySelector('.card-header'); if(ch) ch.style.background='#f0fff4';
+    const h5=hdr.querySelector('h5'); if(h5) h5.innerHTML='<i class="fas fa-check-circle text-success me-2"></i>Abrechnung – Beglichen ✓';
+    card.innerHTML=`<div class="text-center py-4 px-3"><div class="text-success mb-2" style="font-size:2.5rem"><i class="fas fa-circle-check"></i></div><div class="fw-bold text-success fs-5 mb-1">Alle Schulden beglichen</div><div class="text-muted small">Abgerechnet am ${s.settled_at||'–'}</div><div class="mt-3 text-muted small"><i class="fas fa-undo me-1"></i>Checkbox deaktivieren um die Abrechnung wieder zu öffnen.</div></div>`;
+    return;
+  }
+  hdr.className=hdr.className.replace('border-success','border-warning');
+  const ch=hdr.querySelector('.card-header'); if(ch) ch.style.background='#fff8e1';
+  const h5=hdr.querySelector('h5'); if(h5) h5.innerHTML='<i class="fas fa-scale-balanced text-warning me-2"></i>Abrechnung – Wer schuldet wem?';
+  if(!s.cat_details?.length){card.innerHTML='<p class="text-success text-center py-4 mb-0"><i class="fas fa-check-circle me-1"></i>Keine gesplitteten Ausgaben.</p>';return;}
+  if(!s.transactions.length){card.innerHTML='<p class="text-success text-center py-4 mb-0"><i class="fas fa-check-circle me-1"></i>Alles ausgeglichen!</p>';return;}
+  let html='<div class="p-3 d-flex flex-wrap gap-2">';
+  s.transactions.forEach(t=>{html+=`<div class="d-flex align-items-center gap-2 bg-warning bg-opacity-10 border border-warning rounded px-3 py-2 flex-grow-1"><i class="fas fa-arrow-right text-warning"></i><span><strong>${t.from}</strong> schuldet <strong>${t.to}</strong></span><span class="ms-auto fw-bold text-warning fs-5">${fmt(t.amount)}</span></div>`;});
+  html+='</div><div class="px-3 pb-3 text-muted small"><i class="fas fa-circle-info me-1"></i>Details je Kategorie in der Monatsübersicht (⚖️-Zeilen). Checkbox aktivieren wenn beglichen.</div>';
+  card.innerHTML=html;
+}
+
+
+// ── Einnahmen-Tabelle ─────────────────────────────────────────────────────────
+function addIncomeRow(day='', desc='', pid='', amt='') {
+  const em = document.getElementById('incomeEmptyMsg'); if(em) em.remove();
+  const tr = document.createElement('tr');
+  let pOpts = '<option value="">—</option>';
+  PERSONS.forEach(p => { pOpts += `<option value="${p.id}"${p.id==pid?' selected':''}>${p.name}</option>`; });
+  tr.innerHTML = `
+    <td><input type="number" class="form-control form-control-sm text-center" name="inc_day" value="${day}" min="1" max="31" placeholder="TT"></td>
+    <td><input type="text" class="form-control form-control-sm" name="inc_desc" value="${desc}" placeholder="z.B. Gehalt…"></td>
+    <td><select class="form-select form-select-sm" name="inc_pid">${pOpts}</select></td>
+    <td><input type="number" class="form-control form-control-sm text-end" name="inc_amt" value="${amt}" step="0.01" min="0" placeholder="0,00" oninput="updateIncomeFooter()"></td>
+    <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('tr').remove();updateIncomeFooter()"><i class="fas fa-times"></i></button></td>`;
+  document.getElementById('incomeBody').appendChild(tr);
+  updateIncomeFooter();
+  tr.querySelector('[name=inc_day]').focus();
+}
+
+function updateIncomeFooter() {
+  const rows = document.querySelectorAll('#incomeBody tr');
+  let t = 0;
+  rows.forEach(r => { const v = parseFloat(r.querySelector('[name=inc_amt]')?.value||0); if(!isNaN(v)) t += v; });
+  document.getElementById('incomeCount').textContent = rows.length;
+  document.getElementById('incomeTotalSum').textContent = fmt(t);
+}
+
+async function saveIncome() {
+  const btn = document.getElementById('saveIncomeBtn');
+  btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Speichere...';
+  const rows = Array.from(document.querySelectorAll('#incomeBody tr')).map(r => ({
+    day: r.querySelector('[name=inc_day]').value,
+    description: r.querySelector('[name=inc_desc]').value,
+    person_id: r.querySelector('[name=inc_pid]').value,
+    amount: r.querySelector('[name=inc_amt]').value
+  }));
+  try {
+    const res = await fetch('/api/income/save', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({year:YEAR, month:MONTH, income:rows})});
+    const data = await res.json();
+    if(data.success) {
+      updateSavingsBar(data.income_total, data.expense_total, data.savings);
+      showToast('Einnahmen gespeichert!', 'success');
+    }
+  } catch(e) { showToast('Fehler: ' + e.message, 'danger'); }
+  btn.disabled = false; btn.innerHTML = '<i class="fas fa-save me-1"></i>Speichern';
+}
+
+function updateSavingsBar(inc, exp, sav) {
+  const bar = document.getElementById('savingsBar'); if(!bar) return;
+  const incEl = bar.querySelector('.text-success strong');
+  const expEl = bar.querySelector('.text-danger strong');
+  const savEl = document.getElementById('savingsAmt');
+  if(incEl) incEl.textContent = '+' + fmt(inc);
+  if(expEl) expEl.textContent = fmt(exp);
+  if(savEl) { savEl.textContent = (sav>=0?'+':'') + fmt(sav); savEl.className = sav>=0?'text-success':'text-danger'; }
+}
+
+async function insertRecurring() {
+  const btn = document.getElementById('recurBtn'); btn.disabled = true;
+  try {
+    const res = await fetch(`/api/recurring/for-month/${YEAR}/${MONTH}`);
+    const data = await res.json();
+    if(data.recurring && data.recurring.length) {
+      data.recurring.forEach(r => addRow(r.day, r.description, r.person_id, r.category_id, r.amount, false));
+      showToast(`${data.recurring.length} wiederkehrende Ausgabe(n) eingefügt – Speichern nicht vergessen!`, 'success');
+    } else { showToast('Keine wiederkehrenden Ausgaben für diesen Monat.', 'warning'); }
+  } catch(e) { showToast('Fehler: ' + e.message, 'danger'); }
+  btn.disabled = false;
+}
+
+
+// ── Tabelle leeren ────────────────────────────────────────────────────────────
+function clearTable(bodyId, isExpense) {
+  const tbody = document.getElementById(bodyId);
+  if (!tbody || !tbody.querySelectorAll('tr').length) return;
+  if (!confirm('Alle Zeilen löschen? (Noch nicht gespeicherte Änderungen gehen verloren)')) return;
+  tbody.innerHTML = '';
+  if (isExpense) { updateFooter(); }
+  else           { updateIncomeFooter(); }
+}
+
+// ── Init + Tab-Listener ───────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  if(EXISTING.length>0){EXISTING.forEach(e=>addRow(e.day,e.description,e.person_id,e.category_id,e.amount,!!e.is_cash));}
+  else addRow();
+  // Load income rows from server
+  if(typeof INCOME_INIT !== 'undefined' && INCOME_INIT.length > 0){
+    INCOME_INIT.forEach(i => addIncomeRow(i.day, i.description, i.person_id, i.amount));
+  }
+  document.getElementById('expenseBody').addEventListener('keydown',function(e){
+    if(e.key!=='Tab'||e.shiftKey) return;
+    const rows=this.querySelectorAll('tr'); if(!rows.length) return;
+    const lastRow=rows[rows.length-1]; if(e.target.closest('tr')!==lastRow) return;
+    const inputs=Array.from(lastRow.querySelectorAll('input[name=day],input[name=description],select[name=person_id],select[name=category_id],input[name=amount],input.cash-check'));
+    if(e.target===inputs[inputs.length-1]||e.target===inputs[inputs.length-2]){e.preventDefault();addRow();}
+  });
+});
+</script>
+{% endblock %}
