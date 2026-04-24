@@ -73,7 +73,7 @@ Eine einfache, selbst gehostete Haushalts-App für Paare und WGs – gebaut mit 
 ### Mit Docker (empfohlen)
 
 ```bash
-git clone https://github.com/yourname/kassenstuerzle.git
+git clone https://github.com/derfips/kassenstuerzle.git
 cd kassenstuerzle
 docker compose up -d
 ```
