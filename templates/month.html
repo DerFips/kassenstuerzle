@@ -1,4 +1,12 @@
 {% extends 'base.html' %}
+{% block styles %}
+<style>
+.settlement-header.settlement-settled { background: #f0fff4 !important; }
+.settlement-header.settlement-pending { background: #fff8e1 !important; }
+[data-bs-theme="dark"] .settlement-header.settlement-settled { background: #0d2e1a !important; }
+[data-bs-theme="dark"] .settlement-header.settlement-pending { background: #2e2800 !important; }
+</style>
+{% endblock %}
 {% block content %}
 
 <div class="d-flex align-items-center justify-content-between mb-4">
@@ -30,8 +38,9 @@
         <tr>
           <th style="width:70px">Tag</th>
           <th>Beschreibung</th>
-          <th style="width:150px">Wer</th>
-          <th style="width:175px">Kategorie</th>
+          <th style="width:130px">Wer</th>
+          <th style="width:120px" title="Vollständig für diese Person bezahlt">Für wen</th>
+          <th style="width:190px">Kategorie</th>
           <th style="width:120px" class="text-end">Betrag (€)</th>
           <th style="width:60px" class="text-center" title="Barzahlung"><i class="fas fa-money-bill-wave text-success"></i></th>
           <th style="width:40px"></th>
@@ -66,6 +75,7 @@
         <tr>
           <th style="width:70px">Tag</th><th>Beschreibung</th>
           <th style="width:160px">Von wem</th>
+          <th style="width:160px">Kategorie</th>
           <th style="width:130px" class="text-end">Betrag (€)</th><th style="width:40px"></th>
         </tr>
       </thead>
@@ -124,7 +134,7 @@
               {% if cn in ov_settlements %}<i class="fas fa-scale-balanced ms-1 text-warning" style="font-size:.7em"></i>{% endif %}
             </td>
             {% for pn in ps %}{% set cv = ov_p[pn].get(cn,0) %}{% set rt.v = rt.v+cv %}
-              <td class="text-end">{% if cv %}{{ "%.2f"|format(cv)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>
+              <td class="text-end">{% if cv > 0 %}{{ "%.2f"|format(cv)|replace(".",",") }} €{% elif cv < 0 %}<span class="text-success"><i class="fas fa-arrow-down me-1" style="font-size:.7em"></i>{{ "%.2f"|format(cv*-1)|replace(".",",") }} €</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
             {% endfor %}
             <td class="text-end fw-bold">{{ "%.2f"|format(rt.v)|replace(".",",") }} €</td>
           </tr>
@@ -245,7 +255,7 @@
 
 <!-- ④ Abrechnung ────────────────────────────────────────────────────────── -->
 <div class="card shadow-sm {% if is_settled %}border-success{% else %}border-warning{% endif %}">
-  <div class="card-header py-3" style="background:{% if is_settled %}#f0fff4{% else %}#fff8e1{% endif %}">
+  <div class="card-header py-3 settlement-header {% if is_settled %}settlement-settled{% else %}settlement-pending{% endif %}">
     <h5 class="mb-0">
       <i class="fas {% if is_settled %}fa-check-circle text-success{% else %}fa-scale-balanced text-warning{% endif %} me-2"></i>
       Abrechnung – {% if is_settled %}Beglichen ✓{% else %}Wer schuldet wem?{% endif %}
@@ -309,12 +319,13 @@ function buildCatOpts(sel) {
   CATS.forEach(x=>{s+=`<option value="${x.id}"${x.id==sel?' selected':''}>${x.name}${x.is_split?' ⚖️':''}</option>`;});
   return s;
 }
-function addRow(day='',desc='',pid='',cid='',amt='',isCash=false) {
+function addRow(day='',desc='',pid='',cid='',amt='',isCash=false,pfpid='') {
   const tr=document.createElement('tr');
   tr.innerHTML=`
     <td><input type="number" class="form-control form-control-sm text-center" name="day" value="${day}" min="1" max="31" placeholder="TT"></td>
     <td><input type="text" class="form-control form-control-sm" name="description" value="${desc}" placeholder="Beschreibung..."></td>
     <td><select class="form-select form-select-sm" name="person_id">${buildPersonOpts(pid)}</select></td>
+    <td><select class="form-select form-select-sm" name="paid_for_person_id" title="Vollständig für diese Person bezahlt" onchange="updatePaidForStyle(this)">${buildPersonOpts(pfpid)}</select></td>
     <td><select class="form-select form-select-sm cat-select" name="category_id" onchange="updateRowColor(this)">${buildCatOpts(cid)}</select></td>
     <td><input type="number" class="form-control form-control-sm text-end" name="amount" value="${amt}" step="0.01" min="0" placeholder="0,00" oninput="updateFooter()"></td>
     <td class="text-center align-middle"><div class="form-check d-flex justify-content-center mb-0"><input class="form-check-input cash-check" type="checkbox" name="is_cash" title="Barzahlung" ${isCash?'checked':''} onchange="updateFooter()"></div></td>
@@ -323,6 +334,27 @@ function addRow(day='',desc='',pid='',cid='',amt='',isCash=false) {
   const s=tr.querySelector('.cat-select'); if(cid) s.value=cid; updateRowColor(s); updateFooter();
   tr.querySelector('[name=day]').focus();
 }
+function updatePaidForStyle(sel) {
+  const tr = sel.closest('tr');
+  if (sel.value) {
+    tr.classList.add('paid-for-row');
+    tr.querySelector('[name=category_id]')?.setAttribute('disabled','');
+    tr.querySelector('[name=category_id]')?.removeAttribute('disabled'); // keep enabled
+  } else {
+    tr.classList.remove('paid-for-row');
+  }
+}
+
+function updatePaidForStyle(sel) {
+  const tr = sel.closest('tr');
+  if (!tr) return;
+  if (sel.value) {
+    tr.classList.add('paid-for-row');
+  } else {
+    tr.classList.remove('paid-for-row');
+  }
+}
+
 function updateRowColor(sel) {
   const cat=CATS.find(c=>c.id==sel.value);
   sel.closest('tr').style.borderLeft=cat?`4px solid ${cat.color}`:'4px solid transparent';
@@ -338,7 +370,9 @@ function updateFooter() {
 function collectRows() {
   return Array.from(document.querySelectorAll('#expenseBody tr')).map(r=>({
     day:r.querySelector('[name=day]').value, description:r.querySelector('[name=description]').value,
-    person_id:r.querySelector('[name=person_id]').value, category_id:r.querySelector('[name=category_id]').value,
+    person_id:r.querySelector('[name=person_id]').value,
+    paid_for_person_id:r.querySelector('[name=paid_for_person_id]')?.value||'',
+    category_id:r.querySelector('[name=category_id]').value,
     amount:r.querySelector('[name=amount]').value, is_cash:r.querySelector('.cash-check')?.checked||false
   }));
 }
@@ -421,8 +455,8 @@ function renderOverview(ovp, ovc, ovs, settled) {
     html+=`<tr><td><span class="badge rounded-pill me-1" style="background:${col}">&#8203;</span>${cn}`;
     if(isSplit) html+=` <i class="fas fa-scale-balanced ms-1 text-warning" style="font-size:.7em"></i>`;
     html+=`</td>`;
-    persons.forEach(p=>{const v=ovp[p][cn]; html+=`<td class="text-end">${v?fmt(v):'<span class="text-muted">—</span>'}</td>`;});
-    html+=`<td class="text-end fw-bold">${fmt(cTotals[cn])}</td></tr>`;
+    persons.forEach(p=>{const v=ovp[p]?.[cn]||0; const cell=v>0?fmt(v):v<0?`<span class="text-success"><i class="fas fa-arrow-down me-1" style="font-size:.7em"></i>${fmt(-v)}</span>`:'<span class="text-muted">—</span>'; html+=`<td class="text-end">${cell}</td>`;});
+    const ct=cTotals[cn]; const ctCell=ct>0?`<strong>${fmt(ct)}</strong>`:ct<0?`<span class="text-success fw-bold"><i class="fas fa-arrow-down me-1" style="font-size:.7em"></i>${fmt(-ct)}</span>`:`<span class="text-muted">—</span>`; html+=`<td class="text-end">${ctCell}</td></tr>`;
     // Settlement sub-row
     if(isSplit){
       const rowCls=settled?'settlement-settled-row':'settlement-sub-row';
@@ -471,33 +505,114 @@ function renderSettlement(s) {
   if(!s){card.innerHTML='<p class="text-muted text-center py-4 mb-0">Keine Split-Kategorien. <a href="/settings">→ Einstellungen</a></p>';return;}
   if(s.is_settled){
     hdr.className=hdr.className.replace('border-warning','border-success');
-    const ch=hdr.querySelector('.card-header'); if(ch) ch.style.background='#f0fff4';
+    const ch=hdr.querySelector('.card-header'); if(ch){ch.classList.remove('settlement-pending');ch.classList.add('settlement-header','settlement-settled');}
     const h5=hdr.querySelector('h5'); if(h5) h5.innerHTML='<i class="fas fa-check-circle text-success me-2"></i>Abrechnung – Beglichen ✓';
     card.innerHTML=`<div class="text-center py-4 px-3"><div class="text-success mb-2" style="font-size:2.5rem"><i class="fas fa-circle-check"></i></div><div class="fw-bold text-success fs-5 mb-1">Alle Schulden beglichen</div><div class="text-muted small">Abgerechnet am ${s.settled_at||'–'}</div><div class="mt-3 text-muted small"><i class="fas fa-undo me-1"></i>Checkbox deaktivieren um die Abrechnung wieder zu öffnen.</div></div>`;
     return;
   }
   hdr.className=hdr.className.replace('border-success','border-warning');
-  const ch=hdr.querySelector('.card-header'); if(ch) ch.style.background='#fff8e1';
+  const ch=hdr.querySelector('.card-header'); if(ch){ch.classList.remove('settlement-settled');ch.classList.add('settlement-header','settlement-pending');}
   const h5=hdr.querySelector('h5'); if(h5) h5.innerHTML='<i class="fas fa-scale-balanced text-warning me-2"></i>Abrechnung – Wer schuldet wem?';
-  if(!s.cat_details?.length){card.innerHTML='<p class="text-success text-center py-4 mb-0"><i class="fas fa-check-circle me-1"></i>Keine gesplitteten Ausgaben.</p>';return;}
-  if(!s.transactions.length){card.innerHTML='<p class="text-success text-center py-4 mb-0"><i class="fas fa-check-circle me-1"></i>Alles ausgeglichen!</p>';return;}
-  let html='<div class="p-3 d-flex flex-wrap gap-2">';
-  s.transactions.forEach(t=>{html+=`<div class="d-flex align-items-center gap-2 bg-warning bg-opacity-10 border border-warning rounded px-3 py-2 flex-grow-1"><i class="fas fa-arrow-right text-warning"></i><span><strong>${t.from}</strong> schuldet <strong>${t.to}</strong></span><span class="ms-auto fw-bold text-warning fs-5">${fmt(t.amount)}</span></div>`;});
-  html+='</div><div class="px-3 pb-3 text-muted small"><i class="fas fa-circle-info me-1"></i>Details je Kategorie in der Monatsübersicht (⚖️-Zeilen). Checkbox aktivieren wenn beglichen.</div>';
-  card.innerHTML=html;
+  if(!s.cat_details?.length && !s.paid_for_items?.length){card.innerHTML='<p class="text-success text-center py-4 mb-0"><i class="fas fa-check-circle me-1"></i>Keine gesplitteten Buchungen.</p>';return;}
+  let html = '';
+
+  // ── Kategorie-Übersicht: wer hat was bezahlt ─────────────────────────────
+  if (s.cat_details && s.cat_details.length > 0) {
+    html += '<div class="px-3 pt-3 pb-1"><small class="text-muted text-uppercase fw-semibold" style="letter-spacing:.05em"><i class="fas fa-scale-balanced me-1"></i>Geteilte Kategorien</small></div>';
+    html += '<div class="px-3 pb-2">';
+    s.cat_details.forEach(cat => {
+      const expEntries = Object.entries(cat.expenses_by||{});
+      const incEntries = Object.entries(cat.income_by||{});
+      const expTotal = expEntries.reduce((s,[,v])=>s+v,0);
+      const incTotal = incEntries.reduce((s,[,v])=>s+v,0);
+      const netTotal = expTotal - incTotal;
+      const fairShare = netTotal / s.persons.length;
+      html += `<div class="border rounded p-2 mb-2">`;
+      html += `<div class="d-flex align-items-center mb-1">
+        <span class="badge rounded-pill me-2" style="background:${cat.color||'#6c757d'}">&ZeroWidthSpace;</span>
+        <span class="fw-semibold small">${cat.name}</span>
+        <span class="ms-auto small text-muted">Netto: <strong>${fmt(netTotal)}</strong> · ∅ ${fmt(fairShare)}</span>
+      </div>`;
+      if (expEntries.length > 0) {
+        html += `<div class="small text-muted ms-1 mb-1"><i class="fas fa-arrow-up text-danger me-1" style="font-size:.7em"></i>Ausgaben: `;
+        html += expEntries.map(([pn,v])=>`<strong>${pn}</strong> ${fmt(v)}`).join(' · ');
+        html += `</div>`;
+      }
+      if (incEntries.length > 0) {
+        html += `<div class="small text-muted ms-1"><i class="fas fa-arrow-down text-success me-1" style="font-size:.7em"></i>Einnahmen: `;
+        html += incEntries.map(([pn,v])=>`<strong>${pn}</strong> ${fmt(v)}`).join(' · ');
+        html += `</div>`;
+      }
+      html += `</div>`;
+    });
+    html += '</div><hr class="mx-3 my-1">';
+  }
+
+  // ── Bezahlt für ──────────────────────────────────────────────────────────
+  const pfItems = s.paid_for_items || [];
+  if (pfItems.length > 0) {
+    html += '<div class="px-3 pb-1"><small class="text-muted text-uppercase fw-semibold" style="letter-spacing:.05em"><i class="fas fa-right-left me-1"></i>Bezahlt für</small></div>';
+    html += '<div class="px-3 pb-2 d-flex flex-wrap gap-2">';
+    pfItems.forEach(p => {
+      html += `<div class="d-flex align-items-center gap-2 bg-info bg-opacity-10 border border-info rounded px-3 py-2 flex-grow-1">
+        <i class="fas fa-user-group text-info"></i>
+        <span><strong>${p.payer}</strong> hat für <strong>${p.payee}</strong> bezahlt${p.description ? ': <em>'+p.description+'</em>' : ''}</span>
+        <span class="ms-auto fw-bold text-info">${fmt(p.amount)}</span>
+      </div>`;
+    });
+    html += '</div><hr class="mx-3 my-1">';
+  }
+
+  // ── Gezahlt / Fairer Anteil ───────────────────────────────────────────────
+  html += '<div class="px-3 pb-2">';
+  html += '<small class="text-muted text-uppercase fw-semibold" style="letter-spacing:.05em"><i class="fas fa-user me-1"></i>Übersicht</small>';
+  html += '<div class="d-flex flex-wrap gap-2 mt-1">';
+  s.persons.forEach(p => {
+    const paid = s.paid[p] || 0;
+    const bal  = s.balances[p] || 0;
+    const cls  = bal > 0.005 ? 'success' : bal < -0.005 ? 'danger' : 'secondary';
+    const icon = bal > 0.005 ? 'fa-arrow-up' : bal < -0.005 ? 'fa-arrow-down' : 'fa-minus';
+    html += `<div class="d-flex align-items-center gap-2 border rounded px-3 py-2 flex-grow-1">
+      <i class="fas fa-user text-muted"></i>
+      <div>
+        <div class="fw-semibold">${p}</div>
+        <div class="small text-muted">Netto: ${fmt(paid)} · ∅ ${fmt(s.fair_share)}</div>
+      </div>
+      <span class="ms-auto badge bg-${cls}"><i class="fas ${icon} me-1"></i>${fmt(Math.abs(bal))}</span>
+    </div>`;
+  });
+  html += '</div></div>';
+
+  // ── Ausgleichsüberweisungen ───────────────────────────────────────────────
+  if (s.transactions && s.transactions.length > 0) {
+    html += '<hr class="mx-3 my-1">';
+    html += '<div class="p-3 d-flex flex-wrap gap-2">';
+    s.transactions.forEach(t => {
+      html += `<div class="d-flex align-items-center gap-2 bg-warning bg-opacity-10 border border-warning rounded px-3 py-2 flex-grow-1"><i class="fas fa-arrow-right text-warning"></i><span><strong>${t.from}</strong> schuldet <strong>${t.to}</strong></span><span class="ms-auto fw-bold text-warning fs-5">${fmt(t.amount)}</span></div>`;
+    });
+    html += '</div>';
+  } else {
+    html += '<p class="text-success text-center py-2 mb-0"><i class="fas fa-check-circle me-1"></i>Alles ausgeglichen!</p>';
+  }
+
+  html += '<div class="px-3 pb-3 text-muted small"><i class="fas fa-circle-info me-1"></i>Checkbox aktivieren wenn Ausgleich beglichen.</div>';
+  card.innerHTML = html;
 }
 
 
 // ── Einnahmen-Tabelle ─────────────────────────────────────────────────────────
-function addIncomeRow(day='', desc='', pid='', amt='') {
+function addIncomeRow(day='', desc='', pid='', cid='', amt='') {
   const em = document.getElementById('incomeEmptyMsg'); if(em) em.remove();
   const tr = document.createElement('tr');
   let pOpts = '<option value="">—</option>';
   PERSONS.forEach(p => { pOpts += `<option value="${p.id}"${p.id==pid?' selected':''}>${p.name}</option>`; });
+  let cOpts = '<option value="">— keine —</option>';
+  CATS.forEach(c => { cOpts += `<option value="${c.id}"${c.id==cid?' selected':''}>${c.name}</option>`; });
   tr.innerHTML = `
     <td><input type="number" class="form-control form-control-sm text-center" name="inc_day" value="${day}" min="1" max="31" placeholder="TT"></td>
     <td><input type="text" class="form-control form-control-sm" name="inc_desc" value="${desc}" placeholder="z.B. Gehalt…"></td>
     <td><select class="form-select form-select-sm" name="inc_pid">${pOpts}</select></td>
+    <td><select class="form-select form-select-sm" name="inc_cid">${cOpts}</select></td>
     <td><input type="number" class="form-control form-control-sm text-end" name="inc_amt" value="${amt}" step="0.01" min="0" placeholder="0,00" oninput="updateIncomeFooter()"></td>
     <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('tr').remove();updateIncomeFooter()"><i class="fas fa-times"></i></button></td>`;
   document.getElementById('incomeBody').appendChild(tr);
@@ -520,6 +635,7 @@ async function saveIncome() {
     day: r.querySelector('[name=inc_day]').value,
     description: r.querySelector('[name=inc_desc]').value,
     person_id: r.querySelector('[name=inc_pid]').value,
+    category_id: r.querySelector('[name=inc_cid]').value,
     amount: r.querySelector('[name=inc_amt]').value
   }));
   try {
@@ -570,11 +686,12 @@ function clearTable(bodyId, isExpense) {
 
 // ── Init + Tab-Listener ───────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  if(EXISTING.length>0){EXISTING.forEach(e=>addRow(e.day,e.description,e.person_id,e.category_id,e.amount,!!e.is_cash));}
+  if(EXISTING.length>0){EXISTING.forEach(e=>{ addRow(e.day,e.description,e.person_id,e.category_id,e.amount,!!e.is_cash,e.paid_for_person_id||''); });
+  document.querySelectorAll('[name=paid_for_person_id]').forEach(s=>updatePaidForStyle(s));}
   else addRow();
   // Load income rows from server
   if(typeof INCOME_INIT !== 'undefined' && INCOME_INIT.length > 0){
-    INCOME_INIT.forEach(i => addIncomeRow(i.day, i.description, i.person_id, i.amount));
+    INCOME_INIT.forEach(i => addIncomeRow(i.day, i.description, i.person_id, i.category_id||'', i.amount));
   }
   document.getElementById('expenseBody').addEventListener('keydown',function(e){
     if(e.key!=='Tab'||e.shiftKey) return;

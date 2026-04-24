@@ -1,0 +1,270 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2 class="fw-bold mb-4"><i class="fas fa-file-pdf me-2 text-danger"></i>Kontoauszug importieren (PDF)</h2>
+
+<div class="row g-4">
+
+  <!-- ── Step 1: Upload ── -->
+  <div class="col-12" id="step1">
+    <div class="card shadow-sm">
+      <div class="card-header py-3">
+        <h5 class="mb-0"><i class="fas fa-upload me-2 text-primary"></i>1. PDF-Datei hochladen</h5>
+      </div>
+      <div class="card-body">
+        <p class="text-muted small mb-3">
+          Lade einen Kontoauszug als PDF hoch. Unterstützte Banken: DKB, ING, Sparkasse, Volksbank, Commerzbank, Postbank und viele weitere.
+        </p>
+        <div class="mb-3" style="max-width:480px">
+          <label class="form-label small fw-semibold">PDF-Datei auswählen</label>
+          <input type="file" class="form-control" id="pdfFile" accept=".pdf">
+        </div>
+        <div class="mb-3" style="max-width:480px">
+          <label class="form-label small fw-semibold">Konto gehört zu</label>
+          <select class="form-select" id="personSelect">
+            <option value="">— Person auswählen —</option>
+            {% for p in persons %}
+            <option value="{{ p.id }}">{{ p.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="parsePdf()" id="parseBtn">
+          <i class="fas fa-magnifying-glass me-2"></i>Analysieren
+        </button>
+        <div id="parseError" class="alert alert-danger mt-3 d-none"></div>
+
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ── Step 2: Preview ── -->
+  <div class="col-12 d-none" id="step2">
+    <div class="card shadow-sm">
+      <div class="card-header py-3 d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="fas fa-table-list me-2 text-success"></i>2. Vorschau &amp; Kontrolle</h5>
+        <div class="d-flex gap-2 align-items-center">
+          <span class="badge bg-success" id="incBadge">0 Einnahmen</span>
+          <span class="badge bg-danger"  id="expBadge">0 Ausgaben</span>
+          <span class="text-muted small" id="bankInfo"></span>
+        </div>
+      </div>
+      <div class="card-body p-0">
+        <!-- Filter bar -->
+        <div class="d-flex gap-3 align-items-center px-3 py-2 border-bottom flex-wrap" style="background:var(--bs-secondary-bg,#f8f9fa)">
+          <div class="form-check form-check-inline mb-0">
+            <input class="form-check-input" type="checkbox" id="filterIncome"  checked onchange="applyFilter()">
+            <label class="form-check-label small" for="filterIncome"><span class="text-success fw-semibold">Einnahmen</span></label>
+          </div>
+          <div class="form-check form-check-inline mb-0">
+            <input class="form-check-input" type="checkbox" id="filterExpense" checked onchange="applyFilter()">
+            <label class="form-check-label small" for="filterExpense"><span class="text-danger fw-semibold">Ausgaben</span></label>
+          </div>
+          <button class="btn btn-sm btn-outline-secondary ms-auto" onclick="toggleAll(true)">Alle wählen</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="toggleAll(false)">Alle abwählen</button>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm table-hover mb-0" id="previewTable">
+            <thead class="table-dark sticky-top">
+              <tr>
+                <th style="width:40px"><input type="checkbox" id="checkAll" checked onchange="toggleAll(this.checked)"></th>
+                <th style="width:100px">Datum</th>
+                <th style="width:110px">Typ</th>
+                <th>Empfänger / Auftraggeber</th>
+                <th style="width:130px" class="text-end">Betrag (€)</th>
+              </tr>
+            </thead>
+            <tbody id="previewBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card-footer d-flex justify-content-between align-items-center">
+        <button class="btn btn-outline-secondary" onclick="resetImport()">
+          <i class="fas fa-arrow-left me-1"></i>Zurück
+        </button>
+        <div class="d-flex gap-3 align-items-center">
+          <span class="text-muted small" id="selectedInfo"></span>
+          <button class="btn btn-success" onclick="commitImport()" id="commitBtn">
+            <i class="fas fa-file-import me-2"></i>Ausgewählte importieren
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Step 3: Done ── -->
+  <div class="col-12 d-none" id="step3">
+    <div class="card shadow-sm border-success">
+      <div class="card-body text-center py-5">
+        <i class="fas fa-circle-check fa-3x text-success mb-3"></i>
+        <h4 class="fw-bold">Import abgeschlossen!</h4>
+        <p class="text-muted" id="importSummary"></p>
+        <div class="d-flex gap-3 justify-content-center mt-3">
+          <button class="btn btn-outline-secondary" onclick="resetImport()">
+            <i class="fas fa-file-pdf me-1"></i>Weiteres PDF importieren
+          </button>
+          <a href="/" class="btn btn-primary">
+            <i class="fas fa-house me-1"></i>Zur Übersicht
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+let parsedData = null;
+
+async function parsePdf() {
+  const file = document.getElementById('pdfFile').files[0];
+  const pid  = document.getElementById('personSelect').value;
+  const errEl = document.getElementById('parseError');
+  errEl.classList.add('d-none');
+
+  if (!file) { showErr('Bitte PDF-Datei auswählen.'); return; }
+  if (!pid)  { showErr('Bitte Person auswählen.'); return; }
+
+  const btn = document.getElementById('parseBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Analysiere…';
+
+  const fd = new FormData();
+  fd.append('file', file);
+
+  try {
+    const res  = await fetch('/api/import/pdf/parse', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!data.success) { showErr(data.error || 'Unbekannter Fehler'); return; }
+    parsedData = data;
+    if (!data.transactions || data.transactions.length === 0) {
+      showErr('Keine Buchungen erkannt – bitte prüfe das PDF-Format.');
+      return;
+    }
+    renderPreview(data);
+    document.getElementById('step1').classList.add('d-none');
+    document.getElementById('step2').classList.remove('d-none');
+  } catch(e) {
+    showErr('Netzwerkfehler: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-magnifying-glass me-2"></i>Analysieren';
+  }
+}
+
+function showErr(msg) {
+  const el = document.getElementById('parseError');
+  el.textContent = msg;
+  el.classList.remove('d-none');
+}
+
+function renderPreview(data) {
+  const tbody = document.getElementById('previewBody');
+  tbody.innerHTML = '';
+  let inc = 0, exp = 0;
+
+  data.transactions.forEach((t, i) => {
+    t._idx = i;
+    t._include = true;
+    const tr = document.createElement('tr');
+    tr.dataset.idx      = i;
+    tr.dataset.isIncome = t.is_income ? '1' : '0';
+    tr.innerHTML = `
+      <td><input type="checkbox" class="row-check" data-idx="${i}" checked onchange="updateSelected()"></td>
+      <td class="small">${t.date}</td>
+      <td><span class="badge ${t.is_income ? 'bg-success' : 'bg-danger'}">${t.is_income ? 'Einnahme' : 'Ausgabe'}</span></td>
+      <td>
+        <input type="text" class="form-control form-control-sm" value="${escHtml(t.counterpart)}"
+          oninput="parsedData.transactions[${i}].counterpart=this.value" placeholder="—">
+      </td>
+      <td class="text-end fw-semibold ${t.is_income ? 'text-success' : 'text-danger'}">
+        ${fmtAmt(t.amount)}
+      </td>`;
+    tbody.appendChild(tr);
+    if (t.is_income) inc++; else exp++;
+  });
+
+  document.getElementById('incBadge').textContent  = inc + ' Einnahmen';
+  document.getElementById('expBadge').textContent  = exp + ' Ausgaben';
+  document.getElementById('bankInfo').textContent  =
+    (data.bank !== 'Unbekannt' ? data.bank + ' · ' : '') +
+    (data.holder ? data.holder + ' · ' : '') +
+    data.transactions.length + ' Buchungen';
+  updateSelected();
+}
+
+function applyFilter() {
+  const showInc = document.getElementById('filterIncome').checked;
+  const showExp = document.getElementById('filterExpense').checked;
+  document.querySelectorAll('#previewBody tr').forEach(tr => {
+    const isInc = tr.dataset.isIncome === '1';
+    tr.style.display = (isInc ? showInc : showExp) ? '' : 'none';
+  });
+}
+
+function toggleAll(val) {
+  if (typeof val !== 'boolean') val = document.getElementById('checkAll').checked;
+  document.querySelectorAll('.row-check').forEach(cb => {
+    const tr = cb.closest('tr');
+    if (tr.style.display === 'none') return;
+    cb.checked = val;
+    parsedData.transactions[+cb.dataset.idx]._include = val;
+  });
+  updateSelected();
+}
+
+function updateSelected() {
+  let sel = 0, sumInc = 0, sumExp = 0;
+  document.querySelectorAll('.row-check').forEach(cb => {
+    const t = parsedData.transactions[+cb.dataset.idx];
+    t._include = cb.checked;
+    if (cb.checked) {
+      sel++;
+      if (t.is_income) sumInc += t.amount; else sumExp += t.amount;
+    }
+  });
+  document.getElementById('selectedInfo').textContent =
+    `${sel} ausgewählt · +${fmtAmt(sumInc)} / -${fmtAmt(sumExp)}`;
+}
+
+async function commitImport() {
+  const pid  = document.getElementById('personSelect').value;
+  const txns = parsedData.transactions.map(t => ({...t, include: t._include}));
+  const btn  = document.getElementById('commitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Importiere…';
+
+  try {
+    const res  = await fetch('/api/import/pdf/commit', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ person_id: pid, transactions: txns })
+    });
+    const data = await res.json();
+    if (!data.success) { alert('Fehler: ' + data.error); return; }
+    document.getElementById('step2').classList.add('d-none');
+    document.getElementById('step3').classList.remove('d-none');
+    document.getElementById('importSummary').textContent =
+      `${data.imported_expenses} Ausgaben und ${data.imported_income} Einnahmen wurden importiert.`;
+  } catch(e) {
+    alert('Netzwerkfehler: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fas fa-file-import me-2"></i>Ausgewählte importieren';
+  }
+}
+
+function resetImport() {
+  parsedData = null;
+  document.getElementById('pdfFile').value = '';
+  document.getElementById('parseError').classList.add('d-none');
+  document.getElementById('step1').classList.remove('d-none');
+  document.getElementById('step2').classList.add('d-none');
+  document.getElementById('step3').classList.add('d-none');
+}
+
+function fmtAmt(v) { return (+v).toLocaleString('de-DE',{minimumFractionDigits:2,maximumFractionDigits:2}) + ' €'; }
+
+
+function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+</script>
+{% endblock %}

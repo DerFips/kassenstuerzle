@@ -78,8 +78,16 @@
     <button onclick="addRecurringRow()" class="btn btn-sm btn-outline-success"><i class="fas fa-plus me-1"></i>Hinzufügen</button>
   </div>
   <div class="card-body p-0">
-    <div class="d-flex align-items-center px-3 py-2 border-bottom small fw-semibold text-muted d-none d-md-flex" style="background:var(--bs-tertiary-bg)">
-      <span style="width:60px">Tag</span><span style="flex:3">Beschreibung</span><span style="flex:2">Wer</span><span style="flex:2">Kategorie</span><span style="width:110px">Betrag</span><span style="flex:2">Häufigkeit</span><span style="flex:2">Ab Monat</span><span style="width:42px"></span>
+    <div class="d-none d-md-block px-3 py-2 border-bottom small fw-semibold text-muted" style="background:var(--bs-tertiary-bg)">
+      <div class="row g-2">
+        <div class="col-md-1">Tag</div>
+        <div class="col-md-3">Beschreibung</div>
+        <div class="col-md-2">Wer</div>
+        <div class="col-md-2">Kategorie</div>
+        <div class="col-md-2">Betrag</div>
+        <div class="col-md-1">Häufigkeit</div>
+        <div class="col-md-1">Ab Monat</div>
+      </div>
     </div>
     <ul class="list-group list-group-flush" id="recurringList">
       {% for r in recurring %}
@@ -121,39 +129,77 @@
   <div class="card-footer"><button onclick="saveRecurring()" class="btn btn-primary w-100" id="saveRecBtn"><i class="fas fa-save me-1"></i>Wiederkehrende speichern</button></div>
 </div>
 
-<div class="row g-4 mt-0">
+<div class="row g-4 mt-0 align-items-stretch">
 <div class="col-12 col-lg-6">
 <!-- ── Import ── -->
-<div class="card shadow-sm mt-4">
+<div class="card shadow-sm h-100">
   <div class="card-header py-3"><h5 class="mb-0"><i class="fas fa-file-import me-2 text-info"></i>Import</h5></div>
-  <div class="card-body">
-    <p class="text-muted small mb-3">
-      Importiere Daten aus einer CSV-Datei im gleichen Format wie der Export
-      <code>(Typ;Jahr;Monat;Tag;Person;Kategorie;Beschreibung;Betrag;Barzahlung)</code>.
-      Personen und Kategorien müssen bereits in den Einstellungen angelegt sein.
-    </p>
-    <div class="mb-3">
-      <label class="form-label small fw-semibold">CSV-Datei auswählen</label>
-      <input type="file" class="form-control form-control-sm" id="importFile" accept=".csv,.txt">
+  <!-- Nav Tabs -->
+  <div class="card-header py-0 border-top-0">
+    <ul class="nav nav-tabs card-header-tabs" id="importTabs" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button class="nav-link active small" id="csvTab" data-bs-toggle="tab" data-bs-target="#csvPane" type="button" role="tab">
+          <i class="fas fa-file-csv me-1 text-success"></i>CSV Import
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link small" id="pdfTab" data-bs-toggle="tab" data-bs-target="#pdfPane" type="button" role="tab">
+          <i class="fas fa-file-pdf me-1 text-danger"></i>PDF Import <span class="badge bg-info text-white ms-1" style="font-size:.65em">Kontoauszug</span>
+        </button>
+      </li>
+    </ul>
+  </div>
+  <div class="card-body tab-content p-0">
+    <!-- CSV Pane -->
+    <div class="tab-pane fade show active p-3" id="csvPane" role="tabpanel">
+      <p class="text-muted small mb-3">
+        Importiere Daten aus einer CSV-Datei im gleichen Format wie der Export
+        <code>(Typ;Jahr;Monat;Tag;Person;Kategorie;Beschreibung;Betrag;Barzahlung)</code>.
+        Personen und Kategorien müssen bereits in den Einstellungen angelegt sein.
+      </p>
+      <div class="mb-3">
+        <label class="form-label small fw-semibold">CSV-Datei auswählen</label>
+        <input type="file" class="form-control form-control-sm" id="importFile" accept=".csv,.txt">
+      </div>
+      <div class="form-check mb-3">
+        <input class="form-check-input" type="checkbox" id="overwriteCheck" role="switch">
+        <label class="form-check-label" for="overwriteCheck">
+          <strong>Vorhandene Monate überschreiben</strong>
+          <span class="text-muted small d-block">Wenn aktiviert: Alle Einträge der betroffenen Monate werden zuerst gelöscht. Wenn nicht aktiviert: Neue Einträge werden hinzugefügt.</span>
+        </label>
+      </div>
+      <button onclick="doImport()" class="btn btn-info text-white" id="importBtn">
+        <i class="fas fa-upload me-2"></i>Importieren
+      </button>
+      <div id="importResult" class="mt-3"></div>
     </div>
-    <div class="form-check mb-3">
-      <input class="form-check-input" type="checkbox" id="overwriteCheck" role="switch">
-      <label class="form-check-label" for="overwriteCheck">
-        <strong>Vorhandene Monate überschreiben</strong>
-        <span class="text-muted small d-block">Wenn aktiviert: Alle Einträge der betroffenen Monate werden zuerst gelöscht. Wenn nicht aktiviert: Neue Einträge werden hinzugefügt.</span>
-      </label>
+    <!-- PDF Pane -->
+    <div class="tab-pane fade p-3" id="pdfPane" role="tabpanel">
+      <p class="text-muted small mb-3">
+        Importiere Buchungen direkt aus einem Kontoauszug-PDF deiner Bank.<br>
+        Unterstützte Banken: <strong>DKB</strong>, ING, Sparkasse, Volksbank, Commerzbank und weitere.
+      </p>
+      <div class="d-grid gap-2">
+        <a href="/import/pdf" class="btn btn-danger">
+          <i class="fas fa-file-pdf me-2"></i>PDF-Import öffnen
+        </a>
+      </div>
+      <div class="mt-3 p-3 rounded" style="background:var(--bs-tertiary-bg)">
+        <p class="small mb-2 fw-semibold"><i class="fas fa-circle-info me-1 text-info"></i>So funktioniert es:</p>
+        <ol class="small text-muted mb-0 ps-3">
+          <li>PDF-Kontoauszug hochladen</li>
+          <li>Buchungen prüfen &amp; Empfänger anpassen</li>
+          <li>Person zuweisen &amp; importieren</li>
+        </ol>
+      </div>
     </div>
-    <button onclick="doImport()" class="btn btn-info text-white" id="importBtn">
-      <i class="fas fa-upload me-2"></i>Importieren
-    </button>
-    <div id="importResult" class="mt-3"></div>
   </div>
 </div>
 
 </div><!-- /col import -->
 <div class="col-12 col-lg-6">
 <!-- ── Export ── -->
-<div class="card shadow-sm">
+<div class="card shadow-sm h-100">
   <div class="card-header py-3"><h5 class="mb-0"><i class="fas fa-file-csv me-2 text-success"></i>Export</h5></div>
   <div class="card-body">
     <p class="text-muted small mb-3">Exportiere Ausgaben <em>und</em> Einnahmen als CSV-Datei (kompatibel mit Excel und LibreOffice, Semikolon-getrennt, UTF-8).</p>

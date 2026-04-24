@@ -4,7 +4,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 DB_PATH = os.environ.get('DATABASE_PATH',
-          os.path.join(os.path.dirname(__file__), 'data', 'kassenstuerzle.db'))
+          os.path.join(os.path.dirname(__file__), 'data', 'kassenstürzle.db'))
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 MONTH_NAMES = ['Januar','Februar','März','April','Mai','Juni',
                'Juli','August','September','Oktober','November','Dezember']
@@ -46,11 +46,19 @@ def init_db():
         day INTEGER NOT NULL DEFAULT 1, description TEXT DEFAULT '',
         person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL,
         amount REAL NOT NULL DEFAULT 0)""")
+    # Migrate income table: add category_id if missing
+    try:
+        conn.execute('ALTER TABLE income ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL')
+        conn.commit()
+    except Exception:
+        pass  # column already exists
+
     for sql in [
         'ALTER TABLE categories ADD COLUMN is_split INTEGER NOT NULL DEFAULT 0',
         'ALTER TABLE expenses ADD COLUMN is_cash INTEGER NOT NULL DEFAULT 0',
         'ALTER TABLE persons ADD COLUMN wallet_start_date TEXT DEFAULT NULL',
         'ALTER TABLE persons ADD COLUMN wallet_start_amount REAL DEFAULT 0',
+        'ALTER TABLE expenses ADD COLUMN paid_for_person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL',
     ]:
         try: conn.execute(sql)
         except: pass
@@ -68,6 +76,19 @@ def build_ov(conn, year, month):
         pn = r['pname'] or 'Unbekannt'; cn = r['cname'] or 'Sonstige'
         cs[cn] = r['color'] or '#6c757d'
         pm.setdefault(pn, {})[cn] = r['total']
+    # Include income from split categories so they appear in the overview table
+    inc_rows = conn.execute("""
+        SELECT p.name as pname, c.name as cname, c.color, SUM(i.amount) as total
+        FROM income i LEFT JOIN persons p ON i.person_id=p.id
+        LEFT JOIN categories c ON i.category_id=c.id
+        WHERE i.year=? AND i.month=? AND c.is_split=1
+        GROUP BY i.person_id, i.category_id""",
+        (year, month)).fetchall()
+    for r in inc_rows:
+        pn = r['pname'] or 'Unbekannt'; cn = r['cname'] or 'Sonstige'
+        cs[cn] = r['color'] or '#6c757d'
+        # Store as negative to distinguish income from expenses
+        pm.setdefault(pn, {})[cn] = pm.get(pn, {}).get(cn, 0) - r['total']
     return pm, sorted(cs.items())
 
 def calculate_settlement(year, month, conn):
@@ -78,34 +99,83 @@ def calculate_settlement(year, month, conn):
     if is_settled:
         return {'persons': persons, 'paid': {p:0 for p in persons}, 'fair_share':0,
                 'total':0, 'balances': {p:0 for p in persons}, 'transactions': [],
-                'cat_details': [], 'is_settled': True, 'settled_at': settled_at}
+                'cat_details': [], 'paid_for_items': [], 'is_settled': True, 'settled_at': settled_at}
     if len(persons) < 2: return None
-    rows = conn.execute("""
-        SELECT p.name as pname, c.id as cid, c.name as cname, c.color, SUM(e.amount) as total
+
+    # split-category expenses (excluding paid-for rows)
+    exp_rows = conn.execute("""
+        SELECT p.name as pname, c.id as cid, c.name as cname, c.color,
+               SUM(e.amount) as total
         FROM expenses e LEFT JOIN persons p ON e.person_id=p.id
         LEFT JOIN categories c ON e.category_id=c.id
         WHERE e.year=? AND e.month=? AND c.is_split=1
+          AND (e.paid_for_person_id IS NULL)
         GROUP BY e.person_id, e.category_id""", (year, month)).fetchall()
-    if not rows:
-        return {'persons': persons, 'paid': {p: 0 for p in persons},
-                'fair_share': 0, 'total': 0, 'balances': {p: 0 for p in persons},
-                'transactions': [], 'cat_details': []}
+
+    # split-category income: income reduces that person's net contribution
+    inc_rows = conn.execute("""
+        SELECT p.name as pname, c.id as cid, c.name as cname, c.color, SUM(i.amount) as total
+        FROM income i LEFT JOIN persons p ON i.person_id=p.id
+        LEFT JOIN categories c ON i.category_id=c.id
+        WHERE i.year=? AND i.month=? AND c.is_split=1
+        GROUP BY i.person_id, i.category_id""", (year, month)).fetchall()
+
     cat_data = {}
-    for r in rows:
+    for r in exp_rows:
         cid = r['cid']
         if cid not in cat_data:
-            cat_data[cid] = {'name': r['cname'], 'color': r['color'] or '#6c757d', 'paid_by': {}}
+            cat_data[cid] = {'name': r['cname'], 'color': r['color'] or '#6c757d',
+                             'expenses_by': {}, 'income_by': {}, 'paid_by': {}}
         pn = r['pname'] or 'Unbekannt'
-        cat_data[cid]['paid_by'][pn] = r['total']
+        cat_data[cid]['expenses_by'][pn] = cat_data[cid]['expenses_by'].get(pn, 0) + r['total']
+        cat_data[cid]['paid_by'][pn] = cat_data[cid]['paid_by'].get(pn, 0) + r['total']
+
+    for r in inc_rows:
+        cid = r['cid']
+        if cid not in cat_data:
+            cat_data[cid] = {'name': r['cname'], 'color': r['color'] or '#6c757d',
+                             'expenses_by': {}, 'income_by': {}, 'paid_by': {}}
+        pn = r['pname'] or 'Unbekannt'
+        cat_data[cid]['income_by'][pn] = cat_data[cid]['income_by'].get(pn, 0) + r['total']
+        # income reduces net contribution
+        cat_data[cid]['paid_by'][pn] = cat_data[cid]['paid_by'].get(pn, 0) - r['total']
+
     paid = {p: 0.0 for p in persons}
     for cd in cat_data.values():
         for pn, amt in cd['paid_by'].items():
             if pn in paid: paid[pn] += amt
-    total = sum(paid.values())
-    fair_share = total / len(persons)
-    balances = {p: round(paid[p] - fair_share, 2) for p in persons}
-    creds = sorted([[n, b] for n, b in balances.items() if b > 0.005], key=lambda x: -x[1])
-    debts  = sorted([[n,-b] for n, b in balances.items() if b < -0.005], key=lambda x: -x[1])
+    total      = sum(paid.values())
+    fair_share = total / len(persons) if persons else 0
+    balances   = {p: round(paid[p] - fair_share, 2) for p in persons}
+
+    # "Bezahlt für" rows
+    paid_for_rows = conn.execute("""
+        SELECT payer.name as payer_name, payee.name as payee_name,
+               e.description, e.amount
+        FROM expenses e
+        LEFT JOIN persons payer ON e.person_id=payer.id
+        LEFT JOIN persons payee ON e.paid_for_person_id=payee.id
+        WHERE e.year=? AND e.month=? AND e.paid_for_person_id IS NOT NULL
+        ORDER BY e.day, e.id""", (year, month)).fetchall()
+
+    paid_for_items = []
+    for r in paid_for_rows:
+        payer = r['payer_name'] or 'Unbekannt'
+        payee = r['payee_name'] or 'Unbekannt'
+        amt   = r['amount']
+        paid_for_items.append({'payer': payer, 'payee': payee,
+                               'amount': round(amt, 2), 'description': r['description'] or ''})
+        if payer in balances: balances[payer] = round(balances[payer] + amt, 2)
+        if payee in balances: balances[payee] = round(balances[payee] - amt, 2)
+
+    if not exp_rows and not inc_rows and not paid_for_rows:
+        return {'persons': persons, 'paid': {p: 0 for p in persons},
+                'fair_share': 0, 'total': 0, 'balances': {p: 0 for p in persons},
+                'transactions': [], 'cat_details': [], 'paid_for_items': [],
+                'is_settled': False, 'settled_at': None}
+
+    creds = sorted([[n,  b] for n, b in balances.items() if  b >  0.005], key=lambda x: -x[1])
+    debts = sorted([[n, -b] for n, b in balances.items() if  b < -0.005], key=lambda x: -x[1])
     transactions = []
     ci = di = 0
     while ci < len(creds) and di < len(debts):
@@ -115,32 +185,46 @@ def calculate_settlement(year, month, conn):
         creds[ci][1] -= transfer; debts[di][1] -= transfer
         if creds[ci][1] < 0.005: ci += 1
         if debts[di][1] < 0.005: di += 1
+
     return {'persons': persons, 'paid': {p: round(v,2) for p,v in paid.items()},
             'fair_share': round(fair_share, 2), 'total': round(total, 2),
             'balances': balances, 'transactions': transactions,
-            'cat_details': list(cat_data.values()), 'is_settled': False, 'settled_at': None}
+            'cat_details': list(cat_data.values()), 'paid_for_items': paid_for_items,
+            'is_settled': False, 'settled_at': None}
 
 
 def calculate_category_settlements(year, month, conn):
-    """Per split-category settlement: settlement[person] = paid - fair_share.
-    Positive = overpaid = receives. Negative = underpaid = pays."""
+    """Per split-category settlement: settlement[person] = net_paid - fair_share.
+    net_paid = expenses - income. Positive = overpaid = receives. Negative = underpaid = pays."""
     persons = [r['name'] for r in conn.execute('SELECT name FROM persons ORDER BY name')]
     n = len(persons)
     if n < 2:
         return {}
-    rows = conn.execute("""
+    exp_rows = conn.execute("""
         SELECT c.name as cname, p.name as pname, SUM(e.amount) as total
         FROM expenses e
         LEFT JOIN persons p ON e.person_id=p.id
         LEFT JOIN categories c ON e.category_id=c.id
         WHERE e.year=? AND e.month=? AND c.is_split=1
         GROUP BY c.id, e.person_id""", (year, month)).fetchall()
-    if not rows:
+    inc_rows = conn.execute("""
+        SELECT c.name as cname, p.name as pname, SUM(i.amount) as total
+        FROM income i
+        LEFT JOIN persons p ON i.person_id=p.id
+        LEFT JOIN categories c ON i.category_id=c.id
+        WHERE i.year=? AND i.month=? AND c.is_split=1
+        GROUP BY c.id, i.person_id""", (year, month)).fetchall()
+    if not exp_rows and not inc_rows:
         return {}
     cat_paid = {}
-    for r in rows:
+    for r in exp_rows:
         cn = r['cname'] or 'Sonstige'; pn = r['pname'] or 'Unbekannt'
-        cat_paid.setdefault(cn, {})[pn] = r['total']
+        cat_paid.setdefault(cn, {}).setdefault(pn, 0)
+        cat_paid[cn][pn] += r['total']
+    for r in inc_rows:
+        cn = r['cname'] or 'Sonstige'; pn = r['pname'] or 'Unbekannt'
+        cat_paid.setdefault(cn, {}).setdefault(pn, 0)
+        cat_paid[cn][pn] -= r['total']  # income reduces net contribution
     result = {}
     for cn, paid_by in cat_paid.items():
         cat_total = sum(paid_by.values())
@@ -219,7 +303,7 @@ def month_view(year, month):
     expense_total_mv = round(conn.execute('SELECT COALESCE(SUM(amount),0) as t FROM expenses WHERE year=? AND month=?',(year,month)).fetchone()['t'], 2)
     savings_mv    = round(income_total - expense_total_mv, 2)
     expenses = [dict(r) for r in conn.execute("""
-        SELECT e.id, e.day, e.description, e.person_id, e.category_id, e.amount, e.is_cash
+        SELECT e.id, e.day, e.description, e.person_id, e.category_id, e.amount, e.is_cash, e.paid_for_person_id
         FROM expenses e WHERE e.year=? AND e.month=? ORDER BY e.day, e.id""",
         (year, month))]
     persons    = [dict(r) for r in conn.execute('SELECT * FROM persons ORDER BY name')]
@@ -255,13 +339,14 @@ def save_expenses():
         try: amt = float(e.get('amount') or 0)
         except: amt = 0
         if amt == 0: continue
-        pid    = int(e['person_id'])   if e.get('person_id')   else None
-        cid    = int(e['category_id']) if e.get('category_id') else None
+        pid    = int(e['person_id'])        if e.get('person_id')        else None
+        cid    = int(e['category_id'])     if e.get('category_id')     else None
+        pfpid  = int(e['paid_for_person_id']) if e.get('paid_for_person_id') else None
         is_cash = 1 if e.get('is_cash') else 0
         conn.execute(
-            'INSERT INTO expenses (year,month,day,description,person_id,category_id,amount,is_cash)'
-            ' VALUES (?,?,?,?,?,?,?,?)',
-            (year, month, int(e.get('day') or 1), e.get('description',''), pid, cid, amt, is_cash))
+            'INSERT INTO expenses (year,month,day,description,person_id,category_id,amount,is_cash,paid_for_person_id)'
+            ' VALUES (?,?,?,?,?,?,?,?,?)',
+            (year, month, int(e.get('day') or 1), e.get('description',''), pid, cid, amt, is_cash, pfpid))
     conn.commit()
     ov_p, ov_c = build_ov(conn, year, month)
     settlement  = calculate_settlement(year, month, conn)
@@ -404,9 +489,9 @@ def export_csv():
         w.writerow(['Einnahme',r['year'],r['month'],r['day'],r['person'],'',
                     r['description'],str(r['amount']).replace('.',','),''])
     out.seek(0)
-    if year and month: fname=f'kassenstuerzle{year}_{month:02d}.csv'
-    elif year:         fname=f'kassenstuerzle_{year}.csv'
-    else:              fname='kassenstuerzle_export.csv'
+    if year and month: fname=f'kassenstürzle_{year}_{month:02d}.csv'
+    elif year:         fname=f'kassenstürzle_{year}.csv'
+    else:              fname='kassenstürzle_export.csv'
     return Response(out.getvalue().encode('utf-8-sig'), mimetype='text/csv',
                     headers={'Content-Disposition': f'attachment;filename={fname}'})
 
@@ -454,8 +539,9 @@ def save_income():
         except: amt = 0
         if amt == 0: continue
         pid = int(e['person_id']) if e.get('person_id') else None
-        conn.execute('INSERT INTO income (year,month,day,description,person_id,amount) VALUES (?,?,?,?,?,?)',
-                     (year, month, int(e.get('day') or 1), e.get('description',''), pid, amt))
+        cid = int(e['category_id']) if e.get('category_id') else None
+        conn.execute('INSERT INTO income (year,month,day,description,person_id,amount,category_id) VALUES (?,?,?,?,?,?,?)',
+                     (year, month, int(e.get('day') or 1), e.get('description',''), pid, amt, cid))
     conn.commit()
     inc_sum = conn.execute('SELECT COALESCE(SUM(amount),0) as t FROM income   WHERE year=? AND month=?',(year,month)).fetchone()['t']
     exp_sum = conn.execute('SELECT COALESCE(SUM(amount),0) as t FROM expenses WHERE year=? AND month=?',(year,month)).fetchone()['t']
@@ -543,8 +629,7 @@ def chart_data():
     data = compute_chart_data(conn)
     conn.close()
     return jsonify(data)
-@app.route('/overview')
-def overview():
+def debug_overview():
     conn = get_db()
     mk = [(r['year'],r['month']) for r in conn.execute(
         'SELECT DISTINCT year,month FROM expenses ORDER BY year DESC, month DESC')]
@@ -553,53 +638,443 @@ def overview():
         FROM expenses e LEFT JOIN persons p ON e.person_id=p.id
         LEFT JOIN categories c ON e.category_id=c.id
         GROUP BY e.year,e.month,e.person_id,e.category_id""").fetchall()
+    structured, cats_map = {}, {}
+    for r in data:
+        pn = r['pname'] or 'Unbekannt'
+        cn = r['cname'] or 'Sonstige'
+        cats_map[cn] = r['color'] or '#6c757d'
+        mk2 = f"{r['year']}-{r['month']}"
+        structured.setdefault(pn, {}).setdefault(mk2, {})[cn] = r['total']
+    conn.close()
+    return jsonify({'status': 'use /overview for full data'})
+
+@app.route('/overview')
+def overview():
+    conn = get_db()
+    month_keys = [(r['year'],r['month']) for r in conn.execute(
+        'SELECT DISTINCT year,month FROM expenses UNION SELECT DISTINCT year,month FROM income ORDER BY year DESC, month DESC')]
     settled_months = {(r['year'],r['month'])
         for r in conn.execute('SELECT year,month FROM month_status WHERE settled=1')}
     all_pnames = [r['name'] for r in conn.execute('SELECT name FROM persons ORDER BY name')]
-    structured, cats_map = {}, {}
-    for r in data:
+
+    # ── Expense structured ───────────────────────────────────────────────────
+    # Normal expenses (not paid-for)
+    exp_data = conn.execute("""
+        SELECT e.year, e.month, p.name as pname, c.name as cname, c.color, SUM(e.amount) as total
+        FROM expenses e LEFT JOIN persons p ON e.person_id=p.id
+        LEFT JOIN categories c ON e.category_id=c.id
+        WHERE e.paid_for_person_id IS NULL
+        GROUP BY e.year,e.month,e.person_id,e.category_id""").fetchall()
+    # Paid-for expenses: count under the payee (paid_for_person_id)
+    exp_data_pf = conn.execute("""
+        SELECT e.year, e.month, payee.name as pname, c.name as cname, c.color, SUM(e.amount) as total
+        FROM expenses e LEFT JOIN persons payee ON e.paid_for_person_id=payee.id
+        LEFT JOIN categories c ON e.category_id=c.id
+        WHERE e.paid_for_person_id IS NOT NULL
+        GROUP BY e.year,e.month,e.paid_for_person_id,e.category_id""").fetchall()
+
+    cats_map = {}
+    structured = {}
+    for r in list(exp_data) + list(exp_data_pf):
         pn = r['pname'] or 'Unbekannt'; cn = r['cname'] or 'Sonstige'
         cats_map[cn] = r['color'] or '#6c757d'
-        structured.setdefault(pn, {}).setdefault((r['year'],r['month']), {})[cn] = r['total']
-    # Apply settlement adjustments for settled months
+        mk = f"{r['year']}-{r['month']}"
+        prev = structured.setdefault(pn, {}).setdefault(mk, {}).get(cn, 0)
+        structured[pn][mk][cn] = prev + r['total']
+
+    # settlement adjustments – keep all values including 0 and negative
     for (y, m) in settled_months:
         ovs = calculate_category_settlements(y, m, conn)
         if not ovs: continue
+        smk = f'{y}-{m}'
         for p in all_pnames:
             for cn, person_sett in ovs.items():
-                paid = structured.get(p, {}).get((y,m), {}).get(cn, 0)
+                paid = structured.get(p, {}).get(smk, {}).get(cn, 0)
                 adj  = person_sett.get(p, 0)
                 net  = round(paid - adj, 2)
-                if net > 0.005:
-                    structured.setdefault(p, {}).setdefault((y,m), {})[cn] = net
-                elif cn in structured.get(p, {}).get((y,m), {}):
-                    del structured[p][(y,m)][cn]
-    # Income per month: {(year,month): {person: total}}
+                structured.setdefault(p, {}).setdefault(smk, {})[cn] = net
+
+    # ── Income structured (by category) ─────────────────────────────────────
+    inc_data = conn.execute("""
+        SELECT i.year, i.month, p.name as pname, c.name as cname, c.color, SUM(i.amount) as total
+        FROM income i LEFT JOIN persons p ON i.person_id=p.id
+        LEFT JOIN categories c ON i.category_id=c.id
+        GROUP BY i.year,i.month,i.person_id,i.category_id""").fetchall()
+
+    inc_structured = {}
+    for r in inc_data:
+        pn = r['pname'] or 'Unbekannt'; cn = r['cname'] or 'Sonstige'
+        cats_map[cn] = r['color'] or '#6c757d'
+        mk = f"{r['year']}-{r['month']}"
+        inc_structured.setdefault(pn, {}).setdefault(mk, {})[cn] = round(r['total'], 2)
+
+    # ── Gesamt (settled months only): Ausgaben + Einnahmen per category ──────
+    gesamt_structured = {}
+    for (y, m) in settled_months:
+        mk = f'{y}-{m}'
+        for pn in all_pnames:
+            exp_cats = structured.get(pn, {}).get(mk, {})
+            inc_cats = inc_structured.get(pn, {}).get(mk, {})
+            all_cn = set(exp_cats) | set(inc_cats)
+            if not all_cn: continue
+            for cn in all_cn:
+                val = round(exp_cats.get(cn, 0) - inc_cats.get(cn, 0), 2)
+                gesamt_structured.setdefault(pn, {}).setdefault(mk, {})[cn] = val
+
+    # ── Income map for savings bar ───────────────────────────────────────────
     inc_rows = conn.execute("""
         SELECT i.year,i.month, COALESCE(p.name,'?') as pname, SUM(i.amount) as total
         FROM income i LEFT JOIN persons p ON i.person_id=p.id
         GROUP BY i.year,i.month,i.person_id""").fetchall()
-    income_map = {}  # {(y,m): {person: total}}
+    income_map = {}
     for r in inc_rows:
         income_map.setdefault((r['year'],r['month']),{})[r['pname']] = round(r['total'],2)
-    # expense totals per month
-    exp_totals = {}
-    for (y,m), pcats in [(k,v) for p,months in structured.items() for k,v in months.items()]:
-        pass
+
     exp_totals_by_month = {}
     for pn, months in structured.items():
-        for (y,m), cats in months.items():
-            exp_totals_by_month[(y,m)] = exp_totals_by_month.get((y,m),0) + sum(cats.values())
+        for mk3, cats in months.items():
+            exp_totals_by_month[mk3] = exp_totals_by_month.get(mk3,0) + sum(cats.values())
+
     chart_data_obj = compute_chart_data(conn)
     conn.close()
+
+    persons_list = sorted(set(list(structured.keys()) + list(inc_structured.keys())))
+
     return render_template('overview.html', active='overview',
-        structured=structured, all_cats=sorted(cats_map.items()),
-        month_keys=mk, month_names=MONTH_NAMES, persons_list=sorted(structured.keys()),
+        structured=structured,
+        inc_structured=inc_structured,
+        gesamt_structured=gesamt_structured,
+        all_cats=sorted(cats_map.items()),
+        month_keys=month_keys,
+        month_names=MONTH_NAMES,
+        persons_list=persons_list,
         settled_months=[(y,m) for y,m in settled_months],
         income_map={(f'{k[0]}-{k[1]}'):v for k,v in income_map.items()},
-        exp_totals_by_month={(f'{k[0]}-{k[1]}'):round(v,2) for k,v in exp_totals_by_month.items()},
+        exp_totals_by_month={k:round(v,2) for k,v in exp_totals_by_month.items()},
         chart_data=chart_data_obj)
+
+
+# ── PDF Kontoauszug Import ─────────────────────────────────────────────────────
+
+def parse_german_amount(s):
+    """Convert German amount string like -1.234,56 or 1.234,56+ to float."""
+    s = str(s or '').strip().replace('\xa0','').replace('\u202f','').replace(' ','')
+    if not s: return None
+    sign = 1
+    if s.endswith('+'): s = s[:-1]
+    elif s.endswith('-'): sign = -1; s = s[:-1]
+    elif s.startswith('-'): sign = -1; s = s[1:]
+    elif s.startswith('+'): s = s[1:]
+    try:
+        return sign * float(s.replace('.','').replace(',','.'))
+    except:
+        return None
+
+
+def extract_bank_statement(pdf_bytes):
+    """
+    Parse a German DKB bank statement PDF via plain-text extraction.
+    The table is malformed (entire page in one row), so we parse the text layer.
+    Format per transaction:
+      DD.MM.YYYYType [-Amount]
+      counterpart / detail lines...
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        return {'error': 'pdfplumber nicht installiert'}
+
+    import re, io, gc
+    from datetime import datetime
+
+    AMT_RE      = re.compile(r'(\-?\d{1,3}(?:\.\d{3})*,\d{2})')
+    ISO_DATE_RE = re.compile(r'(\d{4}-\d{2}-\d{2})')
+
+    TYPE_KEYWORDS = [
+        'Kartenzahlung onl', 'Kartenzahlung',
+        'Basislastschrift', 'Zahlungseingang',
+        'Überweisung', 'Ueberweisung', 'Dauerauftrag', 'Gutschrift',
+        'LOHN, GEHALT, RENTE', 'LOHN', 'GEHALT', 'RENTE',
+    ]
+    # Regex to detect a transaction-start line: DDMMYYYYType...
+    DATE_PREFIX_RE = re.compile(r'^(\d{2}\.\d{2}\.\d{4})(.*)')
+    SKIP_PREFIXES  = ('Kontostand am', 'Abrechnung', 'Saldo', 'Anfangssaldo',
+                      'Endsaldo', 'Kontonummer', 'BIC', 'IBAN', 'Debit',
+                      'Gläubiger-ID', 'Zahl.System')
+
+    # ── Read & wipe ──────────────────────────────────────────────────────────
+    pdf_io = io.BytesIO(bytes(pdf_bytes))
+    try:
+        pdf_bytes[:] = b'\x00' * len(pdf_bytes)
+    except Exception:
+        pass
+    del pdf_bytes; gc.collect()
+
+    holder = ''; bank = 'DKB'
+    full_text = ''
+
+    try:
+        with pdfplumber.open(pdf_io) as pdf:
+            pages_text = []
+            for page in pdf.pages:
+                t = page.extract_text() or ''
+                pages_text.append(t)
+                if page.extract_table():
+                    debug_info['tables_found'] += 1
+            full_text = '\n'.join(pages_text)
+    except Exception as e:
+        return {'error': f'PDF-Lesefehler: {e}'}
+    finally:
+        pdf_io.close(); del pdf_io; gc.collect()
+
+    # Detect holder from text
+    for pat in [r'Herrn\s+([A-ZÄÖÜ][^\n]+)',
+                r'Frau\s+([A-ZÄÖÜ][^\n]+)',
+                r'Kontoinhaber[:\s]+([A-ZÄÖÜ][^\n]+)']:
+        m = re.search(pat, full_text)
+        if m: holder = m.group(1).strip()[:60]; break
+
+    # Detect bank
+    for b in ['DKB','Deutsche Kreditbank','Sparkasse','ING','Volksbank',
+              'Raiffeisenbank','Commerzbank','Deutsche Bank','Postbank','N26']:
+        if b.lower() in full_text.lower(): bank = b; break
+
+    # ── Parse plain text line by line ────────────────────────────────────────
+    # Each transaction starts with: DD.MM.YYYYType ... [-amount]
+    # Subsequent lines until next date-prefixed line are detail/counterpart
+
+    lines = full_text.splitlines()
+
+    # Group into transaction blocks
+    blocks = []   # each: {'date': str, 'type': str, 'amount': float|None,
+                  #         'is_income': bool, 'detail_lines': [str]}
+    current = None
+
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+
+        m = DATE_PREFIX_RE.match(line)
+        if m:
+            date_str = m.group(1)
+            rest     = m.group(2).strip()
+
+            # Try to match type keyword
+            matched_type = None
+            remainder    = rest
+            for kw in TYPE_KEYWORDS:
+                if rest.upper().startswith(kw.upper()):
+                    matched_type = kw
+                    remainder    = rest[len(kw):].strip()
+                    break
+
+            if not matched_type:
+                # Could be "Kontostand am..." or page header – skip
+                if current: blocks.append(current)
+                current = None
+                continue
+
+            # Extract amount from remainder (at end of line)
+            amt = None
+            amt_m = AMT_RE.search(remainder)
+            if amt_m:
+                amt = parse_german_amount(amt_m.group(1))
+                remainder = remainder[:amt_m.start()].strip()
+
+            if current: blocks.append(current)
+            current = {
+                'date': date_str, 'type': matched_type,
+                'amount': amt, 'remainder': remainder,
+                'detail_lines': []
+            }
+        else:
+            # Continuation line
+            if current is None: continue
+            # Skip pure noise lines
+            if any(line.startswith(s) for s in SKIP_PREFIXES): continue
+            # If no amount yet, try to extract from this line
+            if current['amount'] is None:
+                amt_m = AMT_RE.search(line)
+                if amt_m:
+                    current['amount'] = parse_german_amount(amt_m.group(1))
+                    rest_line = line[:amt_m.start()].strip()
+                    if rest_line: current['detail_lines'].append(rest_line)
+                    continue
+            current['detail_lines'].append(line)
+
+    if current: blocks.append(current)
+
+    # ── Convert blocks to transactions ───────────────────────────────────────
+    INCOME_TYPES = {'zahlungseingang', 'gutschrift', 'lohn', 'gehalt', 'rente',
+                    'lohn, gehalt, rente'}
+
+    transactions  = []
+    skipped_types = {}
+
+    for blk in blocks:
+        if blk['amount'] is None: continue
+
+        tl      = blk['type']
+        tl_up   = tl.upper().strip()
+        amt     = abs(round(blk['amount'], 2))
+        is_inc  = any(tl_up.startswith(t.upper()) for t in INCOME_TYPES)
+
+        try:
+            col1_dt = datetime.strptime(blk['date'], '%d.%m.%Y')
+        except: continue
+
+        day, month, year = col1_dt.day, col1_dt.month, col1_dt.year
+        counterpart = ''
+        description = ''
+        detail_all  = [blk['remainder']] + blk['detail_lines']
+        detail_all  = [d for d in detail_all if d]
+
+        # ── Kartenzahlung ─────────────────────────────────────────────────────
+        if tl_up.startswith('KARTENZAHLUNG'):
+            content = ' '.join(detail_all)
+            parts   = [p.strip() for p in content.split('/')]
+            counterpart = parts[0] if parts else ''
+            location    = parts[1] if len(parts) > 1 else ''
+            # Use ISO date from content as real transaction date
+            iso_m = ISO_DATE_RE.search(content)
+            if iso_m:
+                try:
+                    dt2 = datetime.strptime(iso_m.group(1), '%Y-%m-%d')
+                    day, month, year = dt2.day, dt2.month, dt2.year
+                except: pass
+            description = counterpart + (f' / {location}' if location else '')
+            is_inc = False
+
+        # ── Basislastschrift ──────────────────────────────────────────────────
+        elif tl_up.startswith('BASISLASTSCHRIFT'):
+            counterpart = detail_all[0] if detail_all else ''
+            description = ' '.join(detail_all[1:])
+
+        # ── Zahlungseingang ───────────────────────────────────────────────────
+        elif tl_up.startswith('ZAHLUNGSEINGANG'):
+            first = ' '.join(detail_all)
+            counterpart = first.split('/')[0].strip()
+            description = first
+
+        # ── LOHN / GEHALT / RENTE ─────────────────────────────────────────────
+        elif any(tl_up.startswith(t.upper()) for t in ['LOHN','GEHALT','RENTE']):
+            first = ' '.join(detail_all)
+            counterpart = first.split('/')[0].strip()
+            description = first
+
+        # ── Überweisung / Dauerauftrag ────────────────────────────────────────
+        elif any(tl_up.startswith(t.upper())
+                 for t in ['ÜBERWEISUNG','UEBERWEISUNG','DAUERAUFTRAG']):
+            counterpart = detail_all[0] if detail_all else ''
+            description = ' '.join(detail_all[1:])
+            is_inc = False
+
+        else:
+            skipped_types[tl[:40]] = skipped_types.get(tl[:40], 0) + 1
+            continue
+
+        transactions.append({
+            'date':        f'{day:02d}.{month:02d}.{year}',
+            'day':         day, 'month': month, 'year': year,
+            'counterpart': counterpart[:80],
+            'description': description[:150],
+            'amount':      amt,
+            'is_income':   is_inc,
+            'type':        tl[:40],
+        })
+
+    return {'holder': holder, 'bank': bank, 'transactions': transactions}
+
+
+
+@app.route('/import/pdf')
+def import_pdf_page():
+    conn = get_db()
+    persons = [dict(r) for r in conn.execute('SELECT id,name FROM persons ORDER BY name')]
+    conn.close()
+    return render_template('import_pdf.html', active='import_pdf', persons=persons)
+
+
+@app.route('/api/import/pdf/parse', methods=['POST'])
+def api_parse_pdf():
+    import gc, traceback
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': 'Keine Datei'}), 400
+    f = request.files['file']
+    if not f.filename.lower().endswith('.pdf'):
+        return jsonify({'success': False, 'error': 'Nur PDF-Dateien erlaubt'}), 400
+    pdf_bytes = None
+    try:
+        pdf_bytes = bytearray(f.read())
+        result = extract_bank_statement(pdf_bytes)
+        if 'error' in result:
+            return jsonify({'success': False, 'error': result['error']})
+        return jsonify({'success': True, **result})
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Serverfehler: {e}',
+                        'trace': traceback.format_exc()[-500:]})
+    finally:
+        if pdf_bytes is not None:
+            pdf_bytes[:] = b'\x00' * len(pdf_bytes)
+            del pdf_bytes
+        gc.collect()
+
+
+@app.route('/api/import/pdf/commit', methods=['POST'])
+def api_commit_pdf():
+    """Save confirmed transactions from PDF import."""
+    data      = request.json
+    person_id = data.get('person_id')
+    txns      = data.get('transactions', [])
+    if not person_id or not txns:
+        return jsonify({'success': False, 'error': 'Fehlende Daten'}), 400
+    conn = get_db()
+    imported_exp = imported_inc = 0
+    for t in txns:
+        if not t.get('include'): continue
+        try:
+            amt  = float(t['amount'])
+            day  = int(t['day'])
+            mon  = int(t['month'])
+            yr   = int(t['year'])
+            desc = str(t.get('counterpart') or t.get('description') or '')[:200]
+            if t.get('is_income'):
+                conn.execute(
+                    'INSERT INTO income (year,month,day,description,person_id,amount) VALUES (?,?,?,?,?,?)',
+                    (yr, mon, day, desc, person_id, amt))
+                imported_inc += 1
+            else:
+                conn.execute(
+                    'INSERT INTO expenses (year,month,day,description,person_id,amount) VALUES (?,?,?,?,?,?)',
+                    (yr, mon, day, desc, person_id, amt))
+                imported_exp += 1
+        except Exception as e:
+            conn.close()
+            return jsonify({'success': False, 'error': f'Fehler bei Zeile: {e}'}), 400
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'imported_expenses': imported_exp, 'imported_income': imported_inc})
+
+def debug_income():
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT i.year, i.month, i.day, i.description, i.amount,
+               i.person_id, i.category_id,
+               p.name as pname, c.name as cname, c.is_split
+        FROM income i
+        LEFT JOIN persons p ON i.person_id=p.id
+        LEFT JOIN categories c ON i.category_id=c.id
+        ORDER BY i.year DESC, i.month DESC, i.day DESC LIMIT 20
+    """).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+def debug_settlement(year, month):
+    conn = get_db()
+    result = calculate_settlement(year, month, conn)
+    conn.close()
+    return jsonify(result)
+
 
 if __name__ == '__main__':
     init_db()
-    app.run(debug=False, host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000)
