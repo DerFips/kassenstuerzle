@@ -819,8 +819,6 @@ def extract_bank_statement(pdf_bytes):
             for page in pdf.pages:
                 t = page.extract_text() or ''
                 pages_text.append(t)
-                if page.extract_table():
-                    debug_info['tables_found'] += 1
             full_text = '\n'.join(pages_text)
     except Exception as e:
         return {'error': f'PDF-Lesefehler: {e}'}
