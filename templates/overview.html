@@ -6,19 +6,242 @@
 <div class="alert alert-info"><i class="fas fa-info-circle me-2"></i>Noch keine Daten. <a href="/">→ Ausgaben eintragen</a></div>
 {% else %}
 
+<!-- ── Jahresübersicht nach Jahr gruppiert (AP5) ──────────────────────────── -->
+{% if months_by_year %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header py-3 d-flex justify-content-between align-items-center">
+    <h5 class="mb-0"><i class="fas fa-calendar-year me-2 text-warning"></i>Jahresübersicht</h5>
+    <small class="text-muted">{{ months_by_year|length }} Jahr{{ 'e' if months_by_year|length > 1 else '' }}</small>
+  </div>
+  <div class="card-body p-0">
+    {%- set grand = namespace(inc=0, exp=0) %}
+    <div class="accordion accordion-flush" id="yearAccordion">
+    {% for year_y, months_y in months_by_year.items() %}
+    {%- set ytot = namespace(inc=0, exp=0) %}
+    {%- for row in months_y %}
+      {%- set ytot.inc = ytot.inc + row.inc %}
+      {%- set ytot.exp = ytot.exp + row.exp %}
+    {%- endfor %}
+    {%- set grand.inc = grand.inc + ytot.inc %}
+    {%- set grand.exp = grand.exp + ytot.exp %}
+    {%- set ysav = ytot.inc - ytot.exp %}
+    <div class="accordion-item border-0 border-bottom">
+      <h2 class="accordion-header">
+        <button class="accordion-button {% if not loop.first %}collapsed{% endif %} fw-bold py-2 px-3"
+          type="button" data-bs-toggle="collapse"
+          data-bs-target="#year-{{ year_y }}" aria-expanded="{{ 'true' if loop.first else 'false' }}">
+          <span class="me-3">{{ year_y }}</span>
+          <span class="badge bg-success me-1" title="Einnahmen">+{{ "%.2f"|format(ytot.inc)|replace(".",",") }} €</span>
+          <span class="badge bg-danger me-1" title="Ausgaben">{{ "%.2f"|format(ytot.exp)|replace(".",",") }} €</span>
+          <span class="badge {% if ysav >= 0 %}bg-primary{% else %}bg-warning text-dark{% endif %}" title="Ersparnis">
+            {% if ysav >= 0 %}+{% endif %}{{ "%.2f"|format(ysav)|replace(".",",") }} €
+          </span>
+        </button>
+      </h2>
+      <div id="year-{{ year_y }}" class="accordion-collapse collapse {% if loop.first %}show{% endif %}">
+        <div class="accordion-body p-0">
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-secondary">
+              <tr>
+                <th class="ps-3">Monat</th>
+                <th class="text-end text-success">Einnahmen</th>
+                <th class="text-end text-danger">Ausgaben</th>
+                <th class="text-end">Ersparnis</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in months_y %}
+              {%- set sav = row.inc - row.exp %}
+              <tr>
+                <td class="ps-3">
+                  <a href="/month/{{ year_y }}/{{ row.month }}" class="text-decoration-none">
+                    {{ month_names[row.month-1] }}
+                  </a>
+                  {% if row.settled %}<span class="badge bg-success ms-1" style="font-size:.6em"><i class="fas fa-check"></i></span>{% endif %}
+                </td>
+                <td class="text-end text-success">+{{ "%.2f"|format(row.inc)|replace(".",",") }} €</td>
+                <td class="text-end text-danger">{{ "%.2f"|format(row.exp)|replace(".",",") }} €</td>
+                <td class="text-end fw-semibold {% if sav >= 0 %}text-success{% else %}text-danger{% endif %}">
+                  {% if sav >= 0 %}+{% endif %}{{ "%.2f"|format(sav)|replace(".",",") }} €
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+            <tfoot class="table-dark">
+              <tr class="fw-bold">
+                <td class="ps-3">∑ {{ year_y }}</td>
+                <td class="text-end text-success">+{{ "%.2f"|format(ytot.inc)|replace(".",",") }} €</td>
+                <td class="text-end text-danger">{{ "%.2f"|format(ytot.exp)|replace(".",",") }} €</td>
+                <td class="text-end {% if ysav >= 0 %}text-success{% else %}text-danger{% endif %}">
+                  {% if ysav >= 0 %}+{% endif %}{{ "%.2f"|format(ysav)|replace(".",",") }} €
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+    </div>
+
+    <!-- Grand total across all years -->
+    {%- set grand_sav = grand.inc - grand.exp %}
+    <div class="d-flex gap-4 px-3 py-2 border-top fw-bold">
+      <span>Gesamt alle Jahre</span>
+      <span class="ms-auto text-success">+{{ "%.2f"|format(grand.inc)|replace(".",",") }} €</span>
+      <span class="text-danger">{{ "%.2f"|format(grand.exp)|replace(".",",") }} €</span>
+      <span class="{% if grand_sav >= 0 %}text-success{% else %}text-danger{% endif %}">
+        {% if grand_sav >= 0 %}+{% endif %}{{ "%.2f"|format(grand_sav)|replace(".",",") }} €
+      </span>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- ── Personen-Gesamtübersicht (AP6) ─────────────────────────────────────── -->
+{% if person_totals %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header py-3">
+    <h5 class="mb-0"><i class="fas fa-users me-2 text-primary"></i>Personen-Übersicht – alle Monate</h5>
+  </div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-secondary">
+        <tr>
+          <th class="ps-3">Person</th>
+          <th class="text-end text-success">Einnahmen gesamt</th>
+          <th class="text-end text-danger">Ausgaben gesamt</th>
+          <th class="text-end">Ersparnis</th>
+          <th class="text-end text-muted" style="font-size:.82rem">Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {%- set all_inc = namespace(v=0) %}
+        {%- set all_exp = namespace(v=0) %}
+        {% for pn, pt in person_totals.items() %}
+        {%- set all_inc.v = all_inc.v + pt.inc %}
+        {%- set all_exp.v = all_exp.v + pt.exp %}
+        {%- set sav = pt.savings %}
+        <tr>
+          <td class="fw-semibold ps-3">{{ pn }}</td>
+          <td class="text-end text-success">+{{ "%.2f"|format(pt.inc)|replace(".",",") }} €</td>
+          <td class="text-end text-danger">{{ "%.2f"|format(pt.exp)|replace(".",",") }} €</td>
+          <td class="text-end fw-bold {% if sav >= 0 %}text-success{% else %}text-danger{% endif %}">
+            {% if sav >= 0 %}+{% endif %}{{ "%.2f"|format(sav)|replace(".",",") }} €
+          </td>
+          <td class="text-end">
+            <a href="#tab-exp-{{ pn|replace(' ','_') }}" class="btn btn-outline-secondary btn-sm py-0 px-2"
+               style="font-size:.75rem"
+               onclick="document.querySelector('[href='#tab-exp-{{ pn|replace(' ','_') }}']')?.click(); return false;"
+               title="Ausgaben-Detail für {{ pn }}">
+              <i class="fas fa-table-list me-1"></i>Ausgaben
+            </a>
+            <a href="#tab-inc-{{ pn|replace(' ','_') }}" class="btn btn-outline-success btn-sm py-0 px-2 ms-1"
+               style="font-size:.75rem"
+               onclick="document.querySelector('[href='#tab-inc-{{ pn|replace(' ','_') }}']')?.click(); return false;"
+               title="Einnahmen-Detail für {{ pn }}">
+              <i class="fas fa-table-list me-1"></i>Einnahmen
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot class="table-dark fw-bold">
+        {%- set all_sav = all_inc.v - all_exp.v %}
+        <tr>
+          <td class="ps-3">Gesamt alle Personen</td>
+          <td class="text-end text-success">+{{ "%.2f"|format(all_inc.v)|replace(".",",") }} €</td>
+          <td class="text-end text-danger">{{ "%.2f"|format(all_exp.v)|replace(".",",") }} €</td>
+          <td class="text-end {% if all_sav >= 0 %}text-success{% else %}text-danger{% endif %}">
+            {% if all_sav >= 0 %}+{% endif %}{{ "%.2f"|format(all_sav)|replace(".",",") }} €
+          </td>
+          <td></td>
+        </tr>
+      </tfoot>
+    </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <!-- ── Übersichtstabelle (Tabs) ─────────────────────────────────────────────── -->
 <div class="card shadow-sm mb-4">
   <div class="card-header py-3">
     <ul class="nav nav-tabs card-header-tabs" id="ovTabs">
-      <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-all">Alle</a></li>
+      <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-ausgaben">
+        <i class="fas fa-arrow-up text-danger me-1"></i>Ausgaben</a></li>
       {% for pn in persons_list %}
-      <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-{{ pn|replace(' ','_') }}">{{ pn }}</a></li>
+      <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-exp-{{ pn|replace(' ','_') }}">{{ pn }}</a></li>
       {% endfor %}
+      <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-einnahmen">
+        <i class="fas fa-arrow-down text-success me-1"></i>Einnahmen</a></li>
+      {% for pn in persons_list %}
+      <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-inc-{{ pn|replace(' ','_') }}">{{ pn }}</a></li>
+      {% endfor %}
+      <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-gesamt"
+        title="Nur abgerechnete Monate: Ausgaben minus Einnahmen">
+        <i class="fas fa-scale-balanced text-primary me-1"></i>Gesamt</a></li>
     </ul>
   </div>
-  <div class="tab-content card-body p-0">
-    <!-- All-Tab -->
-    <div class="tab-pane fade show active" id="tab-all">
+  
+
+
+
+<div class="tab-content card-body p-0">
+
+    <div class="tab-pane fade show active" id="tab-ausgaben">
+      
+      <div class="table-responsive">
+      <table class="table table-sm table-hover overview-table mb-0">
+        <thead class="table-danger">
+          <tr>
+            <th>Monat</th>
+            {% for cn,col in all_cats %}
+            <th class="text-end"><span class="badge rounded-pill me-1" style="background:{{ col }}">&#8203;</span>{{ cn }}</th>
+            {% endfor %}
+            <th class="text-end fw-bold">Gesamt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% set grand_all = namespace(v=0) %}
+          {% for year_k,month_k in month_keys %}
+          {% set _mkey = year_k|string+'-'+month_k|string %}
+          
+          {% set ns = namespace(row_total=0, has_data=false) %}
+          {% for pn in persons_list %}{% if _mkey in structured.get(pn,{}) %}{% set ns.has_data = true %}{% endif %}{% endfor %}
+          {% if ns.has_data %}
+          <tr>
+            <td>
+              <a href="/month/{{ year_k }}/{{ month_k }}" class="text-decoration-none">{{ month_names[month_k-1] }} {{ year_k }}</a>
+              {% if (year_k,month_k) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
+            </td>
+            {% for cn,_ in all_cats %}
+              {% set ns2 = namespace(cv=0) %}
+              {% for pn in persons_list %}{% set ns2.cv = ns2.cv + structured.get(pn,{}).get(_mkey,{}).get(cn,0) %}{% endfor %}
+              {% set ns.row_total = ns.row_total + ns2.cv %}
+              <td class="text-end">{{ "%.2f"|format(ns2.cv)|replace(".",",") }} €</td>
+            {% endfor %}
+            {% set grand_all.v = grand_all.v + ns.row_total %}
+            <td class="text-end fw-bold">{{ "%.2f"|format(ns.row_total)|replace(".",",") }} €</td>
+          </tr>
+          {% endif %}
+          
+          {% endfor %}
+        </tbody>
+        <tfoot class="table-dark fw-bold">
+          <tr>
+            <td>Gesamt</td>
+            {% for cn,_ in all_cats %}<td></td>{% endfor %}
+            <td class="text-end">{{ "%.2f"|format(grand_all.v)|replace(".",",") }} €</td>
+          </tr>
+        </tfoot>
+      </table>
+      </div>
+    </div>
+
+    {% for pn in persons_list %}
+    <div class="tab-pane fade" id="tab-exp-{{ pn|replace(' ','_') }}">
       <div class="table-responsive">
       <table class="table table-sm table-hover overview-table mb-0">
         <thead class="table-secondary">
@@ -31,62 +254,209 @@
           </tr>
         </thead>
         <tbody>
-          {% for yk,mk in month_keys %}
-          {% set ns = namespace(row_total=0, has_data=false) %}
-          {% for pn in persons_list %}{% for cn,_ in all_cats %}{% if structured.get(pn,{}).get((yk,mk),{}).get(cn) %}{% set ns.has_data = true %}{% endif %}{% endfor %}{% endfor %}
-          {% if ns.has_data %}
+          {% set gp = namespace(v=0) %}
+          {% for year_k,month_k in month_keys %}
+          {% set _mkey = year_k|string+'-'+month_k|string %}
+          {% if _mkey in structured.get(pn,{}) %}
           <tr>
             <td>
-              <a href="/month/{{ yk }}/{{ mk }}" class="text-decoration-none">{{ month_names[mk-1] }} {{ yk }}</a>
-              {% if (yk,mk) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
+              <a href="/month/{{ year_k }}/{{ month_k }}" class="text-decoration-none">{{ month_names[month_k-1] }} {{ year_k }}</a>
+              {% if (year_k,month_k) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
             </td>
+            {% set ns = namespace(rt=0) %}
             {% for cn,_ in all_cats %}
-              {% set ns2 = namespace(cv=0) %}
-              {% for pn in persons_list %}{% set ns2.cv = ns2.cv + structured.get(pn,{}).get((yk,mk),{}).get(cn,0) %}{% endfor %}
-              {% set ns.row_total = ns.row_total + ns2.cv %}
-              <td class="text-end">{% if ns2.cv %}{{ "%.2f"|format(ns2.cv)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>
+              {% set cv = structured.get(pn,{}).get(_mkey,{}).get(cn,0) %}
+              {% set ns.rt = ns.rt + cv %}
+              <td class="text-end">{{ "%.2f"|format(cv)|replace(".",",") }} €</td>
             {% endfor %}
-            <td class="text-end fw-bold">{{ "%.2f"|format(ns.row_total)|replace(".",",") }} €</td>
+            {% set gp.v = gp.v + ns.rt %}
+            <td class="text-end fw-bold">{{ "%.2f"|format(ns.rt)|replace(".",",") }} €</td>
           </tr>
           {% endif %}
           {% endfor %}
         </tbody>
-      </table></div>
+        <tfoot class="table-dark fw-bold">
+          <tr><td>Gesamt</td>{% for cn,_ in all_cats %}<td></td>{% endfor %}<td class="text-end">{{ "%.2f"|format(gp.v)|replace(".",",") }} €</td></tr>
+        </tfoot>
+      </table>
+      </div>
     </div>
-    <!-- Per-Person Tabs -->
-    {% for pn in persons_list %}
-    <div class="tab-pane fade" id="tab-{{ pn|replace(' ','_') }}">
+    {% endfor %}
+
+    <div class="tab-pane fade " id="tab-einnahmen">
+      
       <div class="table-responsive">
       <table class="table table-sm table-hover overview-table mb-0">
-        <thead class="table-secondary">
+        <thead class="table-success">
           <tr>
             <th>Monat</th>
-            {% for cn,col in all_cats %}<th class="text-end"><span class="badge rounded-pill me-1" style="background:{{ col }}">&#8203;</span>{{ cn }}</th>{% endfor %}
+            {% for cn,col in all_cats %}
+            <th class="text-end"><span class="badge rounded-pill me-1" style="background:{{ col }}">&#8203;</span>{{ cn }}</th>
+            {% endfor %}
             <th class="text-end fw-bold">Gesamt</th>
           </tr>
         </thead>
         <tbody>
-          {% for yk,mk in month_keys %}
-          {% set ns3 = namespace(rt=0, hd=false) %}
-          {% for cn,_ in all_cats %}{% if structured.get(pn,{}).get((yk,mk),{}).get(cn) %}{% set ns3.hd=true %}{% endif %}{% endfor %}
-          {% if ns3.hd %}
+          {% set grand_all = namespace(v=0) %}
+          {% for year_k,month_k in month_keys %}
+          {% set _mkey = year_k|string+'-'+month_k|string %}
+          
+          {% set ns = namespace(row_total=0, has_data=false) %}
+          {% for pn in persons_list %}{% if _mkey in inc_structured.get(pn,{}) %}{% set ns.has_data = true %}{% endif %}{% endfor %}
+          {% if ns.has_data %}
           <tr>
             <td>
-              <a href="/month/{{ yk }}/{{ mk }}" class="text-decoration-none">{{ month_names[mk-1] }} {{ yk }}</a>
-              {% if (yk,mk) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
+              <a href="/month/{{ year_k }}/{{ month_k }}" class="text-decoration-none">{{ month_names[month_k-1] }} {{ year_k }}</a>
+              {% if (year_k,month_k) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
             </td>
             {% for cn,_ in all_cats %}
-              {% set cv = structured.get(pn,{}).get((yk,mk),{}).get(cn,0) %}{% set ns3.rt = ns3.rt+cv %}
-              <td class="text-end">{% if cv %}{{ "%.2f"|format(cv)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>
+              {% set ns2 = namespace(cv=0) %}
+              {% for pn in persons_list %}{% set ns2.cv = ns2.cv + inc_structured.get(pn,{}).get(_mkey,{}).get(cn,0) %}{% endfor %}
+              {% set ns.row_total = ns.row_total + ns2.cv %}
+              <td class="text-end">{{ "%.2f"|format(ns2.cv)|replace(".",",") }} €</td>
             {% endfor %}
-            <td class="text-end fw-bold">{{ "%.2f"|format(ns3.rt)|replace(".",",") }} €</td>
+            {% set grand_all.v = grand_all.v + ns.row_total %}
+            <td class="text-end fw-bold">{{ "%.2f"|format(ns.row_total)|replace(".",",") }} €</td>
+          </tr>
+          {% endif %}
+          
+          {% endfor %}
+        </tbody>
+        <tfoot class="table-dark fw-bold">
+          <tr>
+            <td>Gesamt</td>
+            {% for cn,_ in all_cats %}<td></td>{% endfor %}
+            <td class="text-end">{{ "%.2f"|format(grand_all.v)|replace(".",",") }} €</td>
+          </tr>
+        </tfoot>
+      </table>
+      </div>
+    </div>
+
+    {% for pn in persons_list %}
+    <div class="tab-pane fade" id="tab-inc-{{ pn|replace(' ','_') }}">
+      <div class="table-responsive">
+      <table class="table table-sm table-hover overview-table mb-0">
+        <thead class="table-success">
+          <tr>
+            <th>Monat</th>
+            {% for cn,col in all_cats %}
+            <th class="text-end"><span class="badge rounded-pill me-1" style="background:{{ col }}">&#8203;</span>{{ cn }}</th>
+            {% endfor %}
+            <th class="text-end fw-bold">Gesamt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% set gp = namespace(v=0) %}
+          {% for year_k,month_k in month_keys %}
+          {% set _mkey = year_k|string+'-'+month_k|string %}
+          {% if _mkey in inc_structured.get(pn,{}) %}
+          <tr>
+            <td>
+              <a href="/month/{{ year_k }}/{{ month_k }}" class="text-decoration-none">{{ month_names[month_k-1] }} {{ year_k }}</a>
+              {% if (year_k,month_k) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
+            </td>
+            {% set ns = namespace(rt=0) %}
+            {% for cn,_ in all_cats %}
+              {% set cv = inc_structured.get(pn,{}).get(_mkey,{}).get(cn,0) %}
+              {% set ns.rt = ns.rt + cv %}
+              <td class="text-end">{{ "%.2f"|format(cv)|replace(".",",") }} €</td>
+            {% endfor %}
+            {% set gp.v = gp.v + ns.rt %}
+            <td class="text-end fw-bold">{{ "%.2f"|format(ns.rt)|replace(".",",") }} €</td>
           </tr>
           {% endif %}
           {% endfor %}
         </tbody>
-      </table></div>
+        <tfoot class="table-dark fw-bold">
+          <tr><td>Gesamt</td>{% for cn,_ in all_cats %}<td></td>{% endfor %}<td class="text-end">{{ "%.2f"|format(gp.v)|replace(".",",") }} €</td></tr>
+        </tfoot>
+      </table>
+      </div>
     </div>
     {% endfor %}
+
+    <div class="tab-pane fade " id="tab-gesamt">
+      
+      <div class="px-3 py-2 border-bottom" style="background:var(--bs-secondary-bg,#f8f9fa)">
+        <small class="text-muted"><i class="fas fa-info-circle me-1"></i>
+          Nur <strong>abgerechnete Monate</strong> · Betrag = Ausgaben − Einnahmen (darf negativ sein)
+        </small>
+      </div>
+      <!-- Per-person quick summary inside Gesamt tab -->
+      {% if person_totals %}
+      <div class="table-responsive border-bottom">
+      <table class="table table-sm mb-0">
+        <thead class="table-secondary">
+          <tr>
+            <th class="ps-3" style="width:160px">Person</th>
+            <th class="text-end text-success">Einnahmen</th>
+            <th class="text-end text-danger">Ausgaben</th>
+            <th class="text-end fw-bold">Ersparnis</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for pn, pt in person_totals.items() %}
+          <tr>
+            <td class="ps-3 fw-semibold">{{ pn }}</td>
+            <td class="text-end text-success">+{{ "%.2f"|format(pt.inc)|replace(".",",") }} €</td>
+            <td class="text-end text-danger">{{ "%.2f"|format(pt.exp)|replace(".",",") }} €</td>
+            <td class="text-end fw-bold {% if pt.savings >= 0 %}text-success{% else %}text-danger{% endif %}">
+              {% if pt.savings >= 0 %}+{% endif %}{{ "%.2f"|format(pt.savings)|replace(".",",") }} €
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% endif %}
+      <div class="table-responsive">
+      <table class="table table-sm table-hover overview-table mb-0">
+        <thead class="table-primary">
+          <tr>
+            <th>Monat</th>
+            {% for cn,col in all_cats %}
+            <th class="text-end"><span class="badge rounded-pill me-1" style="background:{{ col }}">&#8203;</span>{{ cn }}</th>
+            {% endfor %}
+            <th class="text-end fw-bold">Gesamt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% set grand_all = namespace(v=0) %}
+          {% for year_k,month_k in month_keys %}
+          {% set _mkey = year_k|string+'-'+month_k|string %}
+          {% if (year_k,month_k) in settled_months %}
+          {% set ns = namespace(row_total=0, has_data=false) %}
+          {% for pn in persons_list %}{% if _mkey in gesamt_structured.get(pn,{}) %}{% set ns.has_data = true %}{% endif %}{% endfor %}
+          {% if ns.has_data %}
+          <tr>
+            <td>
+              <a href="/month/{{ year_k }}/{{ month_k }}" class="text-decoration-none">{{ month_names[month_k-1] }} {{ year_k }}</a>
+              {% if (year_k,month_k) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
+            </td>
+            {% for cn,_ in all_cats %}
+              {% set ns2 = namespace(cv=0) %}
+              {% for pn in persons_list %}{% set ns2.cv = ns2.cv + gesamt_structured.get(pn,{}).get(_mkey,{}).get(cn,0) %}{% endfor %}
+              {% set ns.row_total = ns.row_total + ns2.cv %}
+              <td class="text-end">{{ "%.2f"|format(ns2.cv)|replace(".",",") }} €</td>
+            {% endfor %}
+            {% set grand_all.v = grand_all.v + ns.row_total %}
+            <td class="text-end fw-bold">{{ "%.2f"|format(ns.row_total)|replace(".",",") }} €</td>
+          </tr>
+          {% endif %}
+          {% endif %}
+          {% endfor %}
+        </tbody>
+        <tfoot class="table-dark fw-bold">
+          <tr>
+            <td>Gesamt</td>
+            {% for cn,_ in all_cats %}<td></td>{% endfor %}
+            <td class="text-end">{{ "%.2f"|format(grand_all.v)|replace(".",",") }} €</td>
+          </tr>
+        </tfoot>
+      </table>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -109,8 +479,8 @@
     <tbody>
       {% set grand_inc = namespace(v=0) %}
       {% set grand_exp = namespace(v=0) %}
-      {% for yk,mk in month_keys %}
-        {% set key = yk|string + '-' + mk|string %}
+      {% for year_k,month_k in month_keys %}
+        {% set key = year_k|string + '-' + month_k|string %}
         {% set inc = income_map.get(key, {}).values()|sum %}
         {% set exp = exp_totals_by_month.get(key, 0) %}
         {% set sav = inc - exp %}
@@ -119,8 +489,8 @@
         {% if inc > 0 or exp > 0 %}
         <tr>
           <td>
-            <a href="/month/{{ yk }}/{{ mk }}" class="text-decoration-none">{{ month_names[mk-1] }} {{ yk }}</a>
-            {% if (yk,mk) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
+            <a href="/month/{{ year_k }}/{{ month_k }}" class="text-decoration-none">{{ month_names[month_k-1] }} {{ year_k }}</a>
+            {% if (year_k,month_k) in settled_months %}<span class="badge bg-success ms-1" style="font-size:.65em"><i class="fas fa-check"></i></span>{% endif %}
           </td>
           <td class="text-end text-success">{% if inc > 0 %}+{{ "%.2f"|format(inc)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>
           <td class="text-end text-danger">{% if exp > 0 %}{{ "%.2f"|format(exp)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>

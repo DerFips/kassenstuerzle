@@ -5,6 +5,42 @@
 .settlement-header.settlement-pending { background: #fff8e1 !important; }
 [data-bs-theme="dark"] .settlement-header.settlement-settled { background: #0d2e1a !important; }
 [data-bs-theme="dark"] .settlement-header.settlement-pending { background: #2e2800 !important; }
+
+/* ── Formel-Eingabe Styling ──────────────────────────────────────────────── */
+.formula-amount { font-family: inherit; }
+.formula-amount.formula-active {
+  border-color: #ffc107 !important;
+  box-shadow: 0 0 0 0.15rem rgba(255,193,7,.35) !important;
+  background-color: rgba(255,193,7,.04) !important;
+}
+@keyframes formulaResolve {
+  0%   { background-color: rgba(25,135,84,.25); border-color: #198754; }
+  100% { background-color: transparent; border-color: inherit; }
+}
+.formula-amount.formula-resolved {
+  animation: formulaResolve 0.8s ease-out forwards;
+}
+.formula-amount[data-formula]::after { content: 'ƒ'; }
+/* small 'ƒ' indicator: we do it via a wrapper instead, see below */
+.formula-amount[data-formula] {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Ctext x='1' y='10' font-size='10' fill='%23ffc107' font-family='serif'%3Ef%3C/text%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: left 4px center;
+  padding-left: 18px !important;
+}
+
+
+/* ── Auto-Save Badge ─────────────────────────────────────────────────────── */
+.autosave-badge { pointer-events: none; vertical-align: middle; }
+
+
+/* ── Filter-Leiste ───────────────────────────────────────────────────────── */
+#expFilterBar, #incFilterBar {
+  background: rgba(var(--bs-secondary-rgb), .04);
+  font-size: .85rem;
+}
+#expFilterBar select, #incFilterBar select { font-size: .82rem; }
+
 </style>
 {% endblock %}
 {% block content %}
@@ -31,6 +67,20 @@
       <button onclick="addRow()" class="btn btn-sm btn-outline-success"><i class="fas fa-plus me-1"></i>Zeile</button>
       <button onclick="saveExpenses()" class="btn btn-sm btn-primary" id="saveBtn"><i class="fas fa-save me-1"></i>Speichern</button>
     </div>
+  </div>
+  <!-- ── Filter-Leiste Ausgaben ──────────────────────────────────────── -->
+  <div class="px-3 py-2 border-bottom d-flex flex-wrap align-items-center gap-2" id="expFilterBar">
+    <i class="fas fa-filter text-secondary small"></i>
+    <select id="filterPerson" class="form-select form-select-sm" style="width:auto;min-width:120px" onchange="applyExpenseFilter()">
+      <option value="">Alle Personen</option>
+    </select>
+    <select id="filterCat" class="form-select form-select-sm" style="width:auto;min-width:140px" onchange="applyExpenseFilter()">
+      <option value="">Alle Kategorien</option>
+    </select>
+    <button class="btn btn-sm btn-outline-secondary" onclick="resetExpenseFilter()" title="Filter zurücksetzen">
+      <i class="fas fa-xmark"></i>
+    </button>
+    <span id="filterInfo" class="text-muted ms-1" style="font-size:.78rem"></span>
   </div>
   <div class="table-responsive">
     <table class="table table-hover table-sm expense-table mb-0">
@@ -68,6 +118,17 @@
       <button onclick="addIncomeRow()" class="btn btn-sm btn-outline-success"><i class="fas fa-plus me-1"></i>Zeile</button>
       <button onclick="saveIncome()" class="btn btn-sm btn-success" id="saveIncomeBtn"><i class="fas fa-save me-1"></i>Speichern</button>
     </div>
+  </div>
+  <!-- ── Filter-Leiste Einnahmen ──────────────────────────────────────── -->
+  <div class="px-3 py-2 border-bottom d-flex flex-wrap align-items-center gap-2" id="incFilterBar">
+    <i class="fas fa-filter text-secondary small"></i>
+    <select id="incFilterPerson" class="form-select form-select-sm" style="width:auto;min-width:120px" onchange="applyIncomeFilter()">
+      <option value="">Alle Personen</option>
+    </select>
+    <button class="btn btn-sm btn-outline-secondary" onclick="resetIncomeFilter()" title="Filter zurücksetzen">
+      <i class="fas fa-xmark"></i>
+    </button>
+    <span id="incFilterInfo" class="text-muted ms-1" style="font-size:.78rem"></span>
   </div>
   <div class="table-responsive">
     <table class="table table-hover table-sm income-table mb-0">
@@ -253,6 +314,45 @@
   </div>
 </div>
 
+<!-- ④a Ersparnis pro Person ─────────────────────────────────────────────── -->
+<div class="card shadow-sm mb-4" id="savingsPerPersonCard">
+  <div class="card-header py-3">
+    <h5 class="mb-0"><i class="fas fa-piggy-bank me-2 text-info"></i>Ersparnis – {{ month_name }} {{ year }}</h5>
+  </div>
+  <div class="card-body p-0" id="savingsPerPersonBody">
+    {% if savings_pp %}
+    <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-secondary">
+        <tr>
+          <th>Person</th>
+          <th class="text-end text-success">Einnahmen</th>
+          <th class="text-end text-danger">Ausgaben</th>
+          <th class="text-end">Ersparnis</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in savings_pp %}
+        <tr>
+          <td class="fw-semibold">{{ row.name }}</td>
+          <td class="text-end text-success">+{{ "%.2f"|format(row.income)|replace(".",",") }} €</td>
+          <td class="text-end text-danger">{{ "%.2f"|format(row.expenses)|replace(".",",") }} €</td>
+          <td class="text-end fw-bold {% if row.savings >= 0 %}text-success{% else %}text-danger{% endif %}">
+            {% if row.savings >= 0 %}+{% endif %}{{ "%.2f"|format(row.savings)|replace(".",",") }} €
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <div class="text-center text-muted py-4" id="savingsEmptyMsg">
+      <i class="fas fa-piggy-bank fa-2x mb-2 d-block"></i>Noch keine Daten für diesen Monat.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
 <!-- ④ Abrechnung ────────────────────────────────────────────────────────── -->
 <div class="card shadow-sm {% if is_settled %}border-success{% else %}border-warning{% endif %}">
   <div class="card-header py-3 settlement-header {% if is_settled %}settlement-settled{% else %}settlement-pending{% endif %}">
@@ -327,7 +427,7 @@ function addRow(day='',desc='',pid='',cid='',amt='',isCash=false,pfpid='') {
     <td><select class="form-select form-select-sm" name="person_id">${buildPersonOpts(pid)}</select></td>
     <td><select class="form-select form-select-sm" name="paid_for_person_id" title="Vollständig für diese Person bezahlt" onchange="updatePaidForStyle(this)">${buildPersonOpts(pfpid)}</select></td>
     <td><select class="form-select form-select-sm cat-select" name="category_id" onchange="updateRowColor(this)">${buildCatOpts(cid)}</select></td>
-    <td><input type="number" class="form-control form-control-sm text-end" name="amount" value="${amt}" step="0.01" min="0" placeholder="0,00" oninput="updateFooter()"></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="${amt}" placeholder="0,00 oder =12+3" onfocus="formulaFocus(this)" onblur="formulaBlur(this,'expense'); updateFooter()" oninput="updateFooter()"></td>
     <td class="text-center align-middle"><div class="form-check d-flex justify-content-center mb-0"><input class="form-check-input cash-check" type="checkbox" name="is_cash" title="Barzahlung" ${isCash?'checked':''} onchange="updateFooter()"></div></td>
     <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('tr').remove();updateFooter()"><i class="fas fa-times"></i></button></td>`;
   document.getElementById('expenseBody').appendChild(tr);
@@ -362,7 +462,7 @@ function updateRowColor(sel) {
 function updateFooter() {
   const rows=document.querySelectorAll('#expenseBody tr');
   let total=0,cash=0;
-  rows.forEach(r=>{const v=parseFloat(r.querySelector('[name=amount]')?.value||0);if(!isNaN(v)){total+=v;if(r.querySelector('.cash-check')?.checked)cash+=v;}});
+  rows.forEach(r=>{if(r.style.display==='none') return; const v=parseAmtVal(r.querySelector('[name=amount]'));if(!isNaN(v)){total+=v;if(r.querySelector('.cash-check')?.checked)cash+=v;}});
   document.getElementById('rowCount').textContent=rows.length;
   document.getElementById('totalSum').textContent=fmt(total);
   document.getElementById('cashSum').textContent=fmt(cash);
@@ -373,7 +473,7 @@ function collectRows() {
     person_id:r.querySelector('[name=person_id]').value,
     paid_for_person_id:r.querySelector('[name=paid_for_person_id]')?.value||'',
     category_id:r.querySelector('[name=category_id]').value,
-    amount:r.querySelector('[name=amount]').value, is_cash:r.querySelector('.cash-check')?.checked||false
+    amount:parseAmtVal(r.querySelector('[name=amount]')), is_cash:r.querySelector('.cash-check')?.checked||false
   }));
 }
 function sortTable() {
@@ -386,9 +486,10 @@ function sortTable() {
 }
 
 // ── Speichern ─────────────────────────────────────────────────────────────
-async function saveExpenses() {
+async function saveExpenses(silent=false) {
   const btn=document.getElementById('saveBtn');
-  btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin me-1"></i>Speichere...';
+  if (!silent) { btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin me-1"></i>Speichere...'; }
+  else { btn.innerHTML='<i class="fas fa-spinner fa-spin me-1"></i><small>Auto...</small>'; }
   try {
     const res=await fetch('/api/expenses/save',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({year:YEAR,month:MONTH,expenses:collectRows()})});
@@ -396,11 +497,12 @@ async function saveExpenses() {
     if(data.success){
       sortTable(); currentOvSettlements=data.ov_settlements||{}; currentSettlement=data.settlement;
       renderOverview(data.ov_p,data.ov_c,data.ov_settlements,isSettled);
-      renderWallet(data.wallet); renderSettlement(data.settlement);
-      showToast('Ausgaben gespeichert!','success');
+      renderWallet(data.wallet); renderSettlement(data.settlement); renderSavings(data.savings_pp);
+      if(!silent) showToast('Ausgaben gespeichert!','success');
+      else showAutoSavedBadge('saveBtn');
     } else showToast('Fehler','danger');
   } catch(e){showToast('Fehler: '+e.message,'danger');}
-  btn.disabled=false; btn.innerHTML='<i class="fas fa-save me-1"></i>Speichern';
+  finally { btn.disabled=false; btn.innerHTML='<i class="fas fa-save me-1"></i>Speichern'; }
 }
 
 // ── Abrechnung beglichen ──────────────────────────────────────────────────
@@ -613,7 +715,7 @@ function addIncomeRow(day='', desc='', pid='', cid='', amt='') {
     <td><input type="text" class="form-control form-control-sm" name="inc_desc" value="${desc}" placeholder="z.B. Gehalt…"></td>
     <td><select class="form-select form-select-sm" name="inc_pid">${pOpts}</select></td>
     <td><select class="form-select form-select-sm" name="inc_cid">${cOpts}</select></td>
-    <td><input type="number" class="form-control form-control-sm text-end" name="inc_amt" value="${amt}" step="0.01" min="0" placeholder="0,00" oninput="updateIncomeFooter()"></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="inc_amt" value="${amt}" placeholder="0,00 oder =12+3" onfocus="formulaFocus(this)" onblur="formulaBlur(this,'income'); updateIncomeFooter()" oninput="updateIncomeFooter()"></td>
     <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('tr').remove();updateIncomeFooter()"><i class="fas fa-times"></i></button></td>`;
   document.getElementById('incomeBody').appendChild(tr);
   updateIncomeFooter();
@@ -623,20 +725,21 @@ function addIncomeRow(day='', desc='', pid='', cid='', amt='') {
 function updateIncomeFooter() {
   const rows = document.querySelectorAll('#incomeBody tr');
   let t = 0;
-  rows.forEach(r => { const v = parseFloat(r.querySelector('[name=inc_amt]')?.value||0); if(!isNaN(v)) t += v; });
+  rows.forEach(r => { if(r.style.display==='none') return; const v = parseAmtVal(r.querySelector('[name=inc_amt]')); if(!isNaN(v)) t += v; });
   document.getElementById('incomeCount').textContent = rows.length;
   document.getElementById('incomeTotalSum').textContent = fmt(t);
 }
 
-async function saveIncome() {
+async function saveIncome(silent=false) {
   const btn = document.getElementById('saveIncomeBtn');
-  btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Speichere...';
+  if (!silent) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Speichere...'; }
+  else { btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i><small>Auto...</small>'; }
   const rows = Array.from(document.querySelectorAll('#incomeBody tr')).map(r => ({
     day: r.querySelector('[name=inc_day]').value,
     description: r.querySelector('[name=inc_desc]').value,
     person_id: r.querySelector('[name=inc_pid]').value,
     category_id: r.querySelector('[name=inc_cid]').value,
-    amount: r.querySelector('[name=inc_amt]').value
+    amount: parseAmtVal(r.querySelector('[name=inc_amt]'))
   }));
   try {
     const res = await fetch('/api/income/save', {method:'POST', headers:{'Content-Type':'application/json'},
@@ -644,10 +747,12 @@ async function saveIncome() {
     const data = await res.json();
     if(data.success) {
       updateSavingsBar(data.income_total, data.expense_total, data.savings);
-      showToast('Einnahmen gespeichert!', 'success');
+      renderSavings(data.savings_pp);
+      if(!silent) showToast('Einnahmen gespeichert!', 'success');
+      else showAutoSavedBadge('saveIncomeBtn');
     }
   } catch(e) { showToast('Fehler: ' + e.message, 'danger'); }
-  btn.disabled = false; btn.innerHTML = '<i class="fas fa-save me-1"></i>Speichern';
+  finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save me-1"></i>Speichern'; }
 }
 
 function updateSavingsBar(inc, exp, sav) {
@@ -701,5 +806,337 @@ document.addEventListener('DOMContentLoaded', () => {
     if(e.target===inputs[inputs.length-1]||e.target===inputs[inputs.length-2]){e.preventDefault();addRow();}
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FORMEL-EINGABE  (Excel-Style: =13,4+12-3)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Safely evaluate a formula string like "13,4+12-3" (German decimal comma).
+// Only allows digits, decimal separators, operators +-*/ and parentheses.
+// Returns a float or NaN if the expression is invalid.
+function evalFormula(expr) {
+  // Normalize: German comma → dot; trim whitespace
+  const normalized = expr.trim().replace(/,/g, '.');
+  // Strict whitelist: only numbers, dots, operators, parens, spaces
+  if (!/^[\d\s\.\+\-\*\/\(\)]+$/.test(normalized)) return NaN;
+  try {
+    // Use Function instead of eval so it runs in a clean scope
+    const result = new Function('"use strict"; return (' + normalized + ')')();
+    return (typeof result === 'number' && isFinite(result)) ? Math.round(result * 100) / 100 : NaN;
+  } catch(e) { return NaN; }
+}
+
+/**
+ * Parse any amount input (text or number) to a float.
+ * Handles German comma decimals, strips formula prefix if still raw.
+ */
+function parseAmtVal(input) {
+  if (!input) return NaN;
+  // If the field still shows raw formula (shouldn't happen, but safety net)
+  let raw = (input.value || '').trim();
+  if (raw.startsWith('=')) {
+    const r = evalFormula(raw.slice(1));
+    return isNaN(r) ? NaN : r;
+  }
+  // Normal value: replace comma with dot
+  const n = parseFloat(raw.replace(',', '.'));
+  return isNaN(n) ? NaN : n;
+}
+
+/** Called on focus: if cell has a stored formula, show formula text. */
+function formulaFocus(input) {
+  const formula = input.dataset.formula;
+  if (formula) {
+    input.value = formula;
+    // Select all text for easy overwriting
+    setTimeout(() => input.select(), 0);
+  }
+  input.classList.add('formula-active');
+}
+
+/**
+ * Called on blur: if value starts with '=', evaluate and store.
+ * Otherwise treat as plain number (accept comma decimal).
+ */
+function formulaBlur(input, type) {
+  input.classList.remove('formula-active');
+  const raw = (input.value || '').trim();
+
+  if (raw.startsWith('=')) {
+    const result = evalFormula(raw.slice(1));
+    if (!isNaN(result)) {
+      input.dataset.formula = raw;           // store original formula
+      // Display the result formatted (German: comma decimal)
+      input.value = result.toFixed(2).replace('.', ',');
+      input.classList.add('formula-resolved');
+      setTimeout(() => input.classList.remove('formula-resolved'), 800);
+    } else {
+      // Invalid formula: highlight error
+      input.classList.add('is-invalid');
+      setTimeout(() => input.classList.remove('is-invalid'), 2000);
+    }
+  } else {
+    // Plain number typed: clear any stored formula
+    delete input.dataset.formula;
+    // Normalize comma → standard display
+    const num = parseFloat(raw.replace(',', '.'));
+    if (!isNaN(num) && raw !== '') {
+      input.value = num.toFixed(2).replace('.', ',');
+    }
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AUTO-SAVE  (blur/focusout mit 800ms Debounce)
+// ══════════════════════════════════════════════════════════════════════════════
+
+let _asExpTimer = null;
+let _asIncTimer = null;
+
+/** Zeigt kurz ein "✓ Auto-gespeichert" Badge neben dem Button. */
+function showAutoSavedBadge(btnId) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  let badge = btn.parentElement.querySelector('.autosave-badge');
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.className = 'autosave-badge badge bg-success ms-2';
+    badge.style.cssText = 'font-size:.72rem; opacity:0; transition:opacity .3s';
+    btn.parentElement.appendChild(badge);
+  }
+  badge.innerHTML = '<i class="fas fa-check me-1"></i>Auto-gespeichert';
+  badge.style.opacity = '1';
+  clearTimeout(badge._fadeTimer);
+  badge._fadeTimer = setTimeout(() => { badge.style.opacity = '0'; }, 2200);
+}
+
+/** Prüft ob eine Expense-Zeile mindestens Betrag > 0 hat (skip leere Zeilen). */
+function hasValidExpenseRows() {
+  return Array.from(document.querySelectorAll('#expenseBody tr')).some(r => {
+    const v = parseAmtVal(r.querySelector('[name=amount]'));
+    return !isNaN(v) && v > 0;
+  });
+}
+
+function hasValidIncomeRows() {
+  return Array.from(document.querySelectorAll('#incomeBody tr')).some(r => {
+    const v = parseAmtVal(r.querySelector('[name=inc_amt]'));
+    return !isNaN(v) && v > 0;
+  });
+}
+
+/** Debounced auto-save für Ausgaben (800ms nach letztem blur). */
+function scheduleAutoSaveExpense() {
+  clearTimeout(_asExpTimer);
+  _asExpTimer = setTimeout(async () => {
+    if (hasValidExpenseRows()) await saveExpenses(true);
+  }, 800);
+}
+
+/** Debounced auto-save für Einnahmen (800ms nach letztem blur). */
+function scheduleAutoSaveIncome() {
+  clearTimeout(_asIncTimer);
+  _asIncTimer = setTimeout(async () => {
+    if (hasValidIncomeRows()) await saveIncome(true);
+  }, 800);
+}
+
+/** Event-Delegation: hört auf focusout am gesamten tbody. */
+document.addEventListener('DOMContentLoaded', function () {
+  const expBody = document.getElementById('expenseBody');
+  const incBody = document.getElementById('incomeBody');
+
+  if (expBody) {
+    expBody.addEventListener('focusout', function (e) {
+      // Nur triggern wenn Fokus wirklich die Tabellenzeile verlässt
+      const fromRow = e.target.closest('tr');
+      const toRow   = e.relatedTarget ? e.relatedTarget.closest('tr') : null;
+      if (fromRow !== toRow) {
+        scheduleAutoSaveExpense();
+      }
+    });
+  }
+
+  if (incBody) {
+    incBody.addEventListener('focusout', function (e) {
+      const fromRow = e.target.closest('tr');
+      const toRow   = e.relatedTarget ? e.relatedTarget.closest('tr') : null;
+      if (fromRow !== toRow) {
+        scheduleAutoSaveIncome();
+      }
+    });
+  }
+});
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FILTER  (Person & Kategorie, live, URL-Hash-Persistenz)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** Befülle die Filter-Dropdowns aus den bereits geladenen PERSONS/CATS Arrays. */
+function initFilterDropdowns() {
+  const fp   = document.getElementById('filterPerson');
+  const fc   = document.getElementById('filterCat');
+  const ifp  = document.getElementById('incFilterPerson');
+
+  if (fp && typeof PERSONS !== 'undefined') {
+    PERSONS.forEach(p => {
+      fp.insertAdjacentHTML('beforeend', `<option value="${p.id}">${p.name}</option>`);
+      if (ifp) ifp.insertAdjacentHTML('beforeend', `<option value="${p.id}">${p.name}</option>`);
+    });
+  }
+  if (fc && typeof CATS !== 'undefined') {
+    CATS.forEach(c => {
+      fc.insertAdjacentHTML('beforeend', `<option value="${c.id}">${c.name}</option>`);
+    });
+  }
+
+  // Restore from URL hash  #fp=2&fc=5&ifp=1
+  const hash = Object.fromEntries(
+    location.hash.replace('#','').split('&')
+      .filter(s=>s.includes('=')).map(s=>s.split('='))
+  );
+  if (hash.fp  && fp)  { fp.value  = hash.fp;  }
+  if (hash.fc  && fc)  { fc.value  = hash.fc;  }
+  if (hash.ifp && ifp) { ifp.value = hash.ifp; }
+
+  applyExpenseFilter();
+  applyIncomeFilter();
+}
+
+/** Filtere Ausgaben-Zeilen und aktualisiere Summen + Info-Text. */
+function applyExpenseFilter() {
+  const pid = document.getElementById('filterPerson')?.value || '';
+  const cid = document.getElementById('filterCat')?.value    || '';
+  let shown = 0, hidden = 0;
+
+  document.querySelectorAll('#expenseBody tr').forEach(r => {
+    const rPid = r.querySelector('[name=person_id]')?.value      || '';
+    const rCid = r.querySelector('[name=category_id]')?.value    || '';
+    const match = (!pid || rPid === pid) && (!cid || rCid === cid);
+    r.style.display = match ? '' : 'none';
+    match ? shown++ : hidden++;
+  });
+
+  // Update info text
+  const info = document.getElementById('filterInfo');
+  if (info) {
+    if (!pid && !cid) {
+      info.textContent = '';
+    } else {
+      info.textContent = shown === 1 ? '1 Zeile' : `${shown} Zeilen`;
+      if (hidden) info.textContent += ` (${hidden} ausgeblendet)`;
+    }
+  }
+
+  // Persist to URL hash without page reload
+  _updateHash();
+  updateFooter();
+}
+
+/** Filtere Einnahmen-Zeilen. */
+function applyIncomeFilter() {
+  const pid = document.getElementById('incFilterPerson')?.value || '';
+  let shown = 0, hidden = 0;
+
+  document.querySelectorAll('#incomeBody tr').forEach(r => {
+    const rPid = r.querySelector('[name=inc_pid]')?.value || '';
+    const match = !pid || rPid === pid;
+    r.style.display = match ? '' : 'none';
+    match ? shown++ : hidden++;
+  });
+
+  const info = document.getElementById('incFilterInfo');
+  if (info) {
+    info.textContent = (!pid) ? '' :
+      (shown === 1 ? '1 Zeile' : `${shown} Zeilen`) +
+      (hidden ? ` (${hidden} ausgeblendet)` : '');
+  }
+
+  _updateHash();
+  updateIncomeFooter();
+}
+
+function resetExpenseFilter() {
+  const fp = document.getElementById('filterPerson');
+  const fc = document.getElementById('filterCat');
+  if (fp) fp.value = '';
+  if (fc) fc.value = '';
+  applyExpenseFilter();
+}
+
+function resetIncomeFilter() {
+  const ifp = document.getElementById('incFilterPerson');
+  if (ifp) ifp.value = '';
+  applyIncomeFilter();
+}
+
+/** Schreibt den aktuellen Filterzustand in den URL-Hash (kein Reload, debounced). */
+var _hashTimer = null;
+function _updateHash() {
+  clearTimeout(_hashTimer);
+  _hashTimer = setTimeout(function() {
+    const pid  = document.getElementById('filterPerson')?.value    || '';
+    const cid  = document.getElementById('filterCat')?.value       || '';
+    const ipid = document.getElementById('incFilterPerson')?.value || '';
+    const parts = [];
+    if (pid)  parts.push(`fp=${pid}`);
+    if (cid)  parts.push(`fc=${cid}`);
+    if (ipid) parts.push(`ifp=${ipid}`);
+    try {
+      history.replaceState(null, '', parts.length ? '#' + parts.join('&') : location.pathname + location.search);
+    } catch(e) { /* ignore rate-limit errors */ }
+  }, 100);
+}
+
+// _filterReady: var (hoisted) so it's safely falsy before initFilterDropdowns runs
+var _filterReady = false;
+
+/** Re-apply filter after rows are added/loaded (called from addRow / data load). */
+function reapplyFilters() {
+  if (!_filterReady) return;   // no-op during page init
+  _filterReady = true;  // allow reapplyFilters() from here on
+  applyExpenseFilter();
+  applyIncomeFilter();
+}
+
+document.addEventListener('DOMContentLoaded', initFilterDropdowns);
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ERSPARNIS PRO PERSON  (renderSavings)
+// ══════════════════════════════════════════════════════════════════════════════
+function renderSavings(spp) {
+  const body = document.getElementById('savingsPerPersonBody');
+  if (!body) return;
+  if (!spp || spp.length === 0) {
+    body.innerHTML = '<div class="text-center text-muted py-4"><i class="fas fa-piggy-bank fa-2x mb-2 d-block"></i>Noch keine Daten.</div>';
+    return;
+  }
+  const rows = spp.map(r => {
+    const savCls = r.savings >= 0 ? 'text-success' : 'text-danger';
+    const savSign = r.savings >= 0 ? '+' : '';
+    return `<tr>
+      <td class="fw-semibold">${r.name}</td>
+      <td class="text-end text-success">+${fmt(r.income)}</td>
+      <td class="text-end text-danger">${fmt(r.expenses)}</td>
+      <td class="text-end fw-bold ${savCls}">${savSign}${fmt(r.savings)}</td>
+    </tr>`;
+  }).join('');
+  body.innerHTML = `<div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-secondary">
+        <tr>
+          <th>Person</th>
+          <th class="text-end text-success">Einnahmen</th>
+          <th class="text-end text-danger">Ausgaben</th>
+          <th class="text-end">Ersparnis</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
 </script>
 {% endblock %}

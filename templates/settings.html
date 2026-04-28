@@ -23,7 +23,8 @@
             <div class="d-flex align-items-center gap-2 mt-2 flex-wrap">
               <i class="fas fa-wallet text-success small flex-shrink-0"></i>
               <small class="text-muted text-nowrap">Geldbeutel ab:</small>
-              <input type="month" class="form-control form-control-sm wallet-date" style="width:155px" value="{{ p.wallet_start_date or '' }}">
+              <input type="month" class="form-control form-control-sm wallet-date" style="width:155px" value="{{ p.wallet_start_date or '' }}" placeholder="JJJJ-MM" title="Format: JJJJ-MM, z.B. 2026-01">
+              <small class="text-muted" style="font-size:.7rem; color:#6c757d !important" title="Monat ab dem der Geldbeutel berechnet wird">z.B. 2026-01</small>
               <small class="text-muted text-nowrap">Startwert:</small>
               <div class="input-group input-group-sm" style="width:130px">
                 <input type="number" class="form-control form-control-sm text-end wallet-amount" step="0.01" min="0" value="{{ p.wallet_start_amount or '' }}" placeholder="0,00">
@@ -248,13 +249,28 @@ function nextCatColor() {
 // ── Persons ───────────────────────────────────────────────────────────────────
 function addPersonRow(name='',id=null,wd='',wa=''){
   const li=document.createElement('li'); li.className='list-group-item py-2 px-3'; if(id) li.dataset.id=id;
-  li.innerHTML=`<div class="d-flex align-items-center gap-2"><i class="fas fa-user text-muted flex-shrink-0"></i><input type="text" class="form-control form-control-sm" value="${name}" placeholder="Name"><button onclick="this.closest('li').remove()" class="btn btn-sm btn-outline-danger flex-shrink-0 px-2"><i class="fas fa-trash"></i></button></div><div class="d-flex align-items-center gap-2 mt-2 flex-wrap"><i class="fas fa-wallet text-success small flex-shrink-0"></i><small class="text-muted text-nowrap">Geldbeutel ab:</small><input type="month" class="form-control form-control-sm wallet-date" style="width:155px" value="${wd}"><small class="text-muted text-nowrap">Startwert:</small><div class="input-group input-group-sm" style="width:130px"><input type="number" class="form-control form-control-sm text-end wallet-amount" step="0.01" min="0" value="${wa}" placeholder="0,00"><span class="input-group-text">€</span></div></div>`;
+  li.innerHTML=`<div class="d-flex align-items-center gap-2"><i class="fas fa-user text-muted flex-shrink-0"></i><input type="text" class="form-control form-control-sm" value="${name}" placeholder="Name"><button onclick="this.closest('li').remove()" class="btn btn-sm btn-outline-danger flex-shrink-0 px-2"><i class="fas fa-trash"></i></button></div><div class="d-flex align-items-center gap-2 mt-2 flex-wrap"><i class="fas fa-wallet text-success small flex-shrink-0"></i><small class="text-muted text-nowrap">Geldbeutel ab:</small><input type="month" class="form-control form-control-sm wallet-date" style="width:155px" value="${wd}" placeholder="JJJJ-MM" title="Format: JJJJ-MM, z.B. 2026-01"><small class="text-muted text-nowrap">Startwert:</small><div class="input-group input-group-sm" style="width:130px"><input type="number" class="form-control form-control-sm text-end wallet-amount" step="0.01" min="0" value="${wa}" placeholder="0,00"><span class="input-group-text">€</span></div></div>`;
   document.getElementById('personList').appendChild(li);
   li.querySelector('input[type=text]').focus();
 }
 async function savePersons(){
   const btn=document.getElementById('savePersonsBtn'); btn.disabled=true;
-  const items=Array.from(document.querySelectorAll('#personList li')).map(li=>({id:li.dataset.id?parseInt(li.dataset.id):null,name:li.querySelector('input[type=text]').value.trim(),wallet_start_date:li.querySelector('.wallet-date')?.value||null,wallet_start_amount:parseFloat(li.querySelector('.wallet-amount')?.value)||0})).filter(p=>p.name);
+  const MONTH_RE = /^\d{4}-\d{2}$/;
+  const items=Array.from(document.querySelectorAll('#personList li')).map(li=>{
+    const wdInput = li.querySelector('.wallet-date');
+    let wd = wdInput?.value?.trim() || null;
+    if (wd && !MONTH_RE.test(wd)) {
+      wdInput.classList.add('is-invalid');
+      setTimeout(()=>wdInput.classList.remove('is-invalid'), 2500);
+      wd = null; // don't save invalid date
+    }
+    return {
+      id: li.dataset.id ? parseInt(li.dataset.id) : null,
+      name: li.querySelector('input[type=text]').value.trim(),
+      wallet_start_date: wd,
+      wallet_start_amount: parseFloat(li.querySelector('.wallet-amount')?.value)||0
+    };
+  }).filter(p=>p.name);
   const res=await fetch('/api/persons/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(items)});
   const data=await res.json();
   if(data.success){const l=document.getElementById('personList');l.innerHTML='';data.persons.forEach(p=>addPersonRow(p.name,p.id,p.wallet_start_date||'',p.wallet_start_amount||''));showToast('Personen gespeichert!');}
