@@ -419,20 +419,21 @@ function buildCatOpts(sel) {
   CATS.forEach(x=>{s+=`<option value="${x.id}"${x.id==sel?' selected':''}>${x.name}${x.is_split?' ⚖️':''}</option>`;});
   return s;
 }
-function addRow(day='',desc='',pid='',cid='',amt='',isCash=false,pfpid='') {
+function addRow(day='',desc='',pid='',cid='',amt='',isCash=false,pfpid='',autoFocus=true) {
   const tr=document.createElement('tr');
+  const _fmtAmt=toAmtStr(amt);
   tr.innerHTML=`
-    <td><input type="number" class="form-control form-control-sm text-center" name="day" value="${day}" min="1" max="31" placeholder="TT"></td>
+    <td><input type="text" inputmode="numeric" class="form-control form-control-sm text-center" name="day" value="${day}" placeholder="TT"></td>
     <td><input type="text" class="form-control form-control-sm" name="description" value="${desc}" placeholder="Beschreibung..."></td>
     <td><select class="form-select form-select-sm" name="person_id">${buildPersonOpts(pid)}</select></td>
     <td><select class="form-select form-select-sm" name="paid_for_person_id" title="Vollständig für diese Person bezahlt" onchange="updatePaidForStyle(this)">${buildPersonOpts(pfpid)}</select></td>
     <td><select class="form-select form-select-sm cat-select" name="category_id" onchange="updateRowColor(this)">${buildCatOpts(cid)}</select></td>
-    <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="${amt}" placeholder="0,00 oder =12+3" onfocus="formulaFocus(this)" onblur="formulaBlur(this,'expense'); updateFooter()" oninput="updateFooter()"></td>
+    <td><input type="text" class="form-control form-control-sm text-end formula-amount" name="amount" value="${_fmtAmt}" placeholder="0,00 oder =12+3" onfocus="formulaFocus(this)" onblur="formulaBlur(this,'expense'); updateFooter()" oninput="updateFooter()"></td>
     <td class="text-center align-middle"><div class="form-check d-flex justify-content-center mb-0"><input class="form-check-input cash-check" type="checkbox" name="is_cash" title="Barzahlung" ${isCash?'checked':''} onchange="updateFooter()"></div></td>
     <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('tr').remove();updateFooter()"><i class="fas fa-times"></i></button></td>`;
   document.getElementById('expenseBody').appendChild(tr);
   const s=tr.querySelector('.cat-select'); if(cid) s.value=cid; updateRowColor(s); updateFooter();
-  tr.querySelector('[name=day]').focus();
+  if(autoFocus) tr.querySelector('[name=day]').focus();
 }
 function updatePaidForStyle(sel) {
   const tr = sel.closest('tr');
@@ -482,7 +483,7 @@ function sortTable() {
   if(rows.length<2) return;
   const data=rows.map(tr=>({day:parseInt(tr.querySelector('[name=day]').value)||0,description:tr.querySelector('[name=description]').value,person_id:tr.querySelector('[name=person_id]').value,category_id:tr.querySelector('[name=category_id]').value,amount:tr.querySelector('[name=amount]').value,is_cash:tr.querySelector('.cash-check')?.checked||false}));
   data.sort((a,b)=>a.day!==b.day?a.day-b.day:a.description.localeCompare(b.description,'de',{sensitivity:'base'}));
-  tbody.innerHTML=''; data.forEach(r=>addRow(r.day||'',r.description,r.person_id,r.category_id,r.amount,r.is_cash));
+  tbody.innerHTML=''; data.forEach(r=>addRow(r.day||'',r.description,r.person_id,r.category_id,r.amount,r.is_cash,'',false));
 }
 
 // ── Speichern ─────────────────────────────────────────────────────────────
@@ -703,23 +704,24 @@ function renderSettlement(s) {
 
 
 // ── Einnahmen-Tabelle ─────────────────────────────────────────────────────────
-function addIncomeRow(day='', desc='', pid='', cid='', amt='') {
+function addIncomeRow(day='', desc='', pid='', cid='', amt='', autoFocus=true) {
   const em = document.getElementById('incomeEmptyMsg'); if(em) em.remove();
   const tr = document.createElement('tr');
+  const _fmtIncAmt=toAmtStr(amt);
   let pOpts = '<option value="">—</option>';
   PERSONS.forEach(p => { pOpts += `<option value="${p.id}"${p.id==pid?' selected':''}>${p.name}</option>`; });
   let cOpts = '<option value="">— keine —</option>';
   CATS.forEach(c => { cOpts += `<option value="${c.id}"${c.id==cid?' selected':''}>${c.name}</option>`; });
   tr.innerHTML = `
-    <td><input type="number" class="form-control form-control-sm text-center" name="inc_day" value="${day}" min="1" max="31" placeholder="TT"></td>
+    <td><input type="text" inputmode="numeric" class="form-control form-control-sm text-center" name="inc_day" value="${day}" placeholder="TT"></td>
     <td><input type="text" class="form-control form-control-sm" name="inc_desc" value="${desc}" placeholder="z.B. Gehalt…"></td>
     <td><select class="form-select form-select-sm" name="inc_pid">${pOpts}</select></td>
     <td><select class="form-select form-select-sm" name="inc_cid">${cOpts}</select></td>
-    <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="inc_amt" value="${amt}" placeholder="0,00 oder =12+3" onfocus="formulaFocus(this)" onblur="formulaBlur(this,'income'); updateIncomeFooter()" oninput="updateIncomeFooter()"></td>
+    <td><input type="text" class="form-control form-control-sm text-end formula-amount" name="inc_amt" value="${_fmtIncAmt}" placeholder="0,00 oder =12+3" onfocus="formulaFocus(this)" onblur="formulaBlur(this,'income'); updateIncomeFooter()" oninput="updateIncomeFooter()"></td>
     <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('tr').remove();updateIncomeFooter()"><i class="fas fa-times"></i></button></td>`;
   document.getElementById('incomeBody').appendChild(tr);
   updateIncomeFooter();
-  tr.querySelector('[name=inc_day]').focus();
+  if(autoFocus) tr.querySelector('[name=inc_day]').focus();
 }
 
 function updateIncomeFooter() {
@@ -791,12 +793,12 @@ function clearTable(bodyId, isExpense) {
 
 // ── Init + Tab-Listener ───────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  if(EXISTING.length>0){EXISTING.forEach(e=>{ addRow(e.day,e.description,e.person_id,e.category_id,e.amount,!!e.is_cash,e.paid_for_person_id||''); });
+  if(EXISTING.length>0){EXISTING.forEach(e=>{ addRow(e.day,e.description,e.person_id,e.category_id,e.amount,!!e.is_cash,e.paid_for_person_id||'',false); });
   document.querySelectorAll('[name=paid_for_person_id]').forEach(s=>updatePaidForStyle(s));}
   else addRow();
   // Load income rows from server
   if(typeof INCOME_INIT !== 'undefined' && INCOME_INIT.length > 0){
-    INCOME_INIT.forEach(i => addIncomeRow(i.day, i.description, i.person_id, i.category_id||'', i.amount));
+    INCOME_INIT.forEach(i => addIncomeRow(i.day, i.description, i.person_id, i.category_id||'', i.amount, false));
   }
   document.getElementById('expenseBody').addEventListener('keydown',function(e){
     if(e.key!=='Tab'||e.shiftKey) return;
@@ -830,6 +832,13 @@ function evalFormula(expr) {
  * Parse any amount input (text or number) to a float.
  * Handles German comma decimals, strips formula prefix if still raw.
  */
+// Format any amount value (float or string, dot or comma) to German "1,50" display string
+function toAmtStr(v) {
+  if (v === '' || v === null || v === undefined) return '';
+  const n = parseFloat(String(v).replace(',', '.'));
+  return isNaN(n) ? String(v) : n.toFixed(2).replace('.', ',');
+}
+
 function parseAmtVal(input) {
   if (!input) return NaN;
   // If the field still shows raw formula (shouldn't happen, but safety net)
@@ -878,10 +887,10 @@ function formulaBlur(input, type) {
   } else {
     // Plain number typed: clear any stored formula
     delete input.dataset.formula;
-    // Normalize comma → standard display
-    const num = parseFloat(raw.replace(',', '.'));
-    if (!isNaN(num) && raw !== '') {
-      input.value = num.toFixed(2).replace('.', ',');
+    // Normalize to German comma display
+    const formatted = toAmtStr(raw);
+    if (formatted !== '' && raw !== '') {
+      input.value = formatted;
     }
   }
 }
@@ -1086,17 +1095,16 @@ function _updateHash() {
     if (ipid) parts.push(`ifp=${ipid}`);
     try {
       history.replaceState(null, '', parts.length ? '#' + parts.join('&') : location.pathname + location.search);
-    } catch(e) { /* ignore rate-limit errors */ }
+    } catch(e) {}
   }, 100);
 }
 
-// _filterReady: var (hoisted) so it's safely falsy before initFilterDropdowns runs
 var _filterReady = false;
 
 /** Re-apply filter after rows are added/loaded (called from addRow / data load). */
 function reapplyFilters() {
-  if (!_filterReady) return;   // no-op during page init
-  _filterReady = true;  // allow reapplyFilters() from here on
+  if (!_filterReady) return;
+  _filterReady = true;
   applyExpenseFilter();
   applyIncomeFilter();
 }
