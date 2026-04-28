@@ -232,6 +232,25 @@ def calculate_category_settlements(year, month, conn):
         result[cn] = {p: round(paid_by.get(p, 0) - fair_share, 2) for p in persons}
     return result
 
+def calculate_savings_per_person(year, month, conn):
+    """Einnahmen - Ausgaben pro Person fuer den Monat."""
+    persons = [dict(r) for r in conn.execute('SELECT id, name FROM persons ORDER BY name')]
+    inc_rows = conn.execute(
+        'SELECT person_id, SUM(amount) as total FROM income WHERE year=? AND month=? GROUP BY person_id',
+        (year, month)).fetchall()
+    exp_rows = conn.execute(
+        'SELECT person_id, SUM(amount) as total FROM expenses WHERE year=? AND month=? GROUP BY person_id',
+        (year, month)).fetchall()
+    inc_map = {r['person_id']: float(r['total'] or 0) for r in inc_rows}
+    exp_map = {r['person_id']: float(r['total'] or 0) for r in exp_rows}
+    result = []
+    for p in persons:
+        pid = p['id']
+        inc = round(inc_map.get(pid, 0), 2)
+        exp = round(exp_map.get(pid, 0), 2)
+        result.append({'name': p['name'], 'income': inc, 'expenses': exp, 'savings': round(inc - exp, 2)})
+    return result or None
+
 def calculate_wallet(year, month, conn):
     persons = conn.execute(
         'SELECT * FROM persons WHERE wallet_start_date IS NOT NULL AND wallet_start_date != "" ORDER BY name'
@@ -312,6 +331,7 @@ def month_view(year, month):
     settlement  = calculate_settlement(year, month, conn)
     ov_settlements = calculate_category_settlements(year, month, conn)
     wallet      = calculate_wallet(year, month, conn)
+    savings_pp  = calculate_savings_per_person(year, month, conn)
     ms = conn.execute('SELECT settled,settled_at FROM month_status WHERE year=? AND month=?', (year,month)).fetchone()
     is_settled = bool(ms and ms['settled']); settled_at = ms['settled_at'] if ms else None
     if is_settled and ov_settlements:
@@ -326,7 +346,7 @@ def month_view(year, month):
         ov_p=ov_p, ov_c=ov_c, settlement=settlement,
         income=income, income_total=income_total,
         expense_total=expense_total_mv, savings=savings_mv,
-        ov_settlements=ov_settlements, wallet=wallet,
+        ov_settlements=ov_settlements, wallet=wallet, savings_pp=savings_pp,
         is_settled=is_settled, settled_at=settled_at,
         prev_year=py, prev_month=pm, next_year=ny, next_month=nm)
 
@@ -352,10 +372,12 @@ def save_expenses():
     settlement  = calculate_settlement(year, month, conn)
     ov_settlements = calculate_category_settlements(year, month, conn)
     wallet      = calculate_wallet(year, month, conn)
+    savings_pp  = calculate_savings_per_person(year, month, conn)
     conn.close()
     return jsonify({'success': True,
         'ov_p': {k: dict(v) for k,v in ov_p.items()}, 'ov_c': ov_c,
-        'settlement': settlement, 'wallet': wallet})
+        'settlement': settlement, 'wallet': wallet,
+        'savings_pp': calculate_savings_per_person(year, month, conn)})
 
 @app.route('/api/persons/save', methods=['POST'])
 def save_persons():
@@ -365,7 +387,10 @@ def save_persons():
     for did in existing - incoming: conn.execute('DELETE FROM persons WHERE id=?', (did,))
     for p in data:
         n  = (p.get('name') or '').strip()
-        wd = p.get('wallet_start_date') or None
+        wd_raw = (p.get('wallet_start_date') or '').strip()
+        # Validate YYYY-MM format; reject anything else
+        import re as _re
+        wd = wd_raw if wd_raw and _re.match(r'^\d{4}-\d{2}$', wd_raw) else None
         wa = float(p.get('wallet_start_amount') or 0)
         if not n: continue
         if p.get('id'):
@@ -546,10 +571,11 @@ def save_income():
     inc_sum = conn.execute('SELECT COALESCE(SUM(amount),0) as t FROM income   WHERE year=? AND month=?',(year,month)).fetchone()['t']
     exp_sum = conn.execute('SELECT COALESCE(SUM(amount),0) as t FROM expenses WHERE year=? AND month=?',(year,month)).fetchone()['t']
     rows    = [dict(r) for r in conn.execute('SELECT * FROM income WHERE year=? AND month=? ORDER BY day,id',(year,month))]
+    spp = calculate_savings_per_person(year, month, conn)
     conn.close()
     return jsonify({'success': True, 'income': rows,
                     'income_total': round(inc_sum,2), 'expense_total': round(exp_sum,2),
-                    'savings': round(inc_sum-exp_sum,2)})
+                    'savings': round(inc_sum-exp_sum,2), 'savings_pp': spp})
 
 @app.route('/api/month/settle', methods=['POST'])
 def settle_month():
@@ -740,6 +766,39 @@ def overview():
 
     persons_list = sorted(set(list(structured.keys()) + list(inc_structured.keys())))
 
+    # ── Personen-Gesamtübersicht fuer AP6 ─────────────────────────────────────
+    person_totals = {}
+    for pn in persons_list:
+        inc_total = round(sum(
+            sum(cats.values())
+            for cats in inc_structured.get(pn, {}).values()
+        ), 2)
+        exp_total = round(sum(
+            sum(cats.values())
+            for cats in structured.get(pn, {}).values()
+        ), 2)
+        person_totals[pn] = {
+            'inc': inc_total,
+            'exp': exp_total,
+            'savings': round(inc_total - exp_total, 2)
+        }
+
+    # ── Jahresgrupierung fuer AP5 ──────────────────────────────────────────────
+    months_by_year = {}
+    for y, m in sorted(set(month_keys), reverse=True):
+        mk = f'{y}-{m}'
+        inc_total = round(sum(income_map.get((y,m), {}).values()), 2)
+        exp_total = round(exp_totals_by_month.get(mk, 0), 2)
+        months_by_year.setdefault(y, []).append({
+            'month': m, 'mk': mk,
+            'inc': inc_total, 'exp': exp_total,
+            'savings': round(inc_total - exp_total, 2),
+            'settled': (y, m) in settled_months,
+        })
+    # Sort years desc, months desc within each year
+    months_by_year = {y: sorted(ms, key=lambda x: -x['month'])
+                      for y, ms in sorted(months_by_year.items(), reverse=True)}
+
     return render_template('overview.html', active='overview',
         structured=structured,
         inc_structured=inc_structured,
@@ -751,7 +810,9 @@ def overview():
         settled_months=[(y,m) for y,m in settled_months],
         income_map={(f'{k[0]}-{k[1]}'):v for k,v in income_map.items()},
         exp_totals_by_month={k:round(v,2) for k,v in exp_totals_by_month.items()},
-        chart_data=chart_data_obj)
+        chart_data=chart_data_obj,
+        months_by_year=months_by_year,
+        person_totals=person_totals)
 
 
 # ── PDF Kontoauszug Import ─────────────────────────────────────────────────────
