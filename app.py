@@ -377,7 +377,7 @@ def save_expenses():
     return jsonify({'success': True,
         'ov_p': {k: dict(v) for k,v in ov_p.items()}, 'ov_c': ov_c,
         'settlement': settlement, 'wallet': wallet,
-        'savings_pp': calculate_savings_per_person(year, month, conn)})
+        'savings_pp': savings_pp})
 
 @app.route('/api/persons/save', methods=['POST'])
 def save_persons():
