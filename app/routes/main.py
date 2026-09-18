@@ -870,6 +870,28 @@ _MAX_LOGIN_ATTEMPTS = 5
 _MAX_IP_ATTEMPTS = 30
 _LOGIN_LOCKOUT_SECONDS = 60
 
+# Sicherheit (Befund I3): Zeitkanal am Login, der gueltige Benutzernamen verraet.
+#
+# Frueher stand dort `if user and check_password_hash(...)`. Bei einem
+# unbekannten Benutzernamen schliesst `and` kurz, der teure scrypt-Vergleich
+# entfaellt komplett und die Antwort kommt messbar frueher - gemessen 0,7 ms
+# gegenueber 36,6 ms bei einem existierenden Konto, also Faktor 50 und aus der
+# Ferne trivial ablesbar. Damit laesst sich aufzaehlen, welche Konten im
+# Haushalt existieren; erst danach lohnt sich Brute-Force oder das gezielte
+# Aussperren per Lockout. Die absichtlich unspezifische Fehlermeldung nuetzt
+# nichts, wenn die Antwortzeit die Auskunft gibt.
+#
+# Gegenmittel: existiert keine Zeile, wird das eingegebene Passwort gegen
+# diesen festen Dummy-Hash geprueft. Der Vergleich sieht sinnlos aus - sein
+# Ergebnis wird verworfen - kostet aber genau dieselbe scrypt-Rechenzeit.
+# BITTE NICHT "WEGOPTIMIEREN": ohne ihn ist der Zeitkanal sofort zurueck.
+#
+# Der Dummy kann niemanden anmelden: der Erfolgszweig unten verlangt
+# zusaetzlich eine echte Benutzerzeile, und das Klartextpasswort hier ist
+# keinem Konto zugeordnet.
+_DUMMY_PASSWORT = 'kassenstuerzle-dummy-nie-ein-konto'
+_DUMMY_PASSWORT_HASH = generate_password_hash(_DUMMY_PASSWORT)
+
 
 @main_bp.route('/login', methods=['GET', 'POST'])
 def login():
@@ -903,7 +925,18 @@ def login():
         # deaktiviertes Konto ohne den teuren Hash-Vergleich und damit messbar
         # schneller - ein Zeitkanal, der genau das verraet, was die
         # unspezifische Fehlermeldung verbergen soll.
-        if user and check_password_hash(user['password_hash'], password) and user['is_active']:
+        #
+        # Und aus demselben Grund (Befund I3) laeuft der scrypt-Vergleich auch
+        # dann, wenn es den Benutzernamen gar nicht gibt: dann eben gegen
+        # _DUMMY_PASSWORT_HASH. Das Ergebnis wird verworfen, nur die Rechenzeit
+        # zaehlt. Siehe den ausfuehrlichen Kommentar bei _DUMMY_PASSWORT_HASH.
+        if user is not None:
+            passwort_stimmt = check_password_hash(user['password_hash'], password)
+        else:
+            check_password_hash(_DUMMY_PASSWORT_HASH, password)
+            passwort_stimmt = False
+
+        if user and passwort_stimmt and user['is_active']:
             # Erfolg: Zähler zurücksetzen, Session neu aufbauen
             if key:
                 _login_attempts[key] = {'count': 0, 'locked_until': 0}

@@ -249,3 +249,61 @@ def test_erzwungener_wechsel_ohne_flag_wird_abgewiesen(auth_client, csrf, db):
         "SELECT password_hash, session_epoch FROM users WHERE username='admin'").fetchone()
     assert nachher['password_hash'] == vorher['password_hash']
     assert nachher['session_epoch'] == vorher['session_epoch']
+
+
+# ── Befund I3: Zeitkanal am Login verraet gueltige Benutzernamen ─────────────
+
+def test_check_password_hash_laeuft_auch_fuer_unbekannten_benutzernamen(client, monkeypatch):
+    """Regression Befund I3: Benutzernamen-Aufzaehlung ueber die Antwortzeit.
+
+    Frueher stand dort `if user and check_password_hash(...)`. Bei einem
+    unbekannten Benutzernamen schloss `and` kurz, der teure scrypt-Vergleich
+    entfiel und die Antwort kam messbar frueher (gemessen 0,7 ms gegenueber
+    36,6 ms) - damit liessen sich die existierenden Konten des Haushalts von
+    aussen aufzaehlen.
+
+    Die HTTP-Antwort ist in beiden Faellen identisch (200 mit derselben
+    unspezifischen Meldung), der Unterschied steckt allein in der Rechenzeit.
+    Eine Messung mit der Uhr waere flatterig, deshalb ist der Beweis hier:
+    check_password_hash wird auch fuer einen NICHT existierenden Benutzernamen
+    aufgerufen, und zwar gegen den Dummy-Hash.
+    """
+    m._login_attempts.clear()
+    m._ip_attempts.clear()
+    try:
+        aufrufe = []
+        echter_check_password_hash = m.check_password_hash
+
+        def spionierender_check_password_hash(pwhash, password):
+            aufrufe.append((pwhash, password))
+            return echter_check_password_hash(pwhash, password)
+
+        monkeypatch.setattr(m, 'check_password_hash', spionierender_check_password_hash)
+
+        res = client.post('/login', data={'username': 'gibt-es-garantiert-nicht',
+                                          'password': 'irgendwas-falsches'})
+        assert res.status_code == 200, 'unbekannter Benutzer darf nicht angemeldet werden'
+        assert len(aufrufe) == 1, (
+            'check_password_hash muss auch fuer einen unbekannten Benutzernamen '
+            'laufen, sonst antwortet der Login messbar schneller und verraet, '
+            'welche Konten existieren'
+        )
+        assert aufrufe[0][0] == m._DUMMY_PASSWORT_HASH, (
+            'der Vergleich muss gegen den festen Dummy-Hash laufen'
+        )
+        assert aufrufe[0][1] == 'irgendwas-falsches'
+
+        # Der Dummy darf kein Schluesselloch sein: wer das Klartext-Passwort
+        # kennt (es steht im Quelltext), darf sich damit unter keinem Namen
+        # anmelden - weder unter einem unbekannten noch unter 'admin'.
+        for name in ('gibt-es-garantiert-nicht', 'admin', ''):
+            res = client.post('/login', data={'username': name,
+                                              'password': m._DUMMY_PASSWORT})
+            assert res.status_code == 200, (
+                f'Anmeldung mit dem Dummy-Passwort als {name!r} wurde akzeptiert'
+            )
+            with client.session_transaction() as sess:
+                assert not sess.get('logged_in')
+    finally:
+        m._login_attempts.clear()
+        m._ip_attempts.clear()
