@@ -1749,7 +1749,9 @@ function wizardZeile(v) {
   row.className = 'd-flex flex-wrap align-items-center gap-2';
   const cb = document.createElement('input');
   cb.type = 'checkbox'; cb.className = 'form-check-input wizard-pick';
-  cb.dataset.personId = v.person_id; cb.checked = true;
+  // Bewusst NICHT vorangehakt: Konten entstehen nur durch aktive Auswahl,
+  // sonst legt ein unbedachter Klick Logins fuer alle Personen an.
+  cb.dataset.personId = v.person_id;
   const label = document.createElement('span');
   label.className = 'fw-semibold'; label.style.minWidth = '8rem';
   label.textContent = v.person_name;
