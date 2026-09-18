@@ -1238,7 +1238,25 @@ function zelle(text) {
 function benutzerZeile(u) {
   const tr = document.createElement('tr');
   tr.appendChild(zelle(u.username));
-  tr.appendChild(zelle(u.person_name));
+
+  // Personen-Zuordnung ist der Kern von Modell A: ohne Auswahlfeld liesse
+  // sich ein spaeter angelegtes Konto nie mit einer Person verknuepfen.
+  const tdPerson = document.createElement('td');
+  const pSel = document.createElement('select');
+  pSel.className = 'form-select form-select-sm';
+  const keine = document.createElement('option');
+  keine.value = ''; keine.textContent = t('settings.wizard_me_none');
+  pSel.appendChild(keine);
+  PERSONEN_FUER_USER.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p.id; o.textContent = p.name;
+    if (u.person_id === p.id) o.selected = true;
+    pSel.appendChild(o);
+  });
+  pSel.addEventListener('change', () => benutzerAendern(u.id,
+    {person_id: pSel.value ? parseInt(pSel.value, 10) : null}));
+  tdPerson.appendChild(pSel);
+  tr.appendChild(tdPerson);
 
   const tdRolle = document.createElement('td');
   const sel = document.createElement('select');
