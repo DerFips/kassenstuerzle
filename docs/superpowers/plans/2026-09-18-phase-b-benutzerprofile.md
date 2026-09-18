@@ -995,6 +995,13 @@ def api_users_create():
     if not username:
         return jsonify(success=False, error=t('srv.missing_data')), 400
 
+    conn_pruef = get_db()
+    if person_id is not None and conn_pruef.execute(
+            'SELECT id FROM users WHERE person_id=?', (person_id,)).fetchone():
+        # Vorab pruefen, damit die Meldung stimmt: der IntegrityError unten
+        # kann sowohl vom Benutzernamen als auch vom Personen-Index kommen.
+        return jsonify(success=False, error=t('srv.person_already_linked')), 409
+
     passwort = _neues_initialpasswort()
     conn = get_db()
     try:
@@ -1023,7 +1030,13 @@ def api_users_update(user_id):
 
     eigene = user_id == session.get('user_id')
     neue_rolle = d.get('role') if d.get('role') in ('admin', 'member') else None
-    neu_aktiv = None if d.get('is_active') is None else (1 if d.get('is_active') else 0)
+    # Robust gegen "0"/"false" als String - ein truthy-Test wuerde daraus
+    # versehentlich eine Aktivierung machen.
+    _roh_aktiv = d.get('is_active')
+    if _roh_aktiv is None:
+        neu_aktiv = None
+    else:
+        neu_aktiv = 0 if str(_roh_aktiv).strip().lower() in ('0', 'false', 'no', '') else 1
 
     if eigene and (neue_rolle is not None or neu_aktiv == 0):
         return jsonify(success=False, error=t('srv.cannot_change_own_role')), 400
