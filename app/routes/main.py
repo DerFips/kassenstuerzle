@@ -1136,47 +1136,70 @@ def recurring_for_month(year, month):
 @main_bp.route('/api/income/save', methods=['POST'])
 @login_required
 def save_income():
-    d = request.json
-    year, month = d['year'], d['month']
+    d = request.get_json(silent=True)
+    stale = _require_v2(d)
+    if stale:
+        return stale
+    year, month = int(d['year']), int(d['month'])
+    rows = d.get('rows') or []
+    deleted_ids = d.get('deleted_ids') or []
     conn = get_db()
+    id_map = {}
 
-    incoming = d.get('income', [])
-    existing_count = conn.execute(
-        "SELECT COUNT(*) as c FROM income WHERE year=? AND month=?", (year, month)
-    ).fetchone()['c']
+    for raw in deleted_ids:
+        try:
+            rid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        conn.execute('DELETE FROM income WHERE id=? AND year=? AND month=?', (rid, year, month))
 
-    # Sicherheitsbremse: Wenn plötzlich viel weniger Zeilen kommen als vorher da waren,
-    # NICHT löschen, sondern Fehler zurückgeben.
-    if existing_count >= 3 and len(incoming) < existing_count / 2:
-        return jsonify(
-            success=False,
-            error=t('srv.save_lock_error', existing=existing_count, incoming=len(incoming))
-        ), 409
-
-    conn.execute("DELETE FROM income WHERE year=? AND month=?", (year, month))
-    for i in incoming:
+    for i in rows:
         try:
             amt = float(i.get('amount') or 0)
-        except Exception:
+        except (TypeError, ValueError):
             amt = 0
-        if amt == 0:
-            continue
-        pid = int(i['person_id']) if i.get('person_id') else None
-        cid = int(i['category_id']) if i.get('category_id') else None
-        conn.execute(
-            "INSERT INTO income (year,month,day,description,person_id,category_id,amount) VALUES (?,?,?,?,?,?,?)",
-            (year, month, int(i.get('day') or 1), i.get('description',''), pid, cid, amt)
-        )
+        try:
+            rid = int(i['id']) if i.get('id') else None
+        except (TypeError, ValueError):
+            rid = None
 
+        if amt == 0:
+            if rid is not None:
+                conn.execute('DELETE FROM income WHERE id=? AND year=? AND month=?',
+                             (rid, year, month))
+            continue
+
+        pid  = int(i['person_id'])   if i.get('person_id')   else None
+        cid  = int(i['category_id']) if i.get('category_id') else None
+        day  = int(i.get('day') or 1)
+        desc = i.get('description', '')
+
+        if rid is not None:
+            conn.execute(
+                'UPDATE income SET day=?, description=?, person_id=?, category_id=?, amount=?'
+                ' WHERE id=? AND year=? AND month=?',
+                (day, desc, pid, cid, amt, rid, year, month))
+        else:
+            cur = conn.execute(
+                'INSERT INTO income (year,month,day,description,person_id,category_id,amount)'
+                ' VALUES (?,?,?,?,?,?,?)',
+                (year, month, day, desc, pid, cid, amt))
+            ck = i.get('client_key')
+            if ck:
+                id_map[str(ck)] = cur.lastrowid
+
+    activity_version = _bump_activity(conn, _month_scope(year, month))
     conn.commit()
-    inc_sum = conn.execute('SELECT COALESCE(SUM(amount),0) as t FROM income   WHERE year=? AND month=?',(year,month)).fetchone()['t']
-    exp_sum = conn.execute('SELECT COALESCE(SUM(amount),0) as t FROM expenses WHERE year=? AND month=?',(year,month)).fetchone()['t']
-    rows    = [dict(r) for r in conn.execute('SELECT * FROM income WHERE year=? AND month=? ORDER BY day,id',(year,month))]
+
+    inc_sum = conn.execute('SELECT COALESCE(SUM(amount),0) as t FROM income   WHERE year=? AND month=?', (year, month)).fetchone()['t']
+    exp_sum = conn.execute('SELECT COALESCE(SUM(amount),0) as t FROM expenses WHERE year=? AND month=?', (year, month)).fetchone()['t']
+    result_rows = [dict(r) for r in conn.execute('SELECT * FROM income WHERE year=? AND month=? ORDER BY day,id', (year, month))]
     spp = calculate_savings_per_person(year, month, conn)
     conn.close()
-    return jsonify({'success': True, 'income': rows,
-                    'income_total': round(inc_sum,2), 'expense_total': round(exp_sum,2),
-                    'savings': round(inc_sum-exp_sum,2), 'savings_pp': spp})
+    return jsonify({'success': True, 'income': result_rows,
+                    'id_map': id_map, 'activity_version': activity_version,
+                    'income_total': round(inc_sum, 2), 'expense_total': round(exp_sum, 2),
+                    'savings': round(inc_sum - exp_sum, 2), 'savings_pp': spp})
 
 @main_bp.route('/api/month/settle', methods=['POST'])
 @login_required
