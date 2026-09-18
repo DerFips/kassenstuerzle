@@ -854,34 +854,68 @@ def month_view(year, month):
 @main_bp.route('/api/expenses/save', methods=['POST'])
 @login_required
 def save_expenses():
-    d = request.json; year, month = d['year'], d['month']
+    d = request.get_json(silent=True)
+    stale = _require_v2(d)
+    if stale:
+        return stale
+    year, month = int(d['year']), int(d['month'])
+    rows = d.get('rows') or []
+    deleted_ids = d.get('deleted_ids') or []
     conn = get_db()
-    incoming = d.get('expenses', [])
-    existing_count = conn.execute(
-        'SELECT COUNT(*) as c FROM expenses WHERE year=? AND month=?', (year, month)
-    ).fetchone()['c']
+    id_map = {}
 
-    if existing_count >= 3 and len(incoming) < existing_count / 2:
-        return jsonify(
-            success=False,
-            error=t('srv.save_lock_error', existing=existing_count, incoming=len(incoming))
-        ), 409
+    # 1) Ausdrücklich gelöschte Zeilen entfernen
+    for raw in deleted_ids:
+        try:
+            rid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        conn.execute('DELETE FROM expenses WHERE id=? AND year=? AND month=?', (rid, year, month))
 
-    conn.execute('DELETE FROM expenses WHERE year=? AND month=?', (year, month))
-    for e in incoming:
-        try: amt = float(e.get('amount') or 0)
-        except: amt = 0
-        if amt == 0: continue
-        pid    = int(e['person_id'])        if e.get('person_id')        else None
-        cid    = int(e['category_id'])     if e.get('category_id')     else None
-        pfpid  = int(e['paid_for_person_id']) if e.get('paid_for_person_id') else None
+    # 2) Zeilen anlegen bzw. aktualisieren (nie löschen, was hier fehlt)
+    for e in rows:
+        try:
+            amt = float(e.get('amount') or 0)
+        except (TypeError, ValueError):
+            amt = 0
+        try:
+            rid = int(e['id']) if e.get('id') else None
+        except (TypeError, ValueError):
+            rid = None
+
+        if amt == 0:
+            # Geleerter Betrag: bestehende Zeile löschen, neue ignorieren
+            if rid is not None:
+                conn.execute('DELETE FROM expenses WHERE id=? AND year=? AND month=?',
+                             (rid, year, month))
+            continue
+
+        pid     = int(e['person_id'])          if e.get('person_id')          else None
+        cid     = int(e['category_id'])        if e.get('category_id')        else None
+        pfpid   = int(e['paid_for_person_id']) if e.get('paid_for_person_id') else None
         is_cash = 1 if e.get('is_cash') else 0
-        rfn = e.get('receipt_filename') or None
-        conn.execute(
-            'INSERT INTO expenses (year,month,day,description,person_id,category_id,amount,is_cash,paid_for_person_id,receipt_filename)'
-            ' VALUES (?,?,?,?,?,?,?,?,?,?)',
-            (year, month, int(e.get('day') or 1), e.get('description',''), pid, cid, amt, is_cash, pfpid, rfn))
+        rfn     = e.get('receipt_filename') or None
+        day     = int(e.get('day') or 1)
+        desc    = e.get('description', '')
+
+        if rid is not None:
+            conn.execute(
+                'UPDATE expenses SET day=?, description=?, person_id=?, category_id=?,'
+                ' amount=?, is_cash=?, paid_for_person_id=?, receipt_filename=?'
+                ' WHERE id=? AND year=? AND month=?',
+                (day, desc, pid, cid, amt, is_cash, pfpid, rfn, rid, year, month))
+        else:
+            cur = conn.execute(
+                'INSERT INTO expenses (year,month,day,description,person_id,category_id,'
+                'amount,is_cash,paid_for_person_id,receipt_filename) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                (year, month, day, desc, pid, cid, amt, is_cash, pfpid, rfn))
+            ck = e.get('client_key')
+            if ck:
+                id_map[str(ck)] = cur.lastrowid
+
+    activity_version = _bump_activity(conn, _month_scope(year, month))
     conn.commit()
+
     ms = conn.execute('SELECT settled FROM month_status WHERE year=? AND month=?', (year, month)).fetchone()
     is_settled = bool(ms and ms['settled'])
     ov_p, ov_c = build_ov(conn, year, month, is_settled)
@@ -890,11 +924,12 @@ def save_expenses():
     wallet = calculate_wallet(year, month, conn)
     savings_pp = calculate_savings_per_person(year, month, conn, is_settled)
     if is_settled and ov_settlements:
-    	all_pnames = [r['name'] for r in conn.execute('SELECT name FROM persons ORDER BY name')]
-    	ov_p = apply_settlements_to_ov(ov_p, ov_settlements, all_pnames)
+        all_pnames = [r['name'] for r in conn.execute('SELECT name FROM persons ORDER BY name')]
+        ov_p = apply_settlements_to_ov(ov_p, ov_settlements, all_pnames)
     conn.close()
     return jsonify({'success': True,
-        'ov_p': {k: dict(v) for k,v in ov_p.items()}, 'ov_c': ov_c,
+        'id_map': id_map, 'activity_version': activity_version,
+        'ov_p': {k: dict(v) for k, v in ov_p.items()}, 'ov_c': ov_c,
         'settlement': settlement, 'wallet': wallet,
         'savings_pp': savings_pp, 'ov_settlements': ov_settlements})
 
