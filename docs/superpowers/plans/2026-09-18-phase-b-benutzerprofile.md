@@ -243,12 +243,33 @@ def _autolink_single_person(conn) -> None:
                      (persons[0]['id'], users[0]['id']))
 ```
 
-- [ ] **Step 6: Tests ausführen, Erfolg bestätigen**
+- [ ] **Step 6: Zwei Altlasten beheben, die die Kaskade sonst unterlaufen**
+
+Beide fielen bei der Umsetzung auf und sind Voraussetzung dafür, dass Task 1 überhaupt funktioniert:
+
+**a) Der Bootstrap legt sonst ein Geister-Konto an.** Der Block, der `admin` erzeugt, prüft bisher nur „existiert ein Benutzer namens `admin`?". Sobald das einzige Konto umbenannt wird — genau das bietet der Assistent in Task 7/8 an — würde beim nächsten Start ein **zweiter** `admin` mit dem Passwort aus `ADMIN_PASSWORD` entstehen, und die Kaskade würde diesen statt des echten Kontos befördern. Die Bedingung muss auf „Tabelle ist leer" lauten:
+
+```python
+    user = conn.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()
+    # Nur bei einer wirklich leeren Tabelle einen frischen 'admin' anlegen.
+    # Sonst wuerde das Umbenennen des einzigen Benutzers bei jedem Neustart
+    # einen zweiten, ueberfluessigen 'admin'-Account erzeugen.
+    _user_count = conn.execute("SELECT COUNT(*) c FROM users").fetchone()['c']
+    if not user and _user_count == 0:
+```
+
+**b) `init_db` gibt die gecachte Verbindung nicht frei.** Am Ende der Funktion steht ein `conn.close()`, aber `g.db` bleibt gesetzt — ein zweiter Aufruf im selben App-Kontext scheitert dann an der geschlossenen Verbindung. Am Ende von `init_db()` ergänzen:
+
+```python
+    g.pop('db', None)
+```
+
+- [ ] **Step 7: Tests ausführen, Erfolg bestätigen**
 
 Run: `.venv-dev/bin/pytest tests/ -q`
 Erwartung: alle Tests PASS.
 
-- [ ] **Step 7: Migration gegen eine Kopie der Produktionsdatenbank prüfen**
+- [ ] **Step 8: Migration gegen eine Kopie der Produktionsdatenbank prüfen**
 
 Die echte Datenbank ist verschlüsselt und darf nicht angefasst werden. Deshalb gegen eine **Kopie** in einem Wegwerf-Verzeichnis:
 
