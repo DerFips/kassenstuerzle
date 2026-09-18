@@ -7,9 +7,13 @@ def _anlegen(client, csrf, **felder):
 def test_liste_nur_fuer_admin(auth_client, db):
     db.execute("UPDATE users SET role='member' WHERE username='admin'")
     db.commit()
-    assert auth_client.get('/api/users').status_code == 403
-    db.execute("UPDATE users SET role='admin' WHERE username='admin'")
-    db.commit()
+    try:
+        assert auth_client.get('/api/users').status_code == 403
+    finally:
+        # Muss auch bei fehlgeschlagener Assertion laufen, sonst bleibt das
+        # geteilte admin-Konto fuer den Rest des Testlaufs degradiert.
+        db.execute("UPDATE users SET role='admin' WHERE username='admin'")
+        db.commit()
     assert auth_client.get('/api/users').status_code == 200
 
 
@@ -103,6 +107,47 @@ def test_loeschen_und_letzter_admin_geschuetzt(auth_client, csrf, db):
         assert auth_client.delete(f'/api/users/{eigene}', headers={'X-CSRF-Token': csrf}).status_code == 400
     finally:
         db.execute("DELETE FROM users WHERE username='frida'")
+        db.commit()
+
+
+def test_anlegen_mit_verknuepfter_person_liefert_richtige_meldung(auth_client, csrf, db):
+    """Ein person_id, das schon an ein anderes Konto gebunden ist, muss die
+    Personen-Meldung liefern - nicht die (falsche) Benutzername-Meldung."""
+    cur = db.execute("INSERT INTO persons (name) VALUES ('Hanna')")
+    pid = cur.lastrowid
+    db.commit()
+    try:
+        res = _anlegen(auth_client, csrf, username='hanna', person_id=pid)
+        assert res.status_code == 200
+
+        res = _anlegen(auth_client, csrf, username='hanna2', person_id=pid)
+        assert res.status_code == 409
+        body = res.get_json()
+        assert body['success'] is False
+        assert body['error'] == 'Diese Person ist bereits mit einem Konto verknüpft.'
+
+        # Das zweite Konto darf nicht angelegt worden sein.
+        assert db.execute("SELECT COUNT(*) c FROM users WHERE username='hanna2'").fetchone()['c'] == 0
+    finally:
+        db.execute("DELETE FROM users WHERE username IN ('hanna', 'hanna2')")
+        db.execute('DELETE FROM persons WHERE id=?', (pid,))
+        db.commit()
+
+
+def test_is_active_als_string_null_deaktiviert(auth_client, csrf, db):
+    """{"is_active": "0"} muss deaktivieren - ein truthy-Test auf den
+    String wuerde das Konto stattdessen versehentlich aktivieren."""
+    try:
+        res = _anlegen(auth_client, csrf, username='ida')
+        neue_id = res.get_json()['id']
+
+        res = auth_client.post(f'/api/users/{neue_id}', json={'is_active': '0'},
+                               headers={'X-CSRF-Token': csrf})
+        assert res.status_code == 200
+        assert db.execute('SELECT is_active FROM users WHERE id=?',
+                          (neue_id,)).fetchone()['is_active'] == 0
+    finally:
+        db.execute("DELETE FROM users WHERE username='ida'")
         db.commit()
 
 
