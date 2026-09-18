@@ -33,6 +33,13 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 RECEIPTS_DIR = os.path.join(os.path.dirname(DB_PATH), 'receipts')
 os.makedirs(RECEIPTS_DIR, exist_ok=True)
 ALLOWED_RECEIPT_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf'}
+# Sicherheit (Befund I5): Obergrenze fuer das gesamte Beleg-Verzeichnis.
+# Ohne sie kann jedes eingeloggte Mitglied - nicht nur ein Admin - den
+# Upload in einer Schleife aufrufen und den Datentraeger fuellen; danach
+# scheitern SQLite-Schreibzugriffe und Sicherungen, die App steht.
+# Das Rate-Limit alleine verzoegert das nur, es begrenzt nichts.
+# Per ENV anpassbar, weil die sinnvolle Groesse am Datentraeger haengt.
+RECEIPTS_MAX_TOTAL_MB = int(os.environ.get('RECEIPTS_MAX_TOTAL_MB', '500'))
 
 # ── Verschlüsselungs-Schlüssel aus ENV ────────────────────────────────────────
 # Setze DB_ENCRYPTION_KEY in .env / docker-compose.yml
@@ -1367,6 +1374,17 @@ def save_expenses():
     deleted_ids = d.get('deleted_ids') or []
     conn = get_db()
     id_map = {}
+    # Belege, deren letzte Referenz in diesem Request verschwinden koennte.
+    # Gesammelt VOR dem Schreiben, aufgeraeumt am Ende (Befund I5) - siehe
+    # _verwaiste_belege_loeschen(). Frueher blieb jede Datei fuer immer liegen.
+    _belegkandidaten = set()
+
+    def _beleg_von(rid):
+        """Aktuell gespeicherter Belegname dieser Ausgabe (oder None)."""
+        row = conn.execute('SELECT receipt_filename FROM expenses'
+                           ' WHERE id=? AND year=? AND month=?',
+                           (rid, year, month)).fetchone()
+        return row['receipt_filename'] if row else None
 
     # 1) Ausdrücklich gelöschte Zeilen entfernen
     for raw in deleted_ids:
@@ -1374,6 +1392,7 @@ def save_expenses():
             rid = int(raw)
         except (TypeError, ValueError):
             continue
+        _belegkandidaten.add(_beleg_von(rid))
         conn.execute('DELETE FROM expenses WHERE id=? AND year=? AND month=?', (rid, year, month))
 
     # 2) Zeilen anlegen bzw. aktualisieren (nie löschen, was hier fehlt)
@@ -1390,6 +1409,7 @@ def save_expenses():
         if amt == 0:
             # Geleerter Betrag: bestehende Zeile löschen, neue ignorieren
             if rid is not None:
+                _belegkandidaten.add(_beleg_von(rid))
                 conn.execute('DELETE FROM expenses WHERE id=? AND year=? AND month=?',
                              (rid, year, month))
             continue
@@ -1403,6 +1423,11 @@ def save_expenses():
         desc    = e.get('description', '')
 
         if rid is not None:
+            # Wird der Beleg ausgetauscht oder entfernt, ist der alte danach
+            # moeglicherweise verwaist (Befund I5).
+            _alter_beleg = _beleg_von(rid)
+            if _alter_beleg and _alter_beleg != rfn:
+                _belegkandidaten.add(_alter_beleg)
             conn.execute(
                 'UPDATE expenses SET day=?, description=?, person_id=?, category_id=?,'
                 ' amount=?, is_cash=?, paid_for_person_id=?, receipt_filename=?'
@@ -1419,6 +1444,10 @@ def save_expenses():
 
     activity_version = _bump_activity(conn, _month_scope(year, month))
     conn.commit()
+
+    # Erst nach dem Commit aufraeumen: bricht das Speichern vorher ab, waere
+    # sonst schon die Datei weg, waehrend die Ausgabe noch existiert.
+    _verwaiste_belege_loeschen(conn, _belegkandidaten)
 
     ms = conn.execute('SELECT settled FROM month_status WHERE year=? AND month=?', (year, month)).fetchone()
     is_settled = bool(ms and ms['settled'])
@@ -1642,8 +1671,16 @@ def import_csv():
         if len(row) < 4: continue
         try: affected.add((int(row[1]), int(row[2])))
         except: pass
+    _belegkandidaten = set()
     if overwrite:
         for y,m in affected:
+            # Belege der gleich geloeschten Ausgaben merken (Befund I5) - der
+            # CSV-Import kennt keine Belege, ihre Dateien blieben sonst
+            # dauerhaft ohne Referenz im Verzeichnis liegen.
+            _belegkandidaten.update(
+                r['receipt_filename'] for r in conn.execute(
+                    'SELECT DISTINCT receipt_filename FROM expenses'
+                    ' WHERE year=? AND month=? AND receipt_filename IS NOT NULL', (y, m)))
             conn.execute('DELETE FROM expenses WHERE year=? AND month=?',(y,m))
             conn.execute('DELETE FROM income   WHERE year=? AND month=?',(y,m))
     imported = ok = 0; skipped = []
@@ -1673,7 +1710,11 @@ def import_csv():
     # ueber den Aenderungszaehler anstossen.
     for y, m in affected:
         _bump_activity(conn, _month_scope(y, m))
-    conn.commit(); conn.close()
+    conn.commit()
+    # Erst nach dem Commit (Befund I5): bricht der Import vorher ab, bleiben
+    # Ausgabe und Beleg zusammen erhalten.
+    _verwaiste_belege_loeschen(conn, _belegkandidaten)
+    conn.close()
     month_links = sorted([{'year':y,'month':m} for y,m in affected], key=lambda x:(x['year'],x['month']))
     return jsonify({'success': True, 'imported': imported,
                     'months': len(affected), 'month_links': month_links,
@@ -3268,6 +3309,65 @@ def check_and_send_reminders(app):
 # BELEG-UPLOAD
 # ════════════════════════════════════════════════════════════════════════════════
 
+def _belege_gesamtgroesse() -> int:
+    """Summe der Dateigroessen im Beleg-Verzeichnis in Bytes (Befund I5).
+
+    Bewusst bei jedem Upload frisch gerechnet statt in einem Zaehler gepflegt:
+    Belege werden auch ausserhalb der App geloescht (Restore, Aufraeumen von
+    Hand), ein persistenter Zaehler waere dann dauerhaft falsch und wuerde
+    Uploads sperren, obwohl Platz da ist. Das Verzeichnis ist flach und
+    enthaelt im Haushaltsbetrieb einige hundert Dateien - der Scan ist billig.
+    """
+    summe = 0
+    try:
+        with os.scandir(RECEIPTS_DIR) as eintraege:
+            for eintrag in eintraege:
+                try:
+                    if eintrag.is_file(follow_symlinks=False):
+                        summe += eintrag.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue   # Datei verschwand zwischen scandir und stat
+    except FileNotFoundError:
+        return 0
+    return summe
+
+
+def _verwaiste_belege_loeschen(conn, dateinamen) -> None:
+    """Loescht Belegdateien, auf die keine Ausgabe mehr zeigt (Befund I5).
+
+    Ohne das bleibt jeder Beleg fuer immer liegen, auch wenn die zugehoerige
+    Ausgabe geloescht oder ihr Beleg ausgetauscht wurde - das Verzeichnis
+    waechst monoton und laeuft irgendwann gegen die Obergrenze oder die Platte.
+
+    WICHTIG: der Dateiname ist inhaltsadressiert (MD5), zwei verschiedene
+    Ausgaben koennen also voellig legitim denselben Beleg referenzieren (z.B.
+    eine auf mehrere Personen aufgeteilte Rechnung). Deshalb wird erst
+    geloescht, wenn KEINE Zeile mehr auf den Namen zeigt - sonst verlieren
+    noch bestehende Ausgaben ihren Beleg.
+
+    Muss aufgerufen werden, NACHDEM das DELETE/UPDATE auf `conn` ausgefuehrt
+    wurde (die noch nicht committeten Aenderungen sieht dieselbe Verbindung
+    bereits), aber die Datei wird nur angefasst, wenn die Zaehlung 0 ergibt.
+    """
+    for name in {d for d in (dateinamen or ()) if d}:
+        sicher = os.path.basename(name)
+        if sicher != name or sicher in ('', '.', '..'):
+            continue   # Kein Path-Traversal ueber einen DB-Wert
+        noch_referenziert = conn.execute(
+            'SELECT 1 FROM expenses WHERE receipt_filename=? LIMIT 1', (sicher,)).fetchone()
+        if noch_referenziert:
+            continue
+        pfad = os.path.join(RECEIPTS_DIR, sicher)
+        try:
+            if os.path.isfile(pfad):
+                os.unlink(pfad)
+                log.info("Verwaisten Beleg geloescht: %s", sicher)
+        except OSError as exc:
+            # Ein nicht loeschbarer Beleg darf das Speichern nicht scheitern
+            # lassen - die Ausgabe ist schon weg, der Platz kommt spaeter frei.
+            log.warning("Verwaister Beleg %s konnte nicht geloescht werden: %s", sicher, exc)
+
+
 @main_bp.route('/api/receipt/upload', methods=['POST'])
 @login_required
 def api_receipt_upload():
@@ -3302,6 +3402,21 @@ def api_receipt_upload():
     md5 = hashlib.md5(data).hexdigest()
     filename = md5 + ext
     dest = os.path.join(RECEIPTS_DIR, filename)
+
+    # Sicherheit (Befund I5): Obergrenze fuer das gesamte Beleg-Verzeichnis.
+    # Erst hier geprueft, weil ein bereits vorhandener, inhaltsgleicher Beleg
+    # keinen zusaetzlichen Platz belegt und deshalb auch bei erreichter Grenze
+    # noch durchgehen darf - sonst wuerde das erneute Anhaengen desselben Bons
+    # an eine zweite Ausgabe grundlos scheitern.
+    if not os.path.exists(dest):
+        grenze = RECEIPTS_MAX_TOTAL_MB * 1024 * 1024
+        if _belege_gesamtgroesse() + len(data) > grenze:
+            log.warning("Beleg-Upload abgelehnt: Verzeichnis ueber der Grenze von %s MB",
+                        RECEIPTS_MAX_TOTAL_MB)
+            return jsonify(success=False,
+                           error=t('srv.receipts_quota_exceeded',
+                                   limit=RECEIPTS_MAX_TOTAL_MB)), 507
+
     with open(dest, 'wb') as out:
         out.write(data)
     # Sicherheit (Befund I2): ein Beleg enthält personenbezogene Finanzdaten -

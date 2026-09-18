@@ -378,6 +378,9 @@ TRANSLATIONS = {
         'srv.no_file': 'Keine Datei',
         'srv.file_empty': 'Datei ist leer',
         'srv.file_too_large': 'Datei zu groß (max. 20 MB)',
+        # Befund I5: Obergrenze fürs Beleg-Verzeichnis
+        'srv.receipts_quota_exceeded': 'Der Belegspeicher ist voll (max. {limit} MB). '
+                                       'Bitte alte Belege löschen, bevor neue hochgeladen werden.',
         'srv.invalid_file_type': 'Ungültiger Dateityp. Erlaubt: {allowed}',
         'srv.invalid_image': 'Datei ist kein gültiges Bild',
         'srv.invalid_pdf': 'Datei ist kein gültiges PDF',
@@ -782,6 +785,9 @@ TRANSLATIONS = {
         'srv.no_file': 'No file',
         'srv.file_empty': 'File is empty',
         'srv.file_too_large': 'File too large (max. 20 MB)',
+        # Finding I5: cap on the receipts directory
+        'srv.receipts_quota_exceeded': 'Receipt storage is full (max. {limit} MB). '
+                                       'Please delete old receipts before uploading new ones.',
         'srv.invalid_file_type': 'Invalid file type. Allowed: {allowed}',
         'srv.invalid_image': 'File is not a valid image',
         'srv.invalid_pdf': 'File is not a valid PDF',

@@ -42,6 +42,29 @@ def _ensure_data_dir_and_secret(data_dir):
     return secret
 
 
+# Rate-Limits fuer sensible Endpunkte. Bewusst auf Modulebene statt lokal in
+# create_app(), damit Tests nachweisen koennen, dass ein Endpunkt hier gelistet
+# ist - ein fehlender Eintrag faellt sonst erst im Betrieb auf.
+RATE_LIMITS = {
+    'main.login':              '10 per minute',
+    'main.api_parse_pdf':      '5 per minute',
+    'main.api_receipt_parse':  '10 per minute',
+    # Befund I5: der Beleg-Upload war der einzige Upload-Endpunkt ohne Limit.
+    # Jeder Request legt bis zu 20 MB ab, und weil der Dateiname aus dem
+    # Inhalt (MD5) gebildet wird, ergibt jeder neue Inhalt auch eine neue
+    # Datei. Ein eingeloggtes Mitglied konnte damit in einer Schleife die
+    # Platte fuellen, bis SQLite-Schreibzugriffe und Sicherungen scheitern.
+    # Dasselbe Limit wie beim Beleg-Scan nebenan - beide verarbeiten Fotos
+    # aus derselben Oberflaeche.
+    'main.api_receipt_upload': '10 per minute',
+    'main.api_backup_create':  '5 per minute',
+    'main.api_backup_restore': '3 per minute',
+    'main.import_csv':         '20 per minute',
+    'main.api_backup_download':'10 per minute',
+    'main.export_csv':         '20 per minute',
+}
+
+
 def create_app():
     app = Flask(__name__)
 
@@ -77,18 +100,8 @@ def create_app():
     from .routes.main import main_bp, init_db
     app.register_blueprint(main_bp)
 
-    # Rate-Limits auf sensible Endpunkte anwenden
-    _rate_limits = {
-        'main.login':              '10 per minute',
-        'main.api_parse_pdf':      '5 per minute',
-        'main.api_receipt_parse':  '10 per minute',
-        'main.api_backup_create':  '5 per minute',
-        'main.api_backup_restore': '3 per minute',
-        'main.import_csv':         '20 per minute',
-        'main.api_backup_download':'10 per minute',
-        'main.export_csv':         '20 per minute',
-    }
-    for endpoint, limit_str in _rate_limits.items():
+    # Rate-Limits auf sensible Endpunkte anwenden (Tabelle: RATE_LIMITS oben)
+    for endpoint, limit_str in RATE_LIMITS.items():
         view_fn = app.view_functions.get(endpoint)
         if view_fn:
             limiter.limit(limit_str)(view_fn)
