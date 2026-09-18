@@ -179,6 +179,19 @@ def test_recurring_update_and_explicit_delete(auth_client, csrf, db):
     assert db.execute('SELECT COUNT(*) c FROM recurring_expenses').fetchone()['c'] == 0
 
 
+def test_recurring_blanked_row_is_deleted(auth_client, csrf, db):
+    """Eine geleerte Zeile (leere Beschreibung, Betrag 0) mit vorhandener id
+    muss verschwinden statt beim naechsten Laden wieder aufzutauchen."""
+    rid = _save_recur(auth_client, csrf, rows=[
+        {'client_key': 'a', 'day': 1, 'description': 'Netflix', 'amount': 17.99}]).get_json()['id_map']['a']
+
+    _save_recur(auth_client, csrf, rows=[
+        {'id': rid, 'day': 1, 'description': '', 'amount': 0}])
+
+    assert db.execute('SELECT COUNT(*) c FROM recurring_expenses WHERE id=?',
+                      (rid,)).fetchone()['c'] == 0
+
+
 def test_recurring_monthly_forces_start_month_one(auth_client, csrf, db):
     rid = _save_recur(auth_client, csrf, rows=[
         {'client_key': 'a', 'day': 1, 'description': 'Miete', 'amount': 750.0,

@@ -84,7 +84,7 @@
 window.I18N = {{ i18n_dict | tojson }};
 function t(key, vars) {
   let s = (window.I18N && window.I18N[key]) || key;
-  if (vars) for (const k in vars) s = s.replace('{' + k + '}', vars[k]);
+  if (vars) for (const k in vars) s = s.replace('{' + k + '}', () => vars[k]);
   return s;
 }
 </script>

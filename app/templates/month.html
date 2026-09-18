@@ -865,7 +865,7 @@ async function saveExpenses(silent=false) {
         renderSavings(data.savings_pp || []);
       } finally { setTimeout(() => { _suppressAutoSave = false; }, 150); }
       if (!silent) showToast(t('month.toast_expenses_saved'), 'success'); else showAutoSavedBadge('saveBtn');
-    } else { showToast(t('month.toast_save_error'), 'danger'); }
+    } else { showToast(data.error ? data.error : t('month.toast_save_error'), 'danger'); }
   } catch (e) { showToast(t('month.toast_error', {message: e.message}), 'danger'); }
   finally { _saveExpInFlight = false; btn.disabled = false; btn.innerHTML = `<i class="fas fa-save me-1"></i>${t('month.save')}`; }
 }
@@ -901,7 +901,7 @@ async function saveIncome(silent=false) {
         renderSavings(data.savings_pp || []);
       } finally { setTimeout(() => { _suppressAutoSave = false; }, 150); }
       if (!silent) showToast(t('month.toast_income_saved'), 'success'); else showAutoSavedBadge('saveIncomeBtn');
-    }
+    } else { showToast(data.error ? data.error : t('month.toast_save_error'), 'danger'); }
   } catch (e) { showToast(t('month.toast_error', {message: e.message}), 'danger'); }
   finally { _saveIncInFlight = false; btn.disabled = false; btn.innerHTML = `<i class="fas fa-save me-1"></i>${t('month.save')}`; }
 }

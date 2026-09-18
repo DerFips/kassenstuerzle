@@ -241,16 +241,18 @@ def api_activity():
     conn = get_db()
     now = datetime.now()
     now_s = now.isoformat(timespec='seconds')
+    cutoff = (now - timedelta(seconds=30)).isoformat(timespec='seconds')
     uid = session.get('user_id') or -1
     conn.execute(
         'INSERT INTO presence (user_id, scope, last_seen) VALUES (?,?,?)'
         ' ON CONFLICT(user_id, scope) DO UPDATE SET last_seen = ?',
         (uid, scope, now_s, now_s))
+    # Alte Presence-Zeilen aufräumen, sonst wächst die Tabelle unbegrenzt.
+    conn.execute('DELETE FROM presence WHERE last_seen < ?', (cutoff,))
     conn.commit()
 
     row = conn.execute('SELECT version, updated_at, updated_by FROM activity WHERE scope=?',
                        (scope,)).fetchone()
-    cutoff = (now - timedelta(seconds=30)).isoformat(timespec='seconds')
     others = [r['username'] for r in conn.execute(
         'SELECT u.username FROM presence p JOIN users u ON u.id = p.user_id'
         ' WHERE p.scope=? AND p.last_seen >= ? AND p.user_id <> ?', (scope, cutoff, uid))]
@@ -806,6 +808,12 @@ def index():
 @login_required
 def month_view(year, month):
     conn = get_db()
+    # Version VOR den Datenabfragen lesen: ein Save, das dazwischen landet,
+    # darf höchstens einen unnötigen "jemand anderes hat geändert"-Banner
+    # auslösen (harmlos, Nutzer lädt neu) - niemals einen verpassten.
+    _scope = _month_scope(year, month)
+    _act_row = conn.execute('SELECT version FROM activity WHERE scope=?', (_scope,)).fetchone()
+    activity_version = _act_row['version'] if _act_row else 0
     income = [dict(r) for r in conn.execute(
         'SELECT * FROM income WHERE year=? AND month=? ORDER BY day,id', (year,month))]
     income_total  = round(sum(r['amount'] for r in income), 2)
@@ -835,10 +843,6 @@ def month_view(year, month):
     month_names_list = [month_name(i, lang) for i in range(1, 13)]
     this_year = datetime.now().year
     year_range = sorted(set(range(this_year - 5, this_year + 3)) | {year})
-    _scope = _month_scope(year, month)
-    g.pop('db', None)  # obiger conn.close() hat g.db nicht geleert - get_db() muss neu öffnen
-    _act_row = get_db().execute('SELECT version FROM activity WHERE scope=?', (_scope,)).fetchone()
-    activity_version = _act_row['version'] if _act_row else 0
     return render_template('month.html', active='month',
         year=year, month=month, month_name=month_name(month, lang),
         month_names=month_names_list, year_range=year_range,
@@ -975,9 +979,9 @@ def save_persons():
                     'UPDATE persons SET name=?, wallet_start_date=?, wallet_start_amount=? WHERE id=?',
                     (n, wd, wa, rid))
             except sqlite3.IntegrityError:
-                # NUR die UNIQUE-Verletzung gilt als Namenskonflikt. Ein
-                # Sperr-Timeout o.ae. muss sichtbar bleiben statt dem Nutzer
-                # faelschlich als "Name bereits vergeben" gemeldet zu werden.
+                # Jede IntegrityError wird hier als Namenskonflikt gemeldet.
+                # Die einzige Constraint auf `persons` ist das UNIQUE auf
+                # `name` - ein anderer Integritätsfehler kann hier nicht auftreten.
                 conflicts.append(n)
         else:
             try:
@@ -988,9 +992,9 @@ def save_persons():
                 if ck:
                     id_map[str(ck)] = cur.lastrowid
             except sqlite3.IntegrityError:
-                # NUR die UNIQUE-Verletzung gilt als Namenskonflikt. Ein
-                # Sperr-Timeout o.ae. muss sichtbar bleiben statt dem Nutzer
-                # faelschlich als "Name bereits vergeben" gemeldet zu werden.
+                # Jede IntegrityError wird hier als Namenskonflikt gemeldet.
+                # Die einzige Constraint auf `persons` ist das UNIQUE auf
+                # `name` - ein anderer Integritätsfehler kann hier nicht auftreten.
                 conflicts.append(n)
 
     activity_version = _bump_activity(conn, 'settings')
@@ -1022,7 +1026,9 @@ def save_categories():
         n = (c.get('name') or '').strip()
         if not n:
             continue
-        col = c.get('color', '#6c757d')
+        # `color` ist NOT NULL in der DB - c.get(key, default) greift nur wenn
+        # der Key fehlt, nicht wenn der Client explizit `color: null` sendet.
+        col = c.get('color') or '#6c757d'
         sp = 1 if c.get('is_split') else 0
         try:
             cid = int(c['id']) if c.get('id') else None
@@ -1035,9 +1041,9 @@ def save_categories():
                 conn.execute('UPDATE categories SET name=?, color=?, is_split=? WHERE id=?',
                              (n, col, sp, cid))
             except sqlite3.IntegrityError:
-                # NUR die UNIQUE-Verletzung gilt als Namenskonflikt. Ein
-                # Sperr-Timeout o.ae. muss sichtbar bleiben statt dem Nutzer
-                # faelschlich als "Name bereits vergeben" gemeldet zu werden.
+                # Jede IntegrityError wird hier als Namenskonflikt gemeldet.
+                # `color` ist oben gegen None abgesichert, daher bleibt
+                # praktisch nur die UNIQUE-Verletzung auf `name` übrig.
                 conflicts.append(n)
                 cid = None   # Splits dieser Zeile nicht anfassen
         else:
@@ -1049,9 +1055,9 @@ def save_categories():
                 if ck:
                     id_map[str(ck)] = cid
             except sqlite3.IntegrityError:
-                # NUR die UNIQUE-Verletzung gilt als Namenskonflikt. Ein
-                # Sperr-Timeout o.ae. muss sichtbar bleiben statt dem Nutzer
-                # faelschlich als "Name bereits vergeben" gemeldet zu werden.
+                # Jede IntegrityError wird hier als Namenskonflikt gemeldet.
+                # `color` ist oben gegen None abgesichert, daher bleibt
+                # praktisch nur die UNIQUE-Verletzung auf `name` übrig.
                 conflicts.append(n)
                 cid = None
 
@@ -1131,6 +1137,11 @@ def import_csv():
                 imported += 1
             else: skipped.append(f'Zeile {i}: unbekannter Typ "{typ}"')
         except Exception as e: skipped.append(f'Zeile {i}: {e}')
+    # Betroffene Monate koennen bei jemand anderem offen sein (v.a. bei
+    # overwrite=true, das ihre Zeilen-ids unter der Hand entfernt) - Banner
+    # ueber den Aenderungszaehler anstossen.
+    for y, m in affected:
+        _bump_activity(conn, _month_scope(y, m))
     conn.commit(); conn.close()
     month_links = sorted([{'year':y,'month':m} for y,m in affected], key=lambda x:(x['year'],x['month']))
     return jsonify({'success': True, 'imported': imported,
@@ -1210,17 +1221,21 @@ def save_recurring():
         except (TypeError, ValueError):
             amt = 0
         desc = (r.get('description') or '').strip()
+        try:
+            rid = int(r['id']) if r.get('id') else None
+        except (TypeError, ValueError):
+            rid = None
+
         if not desc and amt == 0:
+            # Geleerte Zeile: bestehende Zeile löschen, nie ausgefüllte ignorieren
+            if rid is not None:
+                conn.execute('DELETE FROM recurring_expenses WHERE id=?', (rid,))
             continue
         pid  = int(r['person_id'])   if r.get('person_id')   else None
         cid  = int(r['category_id']) if r.get('category_id') else None
         freq = r.get('frequency', 'monthly')
         sm   = int(r.get('start_month', 1)) if freq != 'monthly' else 1
         day  = int(r.get('day') or 1)
-        try:
-            rid = int(r['id']) if r.get('id') else None
-        except (TypeError, ValueError):
-            rid = None
 
         if rid is not None:
             conn.execute(
@@ -1329,6 +1344,7 @@ def settle_month():
     conn = get_db()
     conn.execute("INSERT OR REPLACE INTO month_status (year,month,settled,settled_at) VALUES (?,?,?,?)",
                  (year, month, settled, settled_at))
+    _bump_activity(conn, _month_scope(int(year), int(month)))
     conn.commit()
     ov_p, ov_c = build_ov(conn, year, month, bool(settled))
     settlement = calculate_settlement(year, month, conn)
@@ -1359,12 +1375,15 @@ def get_category_splits_map(conn):
 @login_required
 def settings():
     conn = get_db()
+    # Version VOR den Datenabfragen lesen (siehe month_view): ein Save, das
+    # dazwischen landet, darf höchstens einen unnötigen Banner auslösen,
+    # niemals einen verpassten.
+    _act_row = conn.execute("SELECT version FROM activity WHERE scope='settings'").fetchone()
+    activity_version = _act_row['version'] if _act_row else 0
     persons   = [dict(r) for r in conn.execute('SELECT * FROM persons ORDER BY name')]
     cats      = [dict(r) for r in conn.execute('SELECT * FROM categories ORDER BY name')]
     recurring = [dict(r) for r in conn.execute('SELECT * FROM recurring_expenses ORDER BY id')]
     category_splits = get_category_splits_map(conn)
-    _act_row = conn.execute("SELECT version FROM activity WHERE scope='settings'").fetchone()
-    activity_version = _act_row['version'] if _act_row else 0
     conn.close()
     return render_template('settings.html', active='settings', persons=persons, categories=cats,
                             recurring=recurring, category_splits=category_splits,
@@ -1970,15 +1989,16 @@ def api_commit_pdf():
         return jsonify({'success': False, 'error': t('srv.missing_data')}), 400
     conn = get_db()
     imported_exp = imported_inc = 0
-    for t in txns:
-        if not t.get('include'): continue
+    affected_months = set()
+    for txn in txns:
+        if not txn.get('include'): continue
         try:
-            amt  = float(t['amount'])
-            day  = int(t['day'])
-            mon  = int(t['month'])
-            yr   = int(t['year'])
-            desc = str(t.get('counterpart') or t.get('description') or '')[:200]
-            if t.get('is_income'):
+            amt  = float(txn['amount'])
+            day  = int(txn['day'])
+            mon  = int(txn['month'])
+            yr   = int(txn['year'])
+            desc = str(txn.get('counterpart') or txn.get('description') or '')[:200]
+            if txn.get('is_income'):
                 conn.execute(
                     'INSERT INTO income (year,month,day,description,person_id,amount) VALUES (?,?,?,?,?,?)',
                     (yr, mon, day, desc, person_id, amt))
@@ -1988,10 +2008,15 @@ def api_commit_pdf():
                     'INSERT INTO expenses (year,month,day,description,person_id,amount) VALUES (?,?,?,?,?,?)',
                     (yr, mon, day, desc, person_id, amt))
                 imported_exp += 1
+            affected_months.add((yr, mon))
         except Exception as e:
             current_app.logger.exception("PDF-Commit Fehler beim Einfügen einer Zeile")
             conn.close()
             return jsonify({'success': False, 'error': t('srv.save_transaction_error')}), 400
+    # Betroffene Monate koennen bei jemand anderem offen sein - Banner ueber
+    # den Aenderungszaehler anstossen.
+    for y, m in affected_months:
+        _bump_activity(conn, _month_scope(y, m))
     conn.commit()
     conn.close()
     return jsonify({'success': True,

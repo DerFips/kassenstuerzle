@@ -661,7 +661,7 @@ document.getElementById('save-recurring-btn').addEventListener('click', async ()
     amount: parseFloat(r.querySelector('.rec-amount').value) || 0,
     frequency: r.querySelector('.rec-freq').value,
     start_month: 1
-  })).filter(r => r.description || r.amount > 0);
+  }));
   const sentDeletes = _pendingRecurDeletes.slice();
   const res = await fetch('/api/recurring/save', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
