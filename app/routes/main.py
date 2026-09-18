@@ -14,6 +14,8 @@ except ImportError:
     import sqlite3
     _SQLCIPHER_AVAILABLE = False
 from datetime import datetime
+import logging
+log = logging.getLogger(__name__)
 
 from ..translations import translate as _translate, SUPPORTED_LANGUAGES
 
@@ -286,6 +288,41 @@ def close_db(exception=None):
     if db is not None:
         db.close()
 
+def _ensure_admin(conn) -> None:
+    """Garantiert mindestens einen aktiven Admin. Laeuft bei JEDEM Start.
+
+    Hintergrund: die neue Spalte `role` bekommt per ALTER den Default
+    'member'. Ohne diese Kaskade waere der einzige vorhandene Benutzer nach
+    dem Update degradiert und niemand koennte mehr Benutzer verwalten.
+    Reihenfolge: bestehender Admin -> Benutzer 'admin' -> aeltester Benutzer.
+    """
+    vorhanden = conn.execute(
+        "SELECT COUNT(*) c FROM users WHERE role='admin' AND is_active=1").fetchone()['c']
+    if vorhanden:
+        return
+    ziel = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()
+    if ziel is None:
+        ziel = conn.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+    if ziel is None:
+        return   # leere Tabelle - der Bootstrap oben legt 'admin' an
+    conn.execute("UPDATE users SET role='admin', is_active=1 WHERE id=?", (ziel['id'],))
+    log.warning("Kein aktiver Admin vorhanden - Benutzer id=%s wurde zum Admin befoerdert.",
+                ziel['id'])
+
+
+def _autolink_single_person(conn) -> None:
+    """Verknuepft Benutzer und Person nur, wenn es von beiden genau einen gibt.
+
+    In jedem anderen Fall bleibt person_id leer: eine falsche Zuordnung wuerde
+    spaeter dem falschen Menschen Buchungen und Erinnerungen zuordnen.
+    """
+    users = conn.execute('SELECT id, person_id FROM users').fetchall()
+    persons = conn.execute('SELECT id FROM persons').fetchall()
+    if len(users) == 1 and len(persons) == 1 and users[0]['person_id'] is None:
+        conn.execute('UPDATE users SET person_id=? WHERE id=?',
+                     (persons[0]['id'], users[0]['id']))
+
+
 def init_db():
     conn = get_db()
     conn.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -295,7 +332,12 @@ def init_db():
     )""")
 
     user = conn.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()
-    if not user:
+    # Nur bei einer wirklich leeren Tabelle einen frischen 'admin' anlegen.
+    # Sonst wuerde das Umbenennen des einzigen Benutzers (z.B. durch die
+    # Admin-Kaskade weiter unten) bei jedem Neustart einen zweiten,
+    # ueberfluessigen 'admin'-Account erzeugen.
+    _user_count = conn.execute("SELECT COUNT(*) c FROM users").fetchone()['c']
+    if not user and _user_count == 0:
         from werkzeug.security import generate_password_hash
         import os as _os
         # Passwort aus ENV oder sicheres Zufalls-Passwort generieren
@@ -379,6 +421,18 @@ def init_db():
     except Exception:
         pass  # column already exists
 
+    # Einmalige Sicherungskopie, bevor die Profil-Spalten angelegt werden.
+    # Die Schemapruefung ist die Marke: existiert 'role' schon, lief die
+    # Migration bereits und es wird nichts erneut gesichert.
+    _user_cols = {r[1] for r in conn.execute('PRAGMA table_info(users)')}
+    if 'role' not in _user_cols:
+        try:
+            _dest = create_backup('pre-profiles')
+            log.info("Sicherungskopie vor der Profil-Migration: %s", _dest.name)
+        except Exception:
+            log.exception("Sicherungskopie vor der Profil-Migration fehlgeschlagen "
+                          "- Migration wird trotzdem fortgesetzt")
+
     for sql in [
         'ALTER TABLE categories ADD COLUMN is_split INTEGER NOT NULL DEFAULT 0',
         'ALTER TABLE expenses ADD COLUMN is_cash INTEGER NOT NULL DEFAULT 0',
@@ -386,9 +440,25 @@ def init_db():
         'ALTER TABLE persons ADD COLUMN wallet_start_amount REAL DEFAULT 0',
         'ALTER TABLE expenses ADD COLUMN paid_for_person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL',
         'ALTER TABLE expenses ADD COLUMN receipt_filename TEXT DEFAULT NULL',
+        # ── Phase B: Benutzerprofile ──────────────────────────────────────
+        'ALTER TABLE users ADD COLUMN person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL',
+        "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'",
+        'ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1',
+        'ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN created_at TEXT',
+        'ALTER TABLE users ADD COLUMN last_login TEXT',
+        'ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0',
     ]:
         try: conn.execute(sql)
         except: pass
+
+    # 1:1-Verknuepfung Benutzer <-> Person; beide Seiten bleiben optional.
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person'
+                 ' ON users(person_id) WHERE person_id IS NOT NULL')
+    conn.execute('CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)')
+
+    _ensure_admin(conn)
+    _autolink_single_person(conn)
 
     # ── Performance: Indices für häufig gefilterte Spalten ──────────────────
     for idx_sql in [
@@ -405,6 +475,11 @@ def init_db():
             pass
 
     conn.commit(); conn.close()
+    # init_db() darf innerhalb desselben App-Context mehrfach laufen (Idempotenz-
+    # Tests, evtl. manuelle Re-Migration). get_db() cached die Verbindung in `g` -
+    # ohne diesen Pop wuerde ein erneuter Aufruf auf der bereits geschlossenen
+    # Verbindung weiterarbeiten und mit "Cannot operate on a closed database" scheitern.
+    g.pop('db', None)
 
 def build_ov(conn, year, month, is_settled=False):
     rows = conn.execute("""
