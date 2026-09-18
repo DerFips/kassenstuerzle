@@ -823,27 +823,35 @@ def apply_settlements_to_ov(ov_p, ov_settlements, all_person_names):
     return result
 
 
-# In-Memory Brute-Force-Schutz (IP-basiert)
+# In-Memory Brute-Force-Schutz
 import time as _time
 from collections import defaultdict as _defaultdict
+# Sperre pro Benutzername. Frueher pro IP - im gemeinsamen WLAN sperrte damit
+# ein Nutzer mit Tippfehlern alle anderen Haushaltsmitglieder aus.
 _login_attempts: dict = _defaultdict(lambda: {'count': 0, 'locked_until': 0})
+# Grosszuegiges Rueckfallnetz gegen breites Durchprobieren von einer Quelle.
+_ip_attempts: dict = _defaultdict(lambda: {'count': 0, 'locked_until': 0})
 _MAX_LOGIN_ATTEMPTS = 5
+_MAX_IP_ATTEMPTS = 30
 _LOGIN_LOCKOUT_SECONDS = 60
 
 
 @main_bp.route('/login', methods=['GET', 'POST'])
 def login():
     ip = request.remote_addr or 'unknown'
-    state = _login_attempts[ip]
+    username = (request.form.get('username', '') or '').strip()
+    key = username.lower()
+    state = _login_attempts[key]
+    ip_state = _ip_attempts[ip]
 
     # Sperre prüfen
-    if state['locked_until'] > _time.time():
-        remaining = int(state['locked_until'] - _time.time())
+    gesperrt_bis = max(state['locked_until'], ip_state['locked_until'])
+    if gesperrt_bis > _time.time():
+        remaining = int(gesperrt_bis - _time.time())
         flash(t('login.locked', seconds=remaining), 'danger')
         return render_template('login.html')
 
     if request.method == 'POST':
-        username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
 
         conn = get_db()
@@ -858,7 +866,8 @@ def login():
         # unspezifische Fehlermeldung verbergen soll.
         if user and check_password_hash(user['password_hash'], password) and user['is_active']:
             # Erfolg: Zähler zurücksetzen, Session neu aufbauen
-            _login_attempts[ip] = {'count': 0, 'locked_until': 0}
+            _login_attempts[key] = {'count': 0, 'locked_until': 0}
+            _ip_attempts[ip] = {'count': 0, 'locked_until': 0}
             lang = session.get('lang')  # Sprachwahl übersteht session.clear()
             session.clear()
             session.permanent = True   # aktiviert PERMANENT_SESSION_LIFETIME
@@ -876,6 +885,10 @@ def login():
             return redirect(url_for('main.index'))
         else:
             state['count'] += 1
+            ip_state['count'] += 1
+            if ip_state['count'] >= _MAX_IP_ATTEMPTS:
+                ip_state['locked_until'] = _time.time() + _LOGIN_LOCKOUT_SECONDS
+                ip_state['count'] = 0
             if state['count'] >= _MAX_LOGIN_ATTEMPTS:
                 state['locked_until'] = _time.time() + _LOGIN_LOCKOUT_SECONDS
                 state['count'] = 0
