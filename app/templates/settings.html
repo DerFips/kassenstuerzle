@@ -162,6 +162,37 @@
     </div>
   </div>
 
+  {% if current_role == 'admin' %}
+  <!-- Benutzer -->
+  <div class="col-12">
+    <div class="card shadow-sm border-dark">
+      <div class="card-header bg-dark text-white fw-semibold d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <span><i class="bi bi-person-badge me-1"></i>{{ t('settings.users') }}</span>
+        <button class="btn btn-sm btn-light" id="add-user-btn">
+          <i class="bi bi-plus-circle me-1"></i>{{ t('settings.user_add') }}
+        </button>
+      </div>
+      <div class="card-body">
+        <div class="table-responsive">
+          <table class="table table-sm align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>{{ t('settings.user_name') }}</th>
+                <th>{{ t('settings.user_person') }}</th>
+                <th>{{ t('settings.user_role') }}</th>
+                <th>{{ t('settings.user_active') }}</th>
+                <th>{{ t('settings.user_last_login') }}</th>
+                <th class="text-end">{{ t('settings.backup_action') }}</th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Backup -->
   <div class="col-12 col-md-6">
     <div class="card shadow-sm border-info">
@@ -546,7 +577,9 @@ document.getElementById('save-persons-btn').addEventListener('click', async () =
     applyIdMap(d.id_map, '.person-row');
     _pendingPersonDeletes = _pendingPersonDeletes.filter(id => !sentDeletes.includes(id));
     if (typeof activityWatchVersion === 'function') activityWatchVersion(d.activity_version);
-    if (d.conflicts && d.conflicts.length) {
+    if (d.blocked && d.blocked.length) {
+      showToast(t('settings.person_blocked', {names: d.blocked.join(', ')}), 'warning');
+    } else if (d.conflicts && d.conflicts.length) {
       showToast(t('settings.name_conflict', {names: d.conflicts.join(', ')}), 'warning');
     } else {
       showToast(t('settings.toast_persons_saved'), 'success');
@@ -692,5 +725,114 @@ document.getElementById('csv-import-btn').addEventListener('click', async () => 
 });
 
 initActivityWatch({ scope: 'settings', version: ACTIVITY_VERSION, container: 'settingsActivityBar' });
+
+{% if current_role == 'admin' %}
+const PERSONEN_FUER_USER = {{ persons | tojson }};
+
+function zelle(text) {
+  const td = document.createElement('td');
+  td.textContent = text == null ? '—' : String(text);
+  return td;
+}
+
+function benutzerZeile(u) {
+  const tr = document.createElement('tr');
+  tr.appendChild(zelle(u.username));
+  tr.appendChild(zelle(u.person_name));
+
+  const tdRolle = document.createElement('td');
+  const sel = document.createElement('select');
+  sel.className = 'form-select form-select-sm';
+  [['member', t('settings.role_member')], ['admin', t('settings.role_admin')]].forEach(([wert, label]) => {
+    const o = document.createElement('option');
+    o.value = wert; o.textContent = label;
+    if (u.role === wert) o.selected = true;
+    sel.appendChild(o);
+  });
+  sel.addEventListener('change', () => benutzerAendern(u.id, {role: sel.value}));
+  tdRolle.appendChild(sel);
+  tr.appendChild(tdRolle);
+
+  const tdAktiv = document.createElement('td');
+  const cb = document.createElement('input');
+  cb.type = 'checkbox'; cb.className = 'form-check-input'; cb.checked = !!u.is_active;
+  cb.addEventListener('change', () => benutzerAendern(u.id, {is_active: cb.checked ? 1 : 0}));
+  tdAktiv.appendChild(cb);
+  tr.appendChild(tdAktiv);
+
+  tr.appendChild(zelle(u.last_login));
+
+  const tdAktion = document.createElement('td');
+  tdAktion.className = 'text-end text-nowrap';
+  const reset = document.createElement('button');
+  reset.className = 'btn btn-sm btn-outline-secondary me-1';
+  reset.textContent = t('settings.user_reset_pw');
+  reset.addEventListener('click', () => passwortZuruecksetzen(u.id, u.username));
+  const del = document.createElement('button');
+  del.className = 'btn btn-sm btn-outline-danger';
+  del.innerHTML = '<i class="bi bi-trash"></i>';
+  del.addEventListener('click', () => benutzerLoeschen(u.id, u.username));
+  tdAktion.appendChild(reset); tdAktion.appendChild(del);
+  tr.appendChild(tdAktion);
+  return tr;
+}
+
+async function benutzerLaden() {
+  const d = await (await fetch('/api/users')).json();
+  const tb = document.getElementById('users-tbody');
+  tb.innerHTML = '';
+  (d.users || []).forEach(u => tb.appendChild(benutzerZeile(u)));
+}
+
+async function benutzerAendern(id, felder) {
+  const d = await (await fetch(`/api/users/${id}`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(felder)
+  })).json();
+  showToast(d.success ? t('settings.user_saved') : d.error, d.success ? 'success' : 'danger');
+  benutzerLaden();
+}
+
+async function passwortZuruecksetzen(id, name) {
+  if (!confirm(t('settings.user_reset_confirm', {name}))) return;
+  const d = await (await fetch(`/api/users/${id}/reset-password`, {method: 'POST'})).json();
+  if (d.success) zeigeInitialpasswort(name, d.password);
+  else showToast(d.error, 'danger');
+}
+
+async function benutzerLoeschen(id, name) {
+  if (!confirm(t('settings.user_delete_confirm', {name}))) return;
+  const d = await (await fetch(`/api/users/${id}`, {method: 'DELETE'})).json();
+  showToast(d.success ? t('settings.user_deleted') : d.error, d.success ? 'success' : 'danger');
+  benutzerLaden();
+}
+
+/** Zeigt das Initialpasswort genau einmal an (Entscheidung P1). */
+function zeigeInitialpasswort(name, passwort) {
+  const box = document.createElement('div');
+  box.className = 'alert alert-warning mt-3';
+  const titel = document.createElement('div');
+  titel.className = 'fw-semibold';
+  titel.textContent = t('settings.user_password_once', {name});
+  const code = document.createElement('code');
+  code.className = 'fs-5 d-block my-2';
+  code.textContent = passwort;
+  box.appendChild(titel); box.appendChild(code);
+  document.getElementById('users-tbody').closest('.card-body').appendChild(box);
+}
+
+document.getElementById('add-user-btn').addEventListener('click', async () => {
+  const name = prompt(t('settings.user_name_prompt'));
+  if (!name) return;
+  const d = await (await fetch('/api/users', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username: name.trim(), role: 'member', person_id: null})
+  })).json();
+  if (d.success) { zeigeInitialpasswort(name.trim(), d.password); benutzerLaden(); }
+  else showToast(d.error, 'danger');
+});
+
+benutzerLaden();
+{% endif %}
 </script>
 {% endblock %}

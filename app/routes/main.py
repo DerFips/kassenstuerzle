@@ -1712,9 +1712,11 @@ def settings():
     recurring = [dict(r) for r in conn.execute('SELECT * FROM recurring_expenses ORDER BY id')]
     category_splits = get_category_splits_map(conn)
     conn.close()
+    aktuelle_rolle = getattr(g, 'current_user', None)
+    aktuelle_rolle = aktuelle_rolle['role'] if aktuelle_rolle else 'member'
     return render_template('settings.html', active='settings', persons=persons, categories=cats,
                             recurring=recurring, category_splits=category_splits,
-                            activity_version=activity_version)
+                            activity_version=activity_version, current_role=aktuelle_rolle)
 
 
 
