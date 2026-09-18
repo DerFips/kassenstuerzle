@@ -219,3 +219,33 @@ def test_zu_kurzes_passwort_zeigt_fehlermeldung(auth_client, csrf, db):
         db.execute("UPDATE users SET password_hash=? WHERE username='admin'",
                    (generate_password_hash('test-password-123'),))
         db.commit()
+
+
+def test_erzwungener_wechsel_ohne_flag_wird_abgewiesen(auth_client, csrf, db):
+    """Regression Blocker 3: /password/aendern ist NUR fuer den erzwungenen
+    Erstwechsel da. Ohne die must_change_password-Pruefung koennte JEDE
+    authentifizierte Sitzung - auch eine geborgte - das Passwort setzen,
+    ohne das alte zu kennen, und dabei ueber session_epoch die echte
+    Sitzung des Kontoinhabers beenden. Ein Konto ohne gesetztes Flag muss
+    deshalb weggeleitet werden, GET wie POST, und das Passwort darf sich
+    nicht aendern."""
+    db.execute("UPDATE users SET must_change_password=0 WHERE username='admin'")
+    db.commit()
+    vorher = db.execute(
+        "SELECT password_hash, session_epoch FROM users WHERE username='admin'").fetchone()
+
+    res_get = auth_client.get('/password/aendern')
+    assert res_get.status_code == 302
+    assert '/settings' in res_get.headers['Location']
+
+    res_post = auth_client.post('/password/aendern',
+                                data={'new_password': 'uebernommen-123',
+                                      'new_password2': 'uebernommen-123',
+                                      'csrf_token': csrf})
+    assert res_post.status_code == 302
+    assert '/settings' in res_post.headers['Location']
+
+    nachher = db.execute(
+        "SELECT password_hash, session_epoch FROM users WHERE username='admin'").fetchone()
+    assert nachher['password_hash'] == vorher['password_hash']
+    assert nachher['session_epoch'] == vorher['session_epoch']

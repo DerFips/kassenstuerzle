@@ -951,6 +951,12 @@ def change_password():
 def force_password_change():
     """Eigenstaendige Seite fuer den erzwungenen Wechsel eines Initialpassworts.
     login_required leitet hierher um, solange must_change_password gesetzt ist."""
+    nutzer = getattr(g, 'current_user', None)
+    if not (nutzer and nutzer['must_change_password']):
+        # Diese Seite ist ausschliesslich fuer den erzwungenen Erstwechsel da.
+        # Ein regulaerer Wechsel laeuft ueber /change_password MIT Abfrage des
+        # alten Passworts - sonst koennte eine fremde Sitzung das Konto uebernehmen.
+        return redirect(url_for('main.settings'))
     if request.method == 'GET':
         return render_template('force_password_change.html')
 
@@ -2556,6 +2562,12 @@ def api_backup_download(filename):
 @main_bp.route('/api/backup/restore', methods=['POST'])
 @admin_required
 def api_backup_restore():
+    # Die Request-Verbindung zeigt noch auf die ALTE Datei. Sie muss zu sein,
+    # bevor die Datei ausgetauscht wird - sonst schreibt der Checkpoint beim
+    # Schliessen alte WAL-Frames in die frisch eingespielte Datenbank.
+    _alte_verbindung = g.pop('db', None)
+    if _alte_verbindung is not None:
+        _alte_verbindung.close()
     if 'file' not in request.files:
         return jsonify(success=False, error=t('srv.no_file')), 400
     f = request.files['file']
@@ -2592,6 +2604,13 @@ def api_backup_restore():
         except FileNotFoundError:
             pass
     tmp.unlink(missing_ok=True)
+    # Eine wiederhergestellte Datenbank kann aelter als die Profil-Migration
+    # sein (z.B. eine vor Phase B geschriebene Sicherung). Seit dieser Phase
+    # setzt JEDE Anfrage (login_required, login()) auf role/is_active/
+    # session_epoch/must_change_password/person_id - ohne erneute Migration
+    # waere die App bis zum naechsten Container-Neustart komplett unbenutzbar.
+    g.pop('db', None)
+    init_db()
     return jsonify(success=True)
 
 @main_bp.route('/api/backup/delete/<filename>', methods=['DELETE'])
