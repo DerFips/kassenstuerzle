@@ -94,7 +94,11 @@ TRANSLATIONS = {
         'month.settlement_reopen_hint': 'Checkbox deaktivieren um die Abrechnung wieder zu öffnen.',
         'month.settlement_no_split_expenses': 'Keine gesplitteten Ausgaben diesen Monat.',
         'month.settlement_all_balanced': 'Alles ausgeglichen!',
-        'month.settlement_owes': '{payer} schuldet {payee}',
+        # Bewusst nur das Verb, ohne Platzhalter: die beiden Namen werden in
+        # der Vorlage einzeln und maskiert eingesetzt. translate() macht ein
+        # ungeschuetztes str.format() - ein Name mit Markup wuerde sonst als
+        # HTML ausgefuehrt (Sicherheitspruefung K1).
+        'month.settlement_owes_verb': 'schuldet',
         'month.settlement_details_hint': 'Details je Kategorie in der Monatsübersicht (⚖️-Zeilen). Checkbox aktivieren wenn beglichen.',
         'month.settlement_details_hint_short': 'Details in der Monatsübersicht (⚖️-Zeilen).',
         'month.formula_empty': 'Formel ist leer.',
@@ -481,7 +485,7 @@ TRANSLATIONS = {
         'month.settlement_reopen_hint': 'Disable the checkbox to reopen the settlement.',
         'month.settlement_no_split_expenses': 'No split expenses this month.',
         'month.settlement_all_balanced': 'All balanced!',
-        'month.settlement_owes': '{payer} owes {payee}',
+        'month.settlement_owes_verb': 'owes',
         'month.settlement_details_hint': 'See month overview (⚖️ rows) for details per category. Enable the checkbox once settled.',
         'month.settlement_details_hint_short': 'See month overview (⚖️ rows) for details.',
         'month.formula_empty': 'Formula is empty.',

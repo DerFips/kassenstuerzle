@@ -695,22 +695,34 @@ document.getElementById('save-cats-btn').addEventListener('click', async () => {
 });
 
 // Wiederkehrende
-const personsOpts = `{% for p in persons %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}`;
-const catsOpts    = `{% for c in categories %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}`;
+// Namen als JSON, nicht als vorgefertigtes Markup in einem Template-Literal:
+// Jinja maskiert dort zwar < > ", aber NICHT $ { } und Backtick - `${...}`
+// in einem Namen war deshalb eine lebende Substitution (K1). Die Optionen
+// entstehen jetzt per new Option(), also rein ueber den DOM.
+const REC_PERSONS = {{ persons | tojson }};
+const REC_CATS    = {{ categories | tojson }};
+
+/** Fuellt ein <select> mit Namen; Reihenfolge wie bisher (Server sortiert). */
+function fillRecSelect(sel, items) {
+  if (!sel) return;
+  items.forEach(it => sel.appendChild(new Option(it.name, it.id)));
+}
 document.getElementById('add-rec-btn').addEventListener('click', () => {
   const div = document.createElement('div');
   div.className = 'row g-2 mb-2 recurring-row'; div.dataset.id = '';
   div.innerHTML = `
     <div class="col-6 col-md-2"><input type="number" min="1" max="31" class="form-control rec-day" placeholder="${t('settings.day')}"></div>
     <div class="col-6 col-md-3"><input type="text" class="form-control rec-desc" placeholder="${t('settings.description')}"></div>
-    <div class="col-6 col-md-2"><select class="form-select rec-person"><option value="">${t('settings.person_placeholder')}</option>${personsOpts}</select></div>
-    <div class="col-6 col-md-2"><select class="form-select rec-cat"><option value="">${t('settings.category_placeholder')}</option>${catsOpts}</select></div>
+    <div class="col-6 col-md-2"><select class="form-select rec-person"><option value="">${t('settings.person_placeholder')}</option></select></div>
+    <div class="col-6 col-md-2"><select class="form-select rec-cat"><option value="">${t('settings.category_placeholder')}</option></select></div>
     <div class="col-4 col-md-1"><input type="number" step="0.01" class="form-control rec-amount" placeholder="€"></div>
     <div class="col-4 col-md-1"><select class="form-select rec-freq">
       <option value="monthly">${t('settings.monthly')}</option>
       <option value="quarterly">${t('settings.quarterly')}</option>
       <option value="yearly">${t('settings.yearly')}</option></select></div>
     <div class="col-4 col-md-1"><button class="btn btn-outline-danger btn-sm remove-rec-btn w-100"><i class="bi bi-trash"></i></button></div>`;
+  fillRecSelect(div.querySelector('.rec-person'), REC_PERSONS);
+  fillRecSelect(div.querySelector('.rec-cat'), REC_CATS);
   document.getElementById('recurring-list').appendChild(div);
 });
 document.getElementById('recurring-list').addEventListener('click', e => {

@@ -246,6 +246,20 @@ document.getElementById('pwa-install-btn')?.addEventListener('click', () => {
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  /* Genau EINE Implementierung fuer die ganze App: month.html, settings.html
+   * und overview.html setzen ebenfalls Namen per innerHTML ein und muessen
+   * dieselbe Maskierung benutzen (Sicherheitspruefung K1). */
+  window.escHtml = esc;
+
+  /** Nur echte Farbwerte durchlassen. Kategoriefarben sind frei waehlbar; ohne
+   * diese Pruefung kann ein Wert mit Anfuehrungszeichen aus einem
+   * style-Attribut ausbrechen und ein Ereignis-Attribut anhaengen.
+   * Serverseitig wird derselbe Ausdruck geprueft (main.py, save_categories) -
+   * hier zusaetzlich fuer Altbestaende in der Datenbank. */
+  window.safeColor = function (c) {
+    return /^#?[0-9A-Fa-f]{3,8}$/.test(String(c == null ? '' : c)) ? String(c) : '#6c757d';
+  };
+
   function render(info) {
     if (!_container) return;
     const parts = [];

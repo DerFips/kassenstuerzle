@@ -5,6 +5,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
 from flask import Flask, render_template, request, jsonify, Response, redirect, url_for
 import os
+import re as _re_modul
 # SQLCipher Drop-in: verschlüsselte SQLite-Datenbank
 # Fallback auf Standard-sqlite3 wenn sqlcipher3 nicht installiert ist
 try:
@@ -1455,6 +1456,25 @@ def save_persons():
                     'activity_version': activity_version, 'conflicts': conflicts,
                     'blocked': blocked})
 
+STANDARD_FARBE = '#6c757d'
+_FARB_MUSTER = _re_modul.compile(r'^#?[0-9A-Fa-f]{3,8}$')
+
+
+def sichere_farbe(wert, standard=STANDARD_FARBE):
+    """Gibt `wert` nur zurück, wenn er wie ein Farbwert aussieht, sonst
+    `standard`.
+
+    Kategoriefarben sind frei wählbar und landen in `style`-Attributen. Ohne
+    diese Prüfung reicht ein Wert wie `red" onmouseover="alert(1)` aus, um aus
+    dem Attribut auszubrechen - das ist die Wurzel der Farb-Senken aus
+    Sicherheitsprüfung K1. Deshalb serverseitig prüfen, nicht erst im Browser.
+    """
+    if wert is None:
+        return standard
+    text = str(wert).strip()
+    return text if _FARB_MUSTER.match(text) else standard
+
+
 @main_bp.route('/api/categories/save', methods=['POST'])
 @login_required
 def save_categories():
@@ -1479,7 +1499,9 @@ def save_categories():
             continue
         # `color` ist NOT NULL in der DB - c.get(key, default) greift nur wenn
         # der Key fehlt, nicht wenn der Client explizit `color: null` sendet.
-        col = c.get('color') or '#6c757d'
+        # Alles, was nicht wie eine Farbe aussieht, wird auf den Standard
+        # zurückgesetzt (siehe sichere_farbe).
+        col = sichere_farbe(c.get('color'))
         sp = 1 if c.get('is_split') else 0
         try:
             cid = int(c['id']) if c.get('id') else None
