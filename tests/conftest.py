@@ -60,7 +60,11 @@ def db(app):
     for table in _CLEANUP_TABLES:
         try:
             conn.execute(f'DELETE FROM {table}')
-        except Exception:
-            pass
+        except main_module.sqlite3.OperationalError as exc:
+            # 'activity' und 'presence' entstehen erst in Task 3 - bis dahin
+            # duerfen sie fehlen. Jeder ANDERE Fehler muss sichtbar bleiben,
+            # sonst bricht die Testisolation still zusammen.
+            if 'no such table' not in str(exc).lower():
+                raise
     conn.commit()
     conn.close()
