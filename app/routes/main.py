@@ -841,11 +841,15 @@ def login():
     ip = request.remote_addr or 'unknown'
     username = (request.form.get('username', '') or '').strip()
     key = username.lower()
-    state = _login_attempts[key]
+    # Ohne Benutzernamen (jedes GET auf /login, oder ein leer abgeschicktes
+    # Formular) gibt es keinen sinnvollen Zaehler. Wuerde man den leeren
+    # Schluessel mitzaehlen, koennte ein einziger Besucher mit fuenf leeren
+    # Absendungen allen anderen die Sperrmeldung auf der Loginseite einblenden.
+    state = _login_attempts[key] if key else None
     ip_state = _ip_attempts[ip]
 
     # Sperre prüfen
-    gesperrt_bis = max(state['locked_until'], ip_state['locked_until'])
+    gesperrt_bis = max(state['locked_until'] if state else 0, ip_state['locked_until'])
     if gesperrt_bis > _time.time():
         remaining = int(gesperrt_bis - _time.time())
         flash(t('login.locked', seconds=remaining), 'danger')
@@ -866,7 +870,8 @@ def login():
         # unspezifische Fehlermeldung verbergen soll.
         if user and check_password_hash(user['password_hash'], password) and user['is_active']:
             # Erfolg: Zähler zurücksetzen, Session neu aufbauen
-            _login_attempts[key] = {'count': 0, 'locked_until': 0}
+            if key:
+                _login_attempts[key] = {'count': 0, 'locked_until': 0}
             _ip_attempts[ip] = {'count': 0, 'locked_until': 0}
             lang = session.get('lang')  # Sprachwahl übersteht session.clear()
             session.clear()
@@ -884,18 +889,22 @@ def login():
                 session['lang'] = lang
             return redirect(url_for('main.index'))
         else:
-            state['count'] += 1
             ip_state['count'] += 1
             if ip_state['count'] >= _MAX_IP_ATTEMPTS:
                 ip_state['locked_until'] = _time.time() + _LOGIN_LOCKOUT_SECONDS
                 ip_state['count'] = 0
-            if state['count'] >= _MAX_LOGIN_ATTEMPTS:
-                state['locked_until'] = _time.time() + _LOGIN_LOCKOUT_SECONDS
-                state['count'] = 0
-                flash(t('login.locked_now', seconds=_LOGIN_LOCKOUT_SECONDS), 'danger')
+            if state is not None:
+                state['count'] += 1
+                if state['count'] >= _MAX_LOGIN_ATTEMPTS:
+                    state['locked_until'] = _time.time() + _LOGIN_LOCKOUT_SECONDS
+                    state['count'] = 0
+                    flash(t('login.locked_now', seconds=_LOGIN_LOCKOUT_SECONDS), 'danger')
+                else:
+                    remaining_attempts = _MAX_LOGIN_ATTEMPTS - state['count']
+                    flash(t('login.invalid', remaining=remaining_attempts), 'danger')
             else:
-                remaining_attempts = _MAX_LOGIN_ATTEMPTS - state['count']
-                flash(t('login.invalid', remaining=remaining_attempts), 'danger')
+                # Leerer Benutzername: gleiche unspezifische Meldung, aber kein Zaehler.
+                flash(t('login.invalid', remaining=_MAX_LOGIN_ATTEMPTS), 'danger')
 
     return render_template('login.html')
 

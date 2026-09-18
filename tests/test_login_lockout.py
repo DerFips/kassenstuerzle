@@ -44,6 +44,28 @@ def test_erfolgreicher_login_setzt_zaehler_zurueck(client):
     _reset()
 
 
+def test_leere_benutzername_versuche_sperren_niemanden(client):
+    """Ein leer abgeschicktes Formular (oder ein blosses GET) hat keinen
+    Benutzernamen - der Schluessel waere ''. Wuerde man den mitzaehlen,
+    koennte ein einziger Besucher mit fuenf leeren Absendungen allen
+    anderen die Sperrmeldung auf der Loginseite einblenden."""
+    _reset()
+    for _ in range(m._MAX_LOGIN_ATTEMPTS):
+        client.post('/login', data={'username': '', 'password': 'falsch'})
+
+    res = client.get('/login')
+    body = res.get_data(as_text=True)
+    # 'Zu viele Fehlversuche' steht immer im eingebetteten window.I18N-Block
+    # (JS-Uebersetzungstabelle) - das ist keine Sperrmeldung, sondern nur die
+    # Rohtabelle mit unersetztem Platzhalter. Eine echte Flash-Meldung landet
+    # als 'alert-danger'-Banner (der statische PWA-Install-Hinweis ist
+    # 'alert-success' und waere sonst ein falscher Treffer).
+    assert 'alert-danger' not in body, \
+        'ein leerer Benutzername darf die Loginseite fuer alle anderen nicht sperren'
+    assert '' not in m._login_attempts
+    _reset()
+
+
 def test_meldung_verraet_nicht_ob_konto_existiert(client):
     """Account-Enumeration verhindern: gleiche Meldung fuer beide Faelle."""
     _reset()
