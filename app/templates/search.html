@@ -1,0 +1,112 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="d-flex align-items-center gap-3 mb-4 flex-wrap">
+  <h2 class="fw-bold mb-0"><i class="bi bi-search me-2 text-success"></i>{{ t('search.title') }}</h2>
+  {% if q %}
+  <span class="text-muted">{{ t('search.results_for', count=total_count, query=q) }}</span>
+  {% endif %}
+</div>
+
+{# ── Suchformular ────────────────────────────────────────────────────────── #}
+<form action="{{ url_for('main.search') }}" method="get" class="mb-4">
+  <div class="input-group shadow-sm" style="max-width:520px">
+    <span class="input-group-text bg-white border-end-0"><i class="bi bi-search text-muted"></i></span>
+    <input type="search" name="q" id="searchInput"
+           class="form-control border-start-0 ps-0"
+           placeholder="{{ t('search.placeholder') }}"
+           value="{{ q }}"
+           autofocus
+           autocomplete="off">
+    <button class="btn btn-success px-4" type="submit">{{ t('search.submit') }}</button>
+  </div>
+  <div class="form-text mt-1">{{ t('search.hint') }}</div>
+</form>
+
+{% if q and q|length < 2 %}
+<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-2"></i>{{ t('search.min_chars') }}</div>
+
+{% elif q and total_count == 0 %}
+<div class="alert alert-info">
+  <i class="bi bi-info-circle me-2"></i>{{ t('search.no_results', query=q) }}
+</div>
+
+{% elif results %}
+{# ── Ergebnisse gruppiert nach Monat ──────────────────────────────────────── #}
+{% for (year, month), rows in results %}
+<div class="card shadow-sm mb-3">
+  <div class="card-header py-2 d-flex justify-content-between align-items-center">
+    <a href="{{ url_for('main.month_view', year=year, month=month) }}"
+       class="fw-semibold text-decoration-none text-dark">
+      <i class="bi bi-calendar3 me-2 text-success"></i>{{ month_names[month-1] }} {{ year }}
+    </a>
+    <span class="badge bg-secondary">{{ t('search.hits', count=rows|length) }}</span>
+  </div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th class="ps-3" style="width:36px">{{ t('month.day') }}</th>
+          <th>{{ t('month.description') }}</th>
+          <th>{{ t('month.person') }}</th>
+          <th>{{ t('month.category') }}</th>
+          <th class="text-end pe-3">{{ t('pdf.amount') }}</th>
+          <th class="text-center" style="width:36px" title="{{ t('pdf.type') }}"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td class="ps-3 text-muted">{{ "%02d"|format(row.day) }}.</td>
+          <td>
+            {{ row.description_hl or '—' }}
+          </td>
+          <td class="text-muted small">{{ row.person_name or '—' }}</td>
+          <td>
+            {% if row.category_name %}
+            <span class="badge rounded-pill" style="background-color:{{ row.category_color or '#6c757d' }}; font-size:.7em">
+              {{ row.category_name }}
+            </span>
+            {% else %}—{% endif %}
+          </td>
+          <td class="text-end pe-3 fw-semibold {% if row.row_type == 'income' %}text-success{% else %}text-danger{% endif %}">
+            {% if row.row_type == 'income' %}+{% else %}-{% endif %}{{ "%.2f"|format(row.amount)|replace(".",",") }} €
+          </td>
+          <td class="text-center">
+            {% if row.row_type == 'income' %}
+            <i class="bi bi-arrow-down-circle-fill text-success" title="{{ t('search.income') }}"></i>
+            {% else %}
+            <i class="bi bi-arrow-up-circle-fill text-danger" title="{{ t('search.expense') }}"></i>
+            {% if row.is_cash %}<i class="bi bi-cash text-muted ms-1" title="{{ t('search.cash') }}"></i>{% endif %}
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  <div class="card-footer py-1 text-end">
+    <a href="{{ url_for('main.month_view', year=year, month=month) }}"
+       class="btn btn-sm btn-outline-success">
+      <i class="bi bi-arrow-right me-1"></i>{{ t('search.to_month') }}
+    </a>
+  </div>
+</div>
+{% endfor %}
+
+{% if total_count >= 500 %}
+<div class="alert alert-warning mt-2">
+  <i class="bi bi-exclamation-triangle me-2"></i>{{ t('search.too_many_results') }}
+</div>
+{% endif %}
+
+{% elif not q %}
+{# ── Leerer Zustand ──────────────────────────────────────────────────────── #}
+<div class="text-center py-5 text-muted">
+  <i class="bi bi-search" style="font-size:3rem; opacity:.25"></i>
+  <p class="mt-3 mb-0">{{ t('search.empty_state') }}</p>
+</div>
+{% endif %}
+
+{% endblock %}

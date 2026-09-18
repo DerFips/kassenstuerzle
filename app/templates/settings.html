@@ -1,0 +1,623 @@
+{% extends 'base.html' %}
+{% block title %}{{ t('settings.title') }} – {{ t('nav.brand') }}{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+  <div class="col-12">
+    <h4 class="mb-3"><i class="bi bi-gear me-2"></i>{{ t('settings.title') }}</h4>
+  </div>
+
+  <!-- Personen -->
+  <div class="col-12 col-lg-6">
+    <div class="card shadow-sm h-100">
+      <div class="card-header bg-success text-white fw-semibold">
+        <i class="bi bi-people me-1"></i>{{ t('settings.persons') }}
+      </div>
+      <div class="card-body">
+        <div id="persons-list">
+          {% for p in persons %}
+          <div class="input-group mb-2 person-row" data-id="{{ p.id }}">
+            <input type="text" class="form-control person-name" value="{{ p.name }}" placeholder="Name">
+            <input type="month" class="form-control person-wallet-date"
+                   value="{{ p.wallet_start_date or '' }}" title="Bargeld-Startdatum" style="max-width:160px">
+            <input type="number" step="0.01" class="form-control person-wallet-amount"
+                   value="{{ p.wallet_start_amount or '' }}" placeholder="{{ t('settings.wallet_start_amount_placeholder') }}" style="max-width:130px">
+            <button class="btn btn-outline-danger remove-person-btn" type="button"><i class="bi bi-trash"></i></button>
+          </div>
+          {% endfor %}
+        </div>
+        <button class="btn btn-outline-success btn-sm mt-1" id="add-person-btn">
+          <i class="bi bi-plus-circle me-1"></i>{{ t('settings.add_person') }}
+        </button>
+        <div class="mt-3">
+          <button class="btn btn-success" id="save-persons-btn">
+            <i class="bi bi-save me-1"></i>{{ t('settings.save_persons') }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Kategorien -->
+  <div class="col-12 col-lg-6">
+    <div class="card shadow-sm h-100">
+      <div class="card-header bg-primary text-white fw-semibold">
+        <i class="bi bi-tags me-1"></i>{{ t('settings.categories') }}
+      </div>
+      <div class="card-body">
+        <div id="categories-list">
+          {% for c in categories %}
+          <div class="cat-row-wrap mb-2" data-id="{{ c.id }}">
+            <div class="input-group">
+              <input type="color" class="form-control form-control-color cat-color"
+                     value="#{{ c.color }}" style="max-width:50px">
+              <input type="text" class="form-control cat-name" value="{{ c.name }}" placeholder="{{ t('settings.category_name_placeholder') }}">
+              <div class="input-group-text" title="{{ t('settings.split_category') }}">
+                <input class="form-check-input mt-0 cat-split" type="checkbox"
+                       {% if c.is_split %}checked{% endif %} onchange="toggleCatSplitPanel(this)"> &nbsp;Split
+              </div>
+              <button class="btn btn-outline-danger remove-cat-btn" type="button"><i class="bi bi-trash"></i></button>
+            </div>
+            <div class="cat-split-panel ps-1 pt-1 {% if not c.is_split %}d-none{% endif %}">
+              <small class="text-muted d-block mb-1">{{ t('settings.split_ratio_hint') }}</small>
+              <div class="d-flex flex-wrap gap-2">
+                {% for p in persons %}
+                <div class="input-group input-group-sm" style="max-width:150px">
+                  <span class="input-group-text">{{ p.name }}</span>
+                  <input type="number" min="0" step="0.1" class="form-control cat-split-share"
+                         data-person-id="{{ p.id }}"
+                         value="{{ category_splits.get(c.id, {}).get(p.id, 1) }}">
+                </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        <button class="btn btn-outline-primary btn-sm mt-1" id="add-cat-btn">
+          <i class="bi bi-plus-circle me-1"></i>{{ t('settings.add_category') }}
+        </button>
+        <div class="mt-3">
+          <button class="btn btn-primary" id="save-cats-btn">
+            <i class="bi bi-save me-1"></i>{{ t('settings.save_categories') }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Wiederkehrende Ausgaben -->
+  <div class="col-12">
+    <div class="card shadow-sm">
+      <div class="card-header bg-warning text-dark fw-semibold">
+        <i class="bi bi-arrow-repeat me-1"></i>{{ t('settings.recurring') }}
+      </div>
+      <div class="card-body">
+        <div id="recurring-list">
+          {% for r in recurring %}
+          <div class="row g-2 mb-2 recurring-row" data-id="{{ r.id }}">
+            <div class="col-6 col-md-2">
+              <input type="number" min="1" max="31" class="form-control rec-day" value="{{ r.day }}" placeholder="{{ t('settings.day') }}">
+            </div>
+            <div class="col-6 col-md-3">
+              <input type="text" class="form-control rec-desc" value="{{ r.description }}" placeholder="{{ t('settings.description') }}">
+            </div>
+            <div class="col-6 col-md-2">
+              <select class="form-select rec-person">
+                <option value="">{{ t('settings.person_placeholder') }}</option>
+                {% for p in persons %}
+                <option value="{{ p.id }}" {% if r.person_id == p.id %}selected{% endif %}>{{ p.name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-6 col-md-2">
+              <select class="form-select rec-cat">
+                <option value="">{{ t('settings.category_placeholder') }}</option>
+                {% for c in categories %}
+                <option value="{{ c.id }}" {% if r.category_id == c.id %}selected{% endif %}>{{ c.name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-4 col-md-1">
+              <input type="number" step="0.01" class="form-control rec-amount" value="{{ r.amount }}" placeholder="€">
+            </div>
+            <div class="col-4 col-md-1">
+              <select class="form-select rec-freq">
+                <option value="monthly" {% if r.frequency=='monthly' %}selected{% endif %}>{{ t('settings.monthly') }}</option>
+                <option value="quarterly" {% if r.frequency=='quarterly' %}selected{% endif %}>{{ t('settings.quarterly') }}</option>
+                <option value="yearly" {% if r.frequency=='yearly' %}selected{% endif %}>{{ t('settings.yearly') }}</option>
+              </select>
+            </div>
+            <div class="col-4 col-md-1">
+              <button class="btn btn-outline-danger btn-sm remove-rec-btn w-100"><i class="bi bi-trash"></i></button>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        <button class="btn btn-outline-warning btn-sm mt-1" id="add-rec-btn">
+          <i class="bi bi-plus-circle me-1"></i>{{ t('settings.add') }}
+        </button>
+        <div class="mt-3">
+          <button class="btn btn-warning" id="save-recurring-btn">
+            <i class="bi bi-save me-1"></i>{{ t('settings.save_recurring') }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PDF Import Link -->
+  <div class="col-12 col-md-6">
+    <div class="card shadow-sm border-danger">
+      <div class="card-header bg-danger text-white fw-semibold">
+        <i class="bi bi-file-earmark-pdf me-1"></i>{{ t('settings.bank_import') }}
+      </div>
+      <div class="card-body">
+        <p class="text-muted small">{{ t('settings.bank_import_desc') }}</p>
+        <a href="{{ url_for('main.import_pdf_page') }}" class="btn btn-danger">
+          <i class="bi bi-upload me-1"></i>{{ t('settings.bank_import_open') }}
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Backup -->
+  <div class="col-12 col-md-6">
+    <div class="card shadow-sm border-info">
+      <div class="card-header bg-info text-white fw-semibold">
+        <i class="bi bi-hdd me-1"></i>{{ t('settings.backup') }}
+      </div>
+      <div class="card-body">
+        <p class="text-muted small">{{ t('settings.backup_desc') }}</p>
+        <button class="btn btn-outline-info" data-bs-toggle="modal" data-bs-target="#backupModal">
+          <i class="bi bi-safe me-1"></i>{{ t('settings.backup_open') }}
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Kalender & Benachrichtigungen -->
+  <div class="col-12 col-md-6">
+    <div class="card shadow-sm border-warning h-100">
+      <div class="card-header bg-warning text-dark fw-semibold">
+        <i class="bi bi-calendar-check me-1"></i>{{ t('settings.calendar_push') }}
+      </div>
+      <div class="card-body">
+        <p class="text-muted small">{{ t('settings.calendar_push_desc') }}</p>
+
+        <div class="d-flex flex-column gap-2">
+            <a href="{{ url_for('main.export_calendar') }}" class="btn btn-outline-warning text-dark">
+              <i class="bi bi-calendar-download me-1"></i>{{ t('settings.calendar_export') }}
+            </a>
+
+            <button class="btn btn-outline-secondary" id="enablePushBtn" onclick="enablePush()">
+              <i class="bi bi-bell-fill me-1"></i>{{ t('settings.push_enable') }}
+            </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Passwort ändern -->
+  <div class="col-12 col-md-6">
+    <div class="card shadow-sm border-secondary">
+      <div class="card-header bg-secondary text-white fw-semibold">
+        <i class="bi bi-shield-lock me-1"></i>{{ t('settings.change_password') }}
+      </div>
+      <div class="card-body">
+        <form id="changePasswordForm" autocomplete="off">
+          <div class="mb-2">
+            <label class="form-label small mb-1" for="oldPassword">{{ t('settings.old_password') }}</label>
+            <input type="password" class="form-control form-control-sm" id="oldPassword"
+                   autocomplete="current-password" required>
+          </div>
+          <div class="mb-2">
+            <label class="form-label small mb-1" for="newPassword">{{ t('settings.new_password') }} <span class="text-muted">{{ t('settings.new_password_hint') }}</span></label>
+            <input type="password" class="form-control form-control-sm" id="newPassword"
+                   autocomplete="new-password" minlength="8" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label small mb-1" for="newPassword2">{{ t('settings.new_password_repeat') }}</label>
+            <input type="password" class="form-control form-control-sm" id="newPassword2"
+                   autocomplete="new-password" minlength="8" required>
+          </div>
+          <div id="pwFeedback" class="small mb-2"></div>
+          <button type="submit" class="btn btn-secondary btn-sm">
+            <i class="bi bi-check-lg me-1"></i>{{ t('settings.save_password') }}
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- CSV Import/Export -->
+  <div class="col-12 col-md-6">
+    <div class="card shadow-sm">
+      <div class="card-header bg-secondary text-white fw-semibold">
+        <i class="bi bi-arrow-left-right me-1"></i>{{ t('settings.csv_import_export') }}
+      </div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label fw-semibold">{{ t('settings.import') }}</label>
+          <input type="file" class="form-control mb-2" id="csv-import-file" accept=".csv">
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="csv-overwrite">
+            <label class="form-check-label" for="csv-overwrite">{{ t('settings.csv_overwrite') }}</label>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="csv-import-btn">
+            <i class="bi bi-upload me-1"></i>{{ t('settings.csv_import_btn') }}
+          </button>
+          <div id="csv-import-result" class="mt-2"></div>
+        </div>
+        <hr>
+        <label class="form-label fw-semibold">{{ t('settings.export') }}</label>
+        <div class="d-flex gap-2 flex-wrap">
+          <a href="/api/export/csv" class="btn btn-dark btn-sm">
+            <i class="bi bi-download me-1"></i>{{ t('settings.export_all') }}
+          </a>
+          <a href="/api/export/csv?year={{ now_dt.year }}" class="btn btn-outline-dark btn-sm">
+            <i class="bi bi-calendar me-1"></i>{{ now_dt.year }}
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Backup Modal -->
+<div class="modal fade" id="backupModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-hdd me-2 text-info"></i>{{ t('settings.backup_manager') }}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+
+        <div class="d-flex flex-wrap justify-content-between mb-3 align-items-center gap-2">
+            <div class="flex-grow-1">
+                <input type="text" id="backupLabel" class="form-control form-control-sm" placeholder="{{ t('settings.backup_label_placeholder') }}">
+            </div>
+            <button class="btn btn-info text-white btn-sm text-nowrap" onclick="createBackup()">
+                <i class="bi bi-plus-circle me-1"></i>{{ t('settings.backup_create') }}
+            </button>
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr>
+                        <th>{{ t('settings.backup_date') }}</th>
+                        <th>{{ t('settings.backup_filename') }}</th>
+                        <th class="text-end">{{ t('settings.backup_size') }}</th>
+                        <th class="text-end">{{ t('settings.backup_action') }}</th>
+                    </tr>
+                </thead>
+                <tbody id="backupList">
+                    <tr><td colspan="4" class="text-center text-muted"><i class="bi bi-arrow-repeat spin"></i> {{ t('settings.backup_loading') }}</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <hr>
+        <h6 class="mt-3">{{ t('settings.backup_restore_title') }}</h6>
+        <div class="d-flex flex-column flex-sm-row gap-2">
+            <input type="file" class="form-control form-control-sm" id="restoreFile" accept=".db">
+            <button class="btn btn-sm btn-outline-danger text-nowrap" onclick="restoreBackup()">
+                <i class="bi bi-arrow-counterclockwise"></i> {{ t('settings.backup_restore_btn') }}
+            </button>
+        </div>
+        <small class="text-danger mt-1 d-block">{{ t('settings.backup_restore_warning') }}</small>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Backup Manager ───────────────────────────────────────────────────────────
+document.getElementById('backupModal').addEventListener('show.bs.modal', loadBackups);
+
+async function loadBackups() {
+    try {
+        const res = await fetch('/api/backup/list');
+        const data = await res.json();
+        const tbody = document.getElementById('backupList');
+        tbody.innerHTML = '';
+
+        if (!data.backups || data.backups.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="4" class="text-center text-muted">${t('settings.backup_none')}</td></tr>`;
+            return;
+        }
+
+        data.backups.forEach(b => {
+            tbody.innerHTML += `
+                <tr>
+                    <td>${b.created_at}</td>
+                    <td class="text-break"><small>${b.filename}</small></td>
+                    <td class="text-end">${b.size_kb} KB</td>
+                    <td class="text-end">
+                        <a href="/api/backup/download/${b.filename}" class="btn btn-sm btn-outline-success" title="Download"><i class="bi bi-download"></i></a>
+                        <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteBackup('${b.filename}')" title="${t('month.receipt_delete')}"><i class="bi bi-trash"></i></button>
+                    </td>
+                </tr>
+            `;
+        });
+    } catch (e) {
+        alert(t('settings.backup_load_error'));
+    }
+}
+
+async function createBackup() {
+    const label = document.getElementById('backupLabel').value;
+    try {
+        const res = await fetch('/api/backup/create', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({label: label})
+        });
+        const data = await res.json();
+        if (data.success) {
+            document.getElementById('backupLabel').value = '';
+            loadBackups();
+            showToast(t('settings.backup_created'), 'success');
+        }
+    } catch (e) {
+        alert(t('settings.backup_create_error'));
+    }
+}
+
+async function deleteBackup(filename) {
+    if (!confirm(t('settings.backup_delete_confirm'))) return;
+    try {
+        await fetch(`/api/backup/delete/${filename}`, { method: 'DELETE' });
+        loadBackups();
+    } catch (e) {}
+}
+
+async function restoreBackup() {
+    const file = document.getElementById('restoreFile').files[0];
+    if (!file) return;
+
+    if (!confirm(t('settings.backup_restore_confirm'))) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const res = await fetch('/api/backup/restore', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await res.json();
+        if (data.success) {
+            alert(t('settings.backup_restore_success'));
+            window.location.href = '/';
+        } else {
+            alert(t('settings.backup_restore_error', {error: data.error}));
+        }
+    } catch (e) {
+        alert(t('settings.backup_restore_generic_error'));
+    }
+}
+
+// ── Passwort ändern ──────────────────────────────────────────────────────────
+document.getElementById('changePasswordForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const oldPw  = document.getElementById('oldPassword').value;
+    const newPw  = document.getElementById('newPassword').value;
+    const newPw2 = document.getElementById('newPassword2').value;
+    const fb     = document.getElementById('pwFeedback');
+
+    if (newPw !== newPw2) {
+        fb.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>${t('settings.pw_mismatch')}</span>`;
+        return;
+    }
+    if (newPw.length < 8) {
+        fb.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>${t('settings.pw_too_short')}</span>`;
+        return;
+    }
+
+    try {
+        const res = await fetch('/change_password', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: new URLSearchParams({old_password: oldPw, new_password: newPw})
+        });
+        const data = await res.json();
+        if (data.success) {
+            fb.innerHTML = `<span class="text-success"><i class="bi bi-check-circle me-1"></i>${t('settings.pw_changed')}</span>`;
+            document.getElementById('changePasswordForm').reset();
+            setTimeout(() => fb.innerHTML = '', 4000);
+        } else {
+            fb.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>${data.error}</span>`;
+        }
+    } catch(err) {
+        fb.innerHTML = `<span class="text-danger">${t('settings.pw_save_error')}</span>`;
+    }
+});
+
+// ── Push-Benachrichtigungen ──────────────────────────────────────────────────
+async function enablePush() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+        alert(t('settings.push_not_supported'));
+        return;
+    }
+
+    try {
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') {
+            alert(t('settings.push_denied'));
+            return;
+        }
+
+        const res = await fetch('/api/notifications/vapidPublicKey');
+        const data = await res.json();
+
+        const registration = await navigator.serviceWorker.ready;
+        const subscription = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(data.publicKey)
+        });
+
+        await fetch('/api/notifications/register', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(subscription)
+        });
+
+        alert(t('settings.push_enabled'));
+        document.getElementById('enablePushBtn').disabled = true;
+        document.getElementById('enablePushBtn').innerText = t('settings.push_active');
+
+    } catch (err) {
+        console.error("Push Error", err);
+        alert(t('settings.push_error'));
+    }
+}
+
+function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
+    const rawData = window.atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; ++i) {
+        outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+}
+</script>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+const PERSONS_FOR_SPLITS = {{ persons | tojson }};
+
+// Personen
+document.getElementById('add-person-btn').addEventListener('click', () => {
+  const div = document.createElement('div');
+  div.className = 'input-group mb-2 person-row'; div.dataset.id = '';
+  div.innerHTML = `<input type="text" class="form-control person-name" placeholder="Name">
+    <input type="month" class="form-control person-wallet-date" style="max-width:160px">
+    <input type="number" step="0.01" class="form-control person-wallet-amount" placeholder="${t('settings.wallet_start_amount_placeholder')}" style="max-width:130px">
+    <button class="btn btn-outline-danger remove-person-btn" type="button"><i class="bi bi-trash"></i></button>`;
+  document.getElementById('persons-list').appendChild(div);
+});
+document.getElementById('persons-list').addEventListener('click', e => {
+  if (e.target.closest('.remove-person-btn')) e.target.closest('.person-row').remove();
+});
+document.getElementById('save-persons-btn').addEventListener('click', async () => {
+  const rows = [...document.querySelectorAll('.person-row')].map(r => ({
+    id: r.dataset.id || null,
+    name: r.querySelector('.person-name').value.trim(),
+    wallet_start_date: r.querySelector('.person-wallet-date').value || null,
+    wallet_start_amount: parseFloat(r.querySelector('.person-wallet-amount').value) || 0
+  })).filter(p => p.name);
+  const res = await fetch('/api/persons/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(rows)});
+  const d = await res.json();
+  showToast(d.success ? t('settings.toast_persons_saved') : t('settings.toast_error', {error: d.error||''}), d.success ? 'success' : 'danger');
+});
+
+// Kategorien
+function toggleCatSplitPanel(cb) {
+  const wrap = cb.closest('.cat-row-wrap');
+  wrap.querySelector('.cat-split-panel').classList.toggle('d-none', !cb.checked);
+}
+function buildSplitPanelHtml() {
+  const inputs = PERSONS_FOR_SPLITS.map(p => `
+    <div class="input-group input-group-sm" style="max-width:150px">
+      <span class="input-group-text">${p.name}</span>
+      <input type="number" min="0" step="0.1" class="form-control cat-split-share" data-person-id="${p.id}" value="1">
+    </div>`).join('');
+  return `<small class="text-muted d-block mb-1">${t('settings.split_ratio_hint')}</small>
+    <div class="d-flex flex-wrap gap-2">${inputs}</div>`;
+}
+document.getElementById('add-cat-btn').addEventListener('click', () => {
+  const div = document.createElement('div');
+  div.className = 'cat-row-wrap mb-2'; div.dataset.id = '';
+  div.innerHTML = `
+    <div class="input-group">
+      <input type="color" class="form-control form-control-color cat-color" value="#6c757d" style="max-width:50px">
+      <input type="text" class="form-control cat-name" placeholder="${t('settings.category_name_placeholder')}">
+      <div class="input-group-text"><input class="form-check-input mt-0 cat-split" type="checkbox" onchange="toggleCatSplitPanel(this)"> &nbsp;Split</div>
+      <button class="btn btn-outline-danger remove-cat-btn" type="button"><i class="bi bi-trash"></i></button>
+    </div>
+    <div class="cat-split-panel ps-1 pt-1 d-none">${buildSplitPanelHtml()}</div>`;
+  document.getElementById('categories-list').appendChild(div);
+});
+document.getElementById('categories-list').addEventListener('click', e => {
+  if (e.target.closest('.remove-cat-btn')) e.target.closest('.cat-row-wrap').remove();
+});
+document.getElementById('save-cats-btn').addEventListener('click', async () => {
+  const rows = [...document.querySelectorAll('.cat-row-wrap')].map(r => {
+    const splits = {};
+    r.querySelectorAll('.cat-split-share').forEach(inp => {
+      const v = parseFloat(inp.value);
+      if (v > 0) splits[inp.dataset.personId] = v;
+    });
+    return {
+      id: r.dataset.id || null,
+      name: r.querySelector('.cat-name').value.trim(),
+      color: r.querySelector('.cat-color').value.replace('#',''),
+      is_split: r.querySelector('.cat-split').checked ? 1 : 0,
+      splits,
+    };
+  }).filter(c => c.name);
+  const res = await fetch('/api/categories/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(rows)});
+  const d = await res.json();
+  showToast(d.success ? t('settings.toast_categories_saved') : t('settings.toast_error', {error: d.error||''}), d.success ? 'success' : 'danger');
+});
+
+// Wiederkehrende
+const personsOpts = `{% for p in persons %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}`;
+const catsOpts    = `{% for c in categories %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}`;
+document.getElementById('add-rec-btn').addEventListener('click', () => {
+  const div = document.createElement('div');
+  div.className = 'row g-2 mb-2 recurring-row'; div.dataset.id = '';
+  div.innerHTML = `
+    <div class="col-6 col-md-2"><input type="number" min="1" max="31" class="form-control rec-day" placeholder="${t('settings.day')}"></div>
+    <div class="col-6 col-md-3"><input type="text" class="form-control rec-desc" placeholder="${t('settings.description')}"></div>
+    <div class="col-6 col-md-2"><select class="form-select rec-person"><option value="">${t('settings.person_placeholder')}</option>${personsOpts}</select></div>
+    <div class="col-6 col-md-2"><select class="form-select rec-cat"><option value="">${t('settings.category_placeholder')}</option>${catsOpts}</select></div>
+    <div class="col-4 col-md-1"><input type="number" step="0.01" class="form-control rec-amount" placeholder="€"></div>
+    <div class="col-4 col-md-1"><select class="form-select rec-freq">
+      <option value="monthly">${t('settings.monthly')}</option>
+      <option value="quarterly">${t('settings.quarterly')}</option>
+      <option value="yearly">${t('settings.yearly')}</option></select></div>
+    <div class="col-4 col-md-1"><button class="btn btn-outline-danger btn-sm remove-rec-btn w-100"><i class="bi bi-trash"></i></button></div>`;
+  document.getElementById('recurring-list').appendChild(div);
+});
+document.getElementById('recurring-list').addEventListener('click', e => {
+  if (e.target.closest('.remove-rec-btn')) e.target.closest('.recurring-row').remove();
+});
+document.getElementById('save-recurring-btn').addEventListener('click', async () => {
+  const rows = [...document.querySelectorAll('.recurring-row')].map(r => ({
+    id: r.dataset.id || null,
+    day: parseInt(r.querySelector('.rec-day').value) || 1,
+    description: r.querySelector('.rec-desc').value.trim(),
+    person_id: r.querySelector('.rec-person').value || null,
+    category_id: r.querySelector('.rec-cat').value || null,
+    amount: parseFloat(r.querySelector('.rec-amount').value) || 0,
+    frequency: r.querySelector('.rec-freq').value,
+    start_month: 1
+  })).filter(r => r.description || r.amount > 0);
+  const res = await fetch('/api/recurring/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(rows)});
+  const d = await res.json();
+  showToast(d.success ? t('settings.toast_recurring_saved') : t('settings.toast_error', {error: d.error||''}), d.success ? 'success' : 'danger');
+});
+
+// CSV Import
+document.getElementById('csv-import-btn').addEventListener('click', async () => {
+  const file = document.getElementById('csv-import-file').files[0];
+  if (!file) { showToast(t('settings.csv_select_file'), 'warning'); return; }
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('overwrite', document.getElementById('csv-overwrite').checked ? 'true' : 'false');
+  const res = await fetch('/api/import/csv', {method:'POST', body: fd});
+  const d = await res.json();
+  document.getElementById('csv-import-result').innerHTML = d.success
+    ? `<div class="alert alert-success py-2">${t('settings.csv_result_success', {imported: d.imported, months: d.months})}</div>`
+    : `<div class="alert alert-danger py-2">${t('settings.csv_result_error', {error: d.error})}</div>`;
+});
+</script>
+{% endblock %}

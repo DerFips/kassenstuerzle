@@ -1,0 +1,154 @@
+{% extends 'base.html' %}
+{% block title %}{{ t('pdf.title') }} – {{ t('nav.brand') }}{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+  <div class="col-12 d-flex align-items-center gap-2">
+    <a href="{{ url_for('main.settings') }}" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-arrow-left"></i> {{ t('pdf.back_settings') }}
+    </a>
+    <h4 class="mb-0"><i class="bi bi-file-earmark-pdf me-2 text-danger"></i>{{ t('pdf.title') }}</h4>
+  </div>
+  <div class="col-12">
+    <p class="text-muted small mb-0">{{ t('pdf.supported_banks') }}</p>
+  </div>
+
+  <!-- Step 1 -->
+  <div class="col-12 col-md-5">
+    <div class="card shadow-sm">
+      <div class="card-header fw-semibold bg-danger text-white">
+        <i class="bi bi-1-circle me-1"></i>{{ t('pdf.step1_title') }}
+      </div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label">{{ t('pdf.assign_person') }}</label>
+          <select class="form-select" id="pdf-person">
+            <option value="">{{ t('pdf.select_person') }}</option>
+            {% for p in persons %}
+            <option value="{{ p.id }}">{{ p.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">{{ t('pdf.file_label') }}</label>
+          <input type="file" class="form-control" id="pdf-file" accept=".pdf">
+        </div>
+        <button class="btn btn-danger w-100" id="pdf-parse-btn">
+          <i class="bi bi-search me-1"></i>{{ t('pdf.analyze_btn') }}
+        </button>
+        <div id="pdf-parse-status" class="mt-2"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 2 -->
+  <div class="col-12 col-md-7" id="pdf-preview-col" style="display:none">
+    <div class="card shadow-sm">
+      <div class="card-header fw-semibold d-flex flex-wrap justify-content-between align-items-center gap-1">
+        <span><i class="bi bi-2-circle me-1"></i>{{ t('pdf.step2_title') }}</span>
+        <span id="pdf-holder-info" class="badge bg-secondary"></span>
+      </div>
+      <div class="card-body p-0">
+        <div class="table-responsive" style="max-height:400px;overflow-y:auto">
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-light sticky-top">
+              <tr>
+                <th><input type="checkbox" id="pdf-check-all" checked></th>
+                <th>{{ t('pdf.date') }}</th>
+                <th>{{ t('pdf.type') }}</th>
+                <th>{{ t('pdf.recipient_desc') }}</th>
+                <th class="text-end">{{ t('pdf.amount') }}</th>
+                <th>{{ t('pdf.kind') }}</th>
+              </tr>
+            </thead>
+            <tbody id="pdf-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card-footer d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <small class="text-muted" id="pdf-count-info"></small>
+        <button class="btn btn-success" id="pdf-commit-btn">
+          <i class="bi bi-check-circle me-1"></i>{{ t('pdf.commit_btn') }}
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12" id="pdf-result-col" style="display:none">
+    <div id="pdf-result-msg"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_script %}
+<script>
+let parsedTransactions = [];
+
+document.getElementById('pdf-check-all').addEventListener('change', function() {
+  document.querySelectorAll('.pdf-row-check').forEach(cb => cb.checked = this.checked);
+});
+
+document.getElementById('pdf-parse-btn').addEventListener('click', async () => {
+  const file = document.getElementById('pdf-file').files[0];
+  const personId = document.getElementById('pdf-person').value;
+  const statusEl = document.getElementById('pdf-parse-status');
+  if (!file) { showToast(t('pdf.select_file_first'), 'warning'); return; }
+  if (!personId) { showToast(t('pdf.select_person_first'), 'warning'); return; }
+  statusEl.innerHTML = `<div class="alert alert-info py-2"><i class="bi bi-hourglass-split me-1"></i>${t('pdf.analyzing')}</div>`;
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const res = await fetch('/api/import/pdf/parse', {method:'POST', body: fd});
+    const d = await res.json();
+    if (!d.success) {
+      statusEl.innerHTML = `<div class="alert alert-danger py-2"><i class="bi bi-x-circle me-1"></i>${d.error}</div>`;
+      return;
+    }
+    statusEl.innerHTML = `<div class="alert alert-success py-2"><i class="bi bi-check me-1"></i>${t('pdf.transactions_found', {count: d.transactions?.length||0, bank: d.bank||t('pdf.unknown_bank')})}</div>`;
+    parsedTransactions = d.transactions || [];
+    document.getElementById('pdf-holder-info').textContent = d.holder || '';
+    const tbody = document.getElementById('pdf-tbody');
+    tbody.innerHTML = '';
+    parsedTransactions.forEach((txn, i) => {
+      const row = document.createElement('tr');
+      row.className = txn.is_income ? 'table-success' : '';
+      row.innerHTML = `
+        <td><input type="checkbox" class="pdf-row-check" data-idx="${i}" checked></td>
+        <td class="text-nowrap">${txn.date}</td>
+        <td><small class="text-muted">${txn.type||''}</small></td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title="${txn.counterpart||txn.description||''}">${txn.counterpart||txn.description||'–'}</td>
+        <td class="text-end fw-semibold ${txn.is_income?'text-success':'text-danger'}">
+          ${txn.is_income?'+':'-'}${txn.amount.toFixed(2).replace('.',',')} €</td>
+        <td><small>${txn.is_income?`<span class="badge bg-success">${t('pdf.income_badge')}</span>`:`<span class="badge bg-secondary">${t('pdf.expense_badge')}</span>`}</small></td>`;
+      tbody.appendChild(row);
+    });
+    document.getElementById('pdf-count-info').textContent = t('pdf.count_info', {count: parsedTransactions.length});
+    document.getElementById('pdf-preview-col').style.display = '';
+    document.getElementById('pdf-result-col').style.display = 'none';
+  } catch(e) {
+    statusEl.innerHTML = `<div class="alert alert-danger py-2">${t('pdf.network_error', {error: e.message})}</div>`;
+  }
+});
+
+document.getElementById('pdf-commit-btn').addEventListener('click', async () => {
+  const personId = document.getElementById('pdf-person').value;
+  const selected = [...document.querySelectorAll('.pdf-row-check:checked')].map(cb => parseInt(cb.dataset.idx));
+  if (!selected.length) { showToast(t('pdf.no_transactions_selected'), 'warning'); return; }
+  const txns = selected.map(i => ({...parsedTransactions[i], include: true}));
+  const res = await fetch('/api/import/pdf/commit', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({personid: personId, transactions: txns})
+  });
+  const d = await res.json();
+  document.getElementById('pdf-result-col').style.display = '';
+  document.getElementById('pdf-result-msg').innerHTML = d.success
+    ? `<div class="alert alert-success"><i class="bi bi-check-circle me-1"></i><strong>${t('pdf.import_success')}</strong> ${t('pdf.import_result', {expenses: d.importedexpenses, income: d.importedincome})}</div>`
+    : `<div class="alert alert-danger"><i class="bi bi-x-circle me-1"></i>${t('pdf.import_error', {error: d.error})}</div>`;
+  if (d.success) {
+    document.getElementById('pdf-preview-col').style.display = 'none';
+    showToast(t('pdf.imported_toast', {count: d.importedexpenses + d.importedincome}), 'success');
+  }
+});
+</script>
+{% endblock %}

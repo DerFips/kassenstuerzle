@@ -1,0 +1,1301 @@
+{% extends 'base.html' %}
+{% block styles %}
+<style>
+.settlement-header.settlement-settled { background: #f0fff4 !important; }
+.settlement-header.settlement-pending { background: #fff8e1 !important; }
+[data-bs-theme="dark"] .settlement-header.settlement-settled { background: #0d2e1a !important; }
+[data-bs-theme="dark"] .settlement-header.settlement-pending { background: #2e2800 !important; }
+
+.formula-amount { font-family: inherit; }
+.formula-amount.formula-active {
+  border-color: #ffc107 !important;
+  box-shadow: 0 0 0 0.15rem rgba(255,193,7,.35) !important;
+  background-color: rgba(255,193,7,.04) !important;
+}
+@keyframes formulaResolve {
+  0%   { background-color: rgba(25,135,84,.25); border-color: #198754; }
+  100% { background-color: transparent; border-color: inherit; }
+}
+.formula-amount.formula-resolved { animation: formulaResolve 0.8s ease-out forwards; }
+.formula-amount[data-formula] {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Ctext x='1' y='10' font-size='10' fill='%23ffc107' font-family='serif'%3Ef%3C/text%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: left 4px center;
+  padding-left: 18px !important;
+}
+.autosave-badge { pointer-events: none; vertical-align: middle; }
+#expFilterBar, #incFilterBar { background: rgba(var(--bs-secondary-rgb), .04); font-size: .85rem; }
+#expFilterBar select, #incFilterBar select { font-size: .82rem; }
+.btn-receipt { border: 1px solid #dee2e6; color: #adb5bd; background: transparent; transition: color .15s, border-color .15s; line-height: 1; }
+.btn-receipt:hover { color: #6c757d; border-color: #adb5bd; }
+.btn-receipt.has-receipt { color: #fff; background: linear-gradient(135deg, #fd7e14, #e83e8c); border-color: transparent; }
+.btn-receipt.has-receipt:hover { filter: brightness(1.1); }
+.receipt-cell { position: relative; }
+.receipt-preview {
+  position: absolute; bottom: calc(100% + 6px); right: 0; z-index: 1055;
+  width: 220px; background: #fff; border: 1px solid #dee2e6; border-radius: .5rem;
+  box-shadow: 0 8px 24px rgba(0,0,0,.18); padding: .5rem;
+}
+.receipt-preview img { width: 100%; border-radius: .35rem; display: block; max-height: 200px; object-fit: contain; }
+.receipt-preview .receipt-pdf-icon { text-align: center; padding: 1rem 0; color: #dc3545; font-size: 2.5rem; }
+.receipt-preview .receipt-actions { display: flex; gap: .4rem; margin-top: .4rem; }
+.receipt-preview .receipt-actions a, .receipt-preview .receipt-actions button { flex: 1; font-size: .75rem; }
+.paid-for-row { background: rgba(255,193,7,.06); }
+.month-year-toggle {
+  background: none; border: 0; padding: 0; font: inherit; font-weight: inherit;
+  color: inherit; line-height: 1; cursor: pointer;
+}
+.month-year-toggle::after { vertical-align: .1em; }
+.month-year-toggle:hover { color: var(--bs-primary); }
+.month-year-dropdown .dropdown-menu { max-height: 320px; overflow-y: auto; min-width: 8rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<!-- Receipt Modal -->
+<div class="modal fade" id="receiptModal" tabindex="-1">
+  <div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title"><i class="bi bi-camera me-2 text-secondary"></i>{{ t('month.receipt_modal_title') }}</h5>
+      <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+    </div>
+    <div class="modal-body">
+      <p class="text-muted small">{{ t('month.receipt_modal_hint') }}</p>
+      <div class="input-group mb-3">
+        <input type="file" class="form-control" id="receiptFile" accept="image/*" capture="environment">
+      </div>
+      <button class="btn btn-primary w-100" id="receiptScanBtn" onclick="scanReceipt()">
+        <i class="bi bi-magic me-1"></i>{{ t('month.receipt_scan_btn') }}
+      </button>
+      <div id="receiptResult" class="mt-3" style="display:none;">
+        <div id="receiptError" class="alert alert-danger py-2 small mb-0" style="display:none;"></div>
+        <div id="receiptFields" style="display:none;">
+          <hr>
+          <p class="text-muted small mb-2"><i class="bi bi-info-circle me-1"></i>{{ t('month.receipt_review_hint') }}</p>
+          <div class="row g-2 mb-2">
+            <div class="col-4">
+              <label class="form-label small mb-1">{{ t('month.day') }}</label>
+              <input type="number" min="1" max="31" class="form-control form-control-sm" id="receiptDay">
+            </div>
+            <div class="col-8">
+              <label class="form-label small mb-1">{{ t('month.amount_eur') }}</label>
+              <input type="text" inputmode="decimal" class="form-control form-control-sm" id="receiptAmount">
+            </div>
+          </div>
+          <div class="mb-2">
+            <label class="form-label small mb-1">{{ t('month.description') }}</label>
+            <input type="text" class="form-control form-control-sm" id="receiptDesc">
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col-6">
+              <label class="form-label small mb-1">{{ t('month.person') }}</label>
+              <select class="form-select form-select-sm" id="receiptPerson"></select>
+            </div>
+            <div class="col-6">
+              <label class="form-label small mb-1">{{ t('month.category') }}</label>
+              <select class="form-select form-select-sm" id="receiptCat"></select>
+            </div>
+          </div>
+          <button class="btn btn-success w-100" id="receiptApplyBtn" onclick="applyReceiptScan()">
+            <i class="bi bi-check-lg me-1"></i>{{ t('month.receipt_apply_btn') }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div></div>
+</div>
+
+<div class="d-flex align-items-center justify-content-between mb-4">
+  <a href="/month/{{ prev_year }}/{{ prev_month }}" class="btn btn-outline-secondary btn-sm month-nav-btn"><i class="fas fa-chevron-left"></i></a>
+  <h2 class="mb-0 fw-bold d-flex align-items-center justify-content-center flex-wrap gap-2">
+    <div class="dropdown month-year-dropdown">
+      <button type="button" class="month-year-toggle dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" title="{{ t('month.pick_month') }}">{{ month_name }}</button>
+      <ul class="dropdown-menu">
+        {% for mn in month_names %}
+        <li><a class="dropdown-item{% if loop.index == month %} active{% endif %}" href="/month/{{ year }}/{{ loop.index }}">{{ mn }}</a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    <div class="dropdown month-year-dropdown">
+      <button type="button" class="month-year-toggle dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" title="{{ t('month.pick_year') }}">{{ year }}</button>
+      <ul class="dropdown-menu">
+        {% for yy in year_range %}
+        <li><a class="dropdown-item{% if yy == year %} active{% endif %}" href="/month/{{ yy }}/{{ month }}">{{ yy }}</a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% if is_settled %}<span class="badge bg-success fs-6" style="vertical-align:middle"><i class="fas fa-check me-1"></i>{{ t('month.settled_badge') }}</span>{% endif %}
+  </h2>
+  <a href="/month/{{ next_year }}/{{ next_month }}" class="btn btn-outline-secondary btn-sm month-nav-btn"><i class="fas fa-chevron-right"></i></a>
+</div>
+
+<!-- Ausgaben -->
+<div class="card shadow-sm mb-4">
+  <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2 py-3">
+    <h5 class="mb-0"><i class="fas fa-table me-2 text-primary"></i>{{ t('month.expenses') }}</h5>
+    <div class="d-flex flex-wrap gap-2">
+      <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#receiptModal" title="{{ t('month.receipt_scan') }}"><i class="bi bi-camera me-1"></i><span class="d-none d-sm-inline">{{ t('month.receipt_scan') }}</span></button>
+      <button onclick="clearTable('expenseBody', true)" class="btn btn-sm btn-outline-danger" title="{{ t('month.clear_all_rows') }}"><i class="fas fa-xmark"></i></button>
+      <button onclick="insertRecurring()" class="btn btn-sm btn-outline-info" id="recurBtn" title="{{ t('month.recurring') }}"><i class="fas fa-rotate me-1"></i><span class="d-none d-sm-inline">{{ t('month.recurring') }}</span></button>
+      <button onclick="addRow()" class="btn btn-sm btn-outline-success" title="{{ t('month.row') }}"><i class="fas fa-plus me-1"></i><span class="d-none d-sm-inline">{{ t('month.row') }}</span></button>
+      <button onclick="saveExpenses()" class="btn btn-sm btn-primary" id="saveBtn" title="{{ t('month.save') }}"><i class="fas fa-save me-1"></i><span class="d-none d-sm-inline">{{ t('month.save') }}</span></button>
+    </div>
+  </div>
+  <div class="px-3 py-2 border-bottom d-flex flex-wrap align-items-center gap-2" id="expFilterBar">
+    <i class="fas fa-filter text-secondary small"></i>
+    <select id="filterPerson" class="form-select form-select-sm" style="width:auto;min-width:120px" onchange="applyExpenseFilter()"><option value="">{{ t('month.all_persons') }}</option></select>
+    <select id="filterCat" class="form-select form-select-sm" style="width:auto;min-width:140px" onchange="applyExpenseFilter()"><option value="">{{ t('month.all_categories') }}</option></select>
+    <button class="btn btn-sm btn-outline-secondary" onclick="resetExpenseFilter()"><i class="fas fa-xmark"></i></button>
+    <span id="filterInfo" class="text-muted ms-1" style="font-size:.78rem"></span>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover table-sm expense-table mb-0">
+      <thead class="table-dark">
+        <tr>
+          <th style="width:70px">{{ t('month.day') }}</th><th>{{ t('month.description') }}</th>
+          <th style="width:130px">{{ t('month.who') }}</th><th style="width:120px">{{ t('month.for_whom') }}</th>
+          <th style="width:190px">{{ t('month.category') }}</th>
+          <th style="width:120px" class="text-end">{{ t('month.amount_eur') }}</th>
+          <th style="width:60px" class="text-center"><i class="fas fa-money-bill-wave text-success"></i></th>
+          <th style="width:44px" class="text-center"><i class="bi bi-camera text-secondary"></i></th>
+          <th style="width:40px"></th>
+        </tr>
+      </thead>
+      <tbody id="expenseBody"></tbody>
+    </table>
+  </div>
+  <div class="card-footer bg-white d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <small class="text-muted"><span id="rowCount">0</span> {{ t('month.entries') }}</small>
+    <div class="d-flex gap-3">
+      <small class="text-success"><i class="fas fa-money-bill-wave me-1"></i>{{ t('month.cash_short') }}: <span id="cashSum">0,00</span> €</small>
+      <strong class="text-primary">{{ t('month.total') }}: <span id="totalSum">0,00</span> €</strong>
+    </div>
+  </div>
+</div>
+
+<!-- Einnahmen -->
+<div class="card shadow-sm mb-4 border-success">
+  <div class="card-header header-success d-flex flex-wrap justify-content-between align-items-center gap-2 py-3">
+    <h5 class="mb-0"><i class="fas fa-circle-dollar-to-slot me-2 text-success"></i>{{ t('month.income') }}</h5>
+    <div class="d-flex flex-wrap gap-2">
+      <button onclick="clearTable('incomeBody', false)" class="btn btn-sm btn-outline-danger" title="{{ t('month.clear_all_rows') }}"><i class="fas fa-xmark"></i></button>
+      <button onclick="addIncomeRow()" class="btn btn-sm btn-outline-success" title="{{ t('month.row') }}"><i class="fas fa-plus me-1"></i><span class="d-none d-sm-inline">{{ t('month.row') }}</span></button>
+      <button onclick="saveIncome()" class="btn btn-sm btn-success" id="saveIncomeBtn" title="{{ t('month.save') }}"><i class="fas fa-save me-1"></i><span class="d-none d-sm-inline">{{ t('month.save') }}</span></button>
+    </div>
+  </div>
+  <div class="px-3 py-2 border-bottom d-flex flex-wrap align-items-center gap-2" id="incFilterBar">
+    <i class="fas fa-filter text-secondary small"></i>
+    <select id="incFilterPerson" class="form-select form-select-sm" style="width:auto;min-width:120px" onchange="applyIncomeFilter()"><option value="">{{ t('month.all_persons') }}</option></select>
+    <button class="btn btn-sm btn-outline-secondary" onclick="resetIncomeFilter()"><i class="fas fa-xmark"></i></button>
+    <span id="incFilterInfo" class="text-muted ms-1" style="font-size:.78rem"></span>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover table-sm income-table mb-0">
+      <thead class="table-success">
+        <tr><th style="width:70px">{{ t('month.day') }}</th><th>{{ t('month.description') }}</th><th style="width:160px">{{ t('month.from_whom') }}</th><th style="width:160px">{{ t('month.category') }}</th><th style="width:130px" class="text-end">{{ t('month.amount_eur') }}</th><th style="width:40px"></th></tr>
+      </thead>
+      <tbody id="incomeBody"></tbody>
+    </table>
+  </div>
+  <div class="card-footer d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <small class="text-muted"><span id="incomeCount">0</span> {{ t('month.entries') }}</small>
+    <strong class="text-success">{{ t('month.total') }}: <span id="incomeTotalSum">0,00</span> €</strong>
+  </div>
+</div>
+
+<!-- Monatsübersicht -->
+<div class="card shadow-sm mb-4">
+  <div class="card-header bg-white py-3">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+      <h5 class="mb-0"><i class="fas fa-chart-pie me-2 text-warning"></i>{{ t('month.month_overview') }} – {{ month_name }} {{ year }}</h5>
+      <div class="d-flex align-items-center gap-3 flex-wrap">
+        <small class="text-success" id="settledAtInfo" style="{% if not is_settled %}display:none{% endif %}"><i class="fas fa-clock me-1"></i><span id="settledAtText">{{ t('month.settled_at_prefix', date=settled_at) if is_settled else '' }}</span></small>
+        <div class="form-check form-switch mb-0 d-flex align-items-center gap-2">
+          <input class="form-check-input settle-check-input" type="checkbox" role="switch" id="settleCheck" {% if is_settled %}checked{% endif %} onchange="toggleSettle(this.checked)">
+          <label class="form-check-label settle-check-label fw-semibold" for="settleCheck" id="settleLabel" style="{% if is_settled %}color:#198754{% endif %}">
+            <i class="fas {% if is_settled %}fa-check-circle text-success{% else %}fa-circle-dot text-warning{% endif %} me-1" id="settleLabelIcon"></i>{{ t('month.settle_checkbox') }}
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="card-body p-0" id="overviewBody">
+  <div id="overviewTableWrap">
+    {% set ps = ov_p.keys()|sort|list %}
+    {% if ov_p and ps %}
+    <div class="table-responsive">
+    <table class="table table-bordered table-sm overview-table mb-0">
+      <thead class="table-secondary"><tr><th>{{ t('month.category') }}</th>{% for pn in ps %}<th class="text-end">{{ pn }}</th>{% endfor %}<th class="text-end fw-bold">{{ t('month.total') }}</th></tr></thead>
+      <tbody>
+        {% for cn, col in ov_c %}
+          {% set rt = namespace(v=0) %}{% set rh = namespace(v=false) %}
+          {% for pn in ps %}{% if ov_p[pn].get(cn) %}{% set rh.v = true %}{% endif %}{% endfor %}
+          {% if rh.v %}
+          <tr>
+            <td><span class="badge rounded-pill me-1" style="background:{{ col }}">&#8203;</span>{{ cn }}{% if cn in ov_settlements %}<i class="fas fa-scale-balanced ms-1 text-warning" style="font-size:.7em"></i>{% endif %}</td>
+            {% for pn in ps %}{% set cv = ov_p[pn].get(cn,0) %}{% set rt.v = rt.v+cv %}
+              <td class="text-end">{% if cv > 0 %}{{ "%.2f"|format(cv)|replace(".",",") }} €{% elif cv < 0 %}<span class="text-success"><i class="fas fa-arrow-down me-1" style="font-size:.7em"></i>{{ "%.2f"|format(cv*-1)|replace(".",",") }} €</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+            {% endfor %}
+            <td class="text-end fw-bold">{{ "%.2f"|format(rt.v)|replace(".",",") }} €</td>
+          </tr>
+          {% if cn in ov_settlements %}
+          <tr class="{% if is_settled %}settlement-settled-row{% else %}settlement-sub-row{% endif %}">
+            <td>{% if is_settled %}<i class="fas fa-check-circle me-1 text-success"></i><em>{{ t('month.settlement_credited') }}</em>{% else %}<i class="fas fa-scale-balanced me-1 text-warning" style="font-size:.8em"></i><em>{{ t('month.settlement_adjust') }}</em>{% endif %}</td>
+            {% for pn in ps %}{% set sv = ov_settlements[cn].get(pn, 0) %}
+              {% if is_settled %}{% set adj = 0 - sv %}
+                <td class="text-end small fw-semibold {% if adj < -0.005 %}text-success{% elif adj > 0.005 %}text-warning{% else %}text-muted{% endif %}">{% if adj < -0.005 %}<i class="fas fa-minus me-1" style="font-size:.7em"></i>{{ "%.2f"|format(adj)|replace(".",",") }} €{% elif adj > 0.005 %}<i class="fas fa-plus me-1" style="font-size:.7em"></i>+{{ "%.2f"|format(adj)|replace(".",",") }} €{% else %}—{% endif %}</td>
+              {% else %}
+                <td class="text-end small fw-semibold {% if sv > 0.005 %}text-success{% elif sv < -0.005 %}text-warning{% else %}text-muted{% endif %}">{% if sv > 0.005 %}<i class="fas fa-arrow-down me-1" style="font-size:.7em"></i>+{{ "%.2f"|format(sv)|replace(".",",") }} €{% elif sv < -0.005 %}<i class="fas fa-arrow-up me-1" style="font-size:.7em"></i>{{ "%.2f"|format(sv)|replace(".",",") }} €{% else %}—{% endif %}</td>
+              {% endif %}
+            {% endfor %}
+            <td class="text-end text-muted small">{% if is_settled %}✓{% else %}±0{% endif %}</td>
+          </tr>
+          {% endif %}
+          {% endif %}
+        {% endfor %}
+      </tbody>
+      <tfoot class="table-dark fw-bold"><tr><td>{{ t('month.total') }}</td>
+        {% set grand = namespace(v=0) %}
+        {% for pn in ps %}{% set pt = namespace(v=0) %}{% for cv in ov_p[pn].values() %}{% set pt.v = pt.v+cv %}{% endfor %}{% set grand.v = grand.v+pt.v %}<td class="text-end">{{ "%.2f"|format(pt.v)|replace(".",",") }} €</td>{% endfor %}
+        <td class="text-end">{{ "%.2f"|format(grand.v)|replace(".",",") }} €</td>
+      </tr></tfoot>
+    </table></div>
+    {% if ov_settlements and not is_settled %}
+    <div class="px-3 py-2 bg-light border-top text-muted" style="font-size:.8rem">
+      <i class="fas fa-circle-info me-1"></i><span class="text-success fw-semibold">{{ t('month.legend_gets_back') }}</span> {{ t('month.legend_gets_back_desc') }} &nbsp;|&nbsp; <span class="text-warning fw-semibold">{{ t('month.legend_pays') }}</span> {{ t('month.legend_pays_desc') }} &nbsp;|&nbsp; {{ t('month.legend_checkbox_hint') }}
+    </div>
+    {% endif %}
+    {% else %}
+    <p class="text-muted text-center py-4 mb-0"><i class="fas fa-info-circle me-1"></i>{{ t('month.no_data_yet') | safe }}</p>
+    {% endif %}
+  </div>
+    {% if income_total > 0 or expense_total > 0 %}
+    <div class="d-flex flex-wrap justify-content-between align-items-center px-3 py-2 border-top" id="savingsBar">
+      <div class="d-flex flex-wrap gap-4">
+        <span><i class="fas fa-arrow-up text-success me-1"></i>{{ t('month.income') }}: <strong class="text-success" id="savingsBarInc">+{{ "%.2f"|format(income_total)|replace(".",",") }} €</strong></span>
+        <span><i class="fas fa-arrow-down text-danger me-1"></i>{{ t('month.expenses') }}: <strong class="text-danger" id="savingsBarExp">{{ "%.2f"|format(expense_total)|replace(".",",") }} €</strong></span>
+      </div>
+      <div class="fw-bold fs-5">{{ t('month.savings_label') }}: <span id="savingsAmt" class="{% if savings >= 0 %}text-success{% else %}text-danger{% endif %}">{% if savings >= 0 %}+{% endif %}{{ "%.2f"|format(savings)|replace(".",",") }} €</span></div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Geldbeutel -->
+<div class="card shadow-sm mb-4 border-success">
+  <div class="card-header py-3"><h5 class="mb-0"><i class="fas fa-wallet me-2 text-success"></i>{{ t('month.wallet') }} – {{ month_name }} {{ year }}</h5></div>
+  <div class="card-body p-0" id="walletBody">
+    {% if wallet %}
+    <div class="table-responsive"><table class="table table-sm table-hover mb-0">
+      <thead class="table-secondary"><tr><th>{{ t('month.person') }}</th><th class="text-end">{{ t('month.wallet_start') }}</th><th class="text-end text-danger">{{ t('month.wallet_cash_exp') }}</th><th class="text-end">{{ t('month.wallet_end') }}</th></tr></thead>
+      <tbody>{% for w in wallet %}<tr>
+        <td><i class="fas fa-user me-2 text-muted"></i><strong>{{ w.name }}</strong></td>
+        <td class="text-end">{{ "%.2f"|format(w.start_balance)|replace(".",",") }} €</td>
+        <td class="text-end text-danger">{% if w.cash_expenses > 0 %}–{{ "%.2f"|format(w.cash_expenses)|replace(".",",") }} €{% else %}<span class="text-muted">—</span>{% endif %}</td>
+        <td class="text-end fw-bold {% if w.end_balance >= 0 %}text-success{% else %}text-danger{% endif %}">{{ "%.2f"|format(w.end_balance)|replace(".",",") }} €</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    <div class="px-3 py-2 text-muted small border-top bg-light rounded-bottom"><i class="fas fa-info-circle me-1"></i>{{ t('month.wallet_hint') }}</div>
+    {% else %}
+    <p class="text-muted text-center py-4 mb-0"><i class="fas fa-info-circle me-1"></i>{{ t('month.wallet_empty') | safe }}</p>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Ersparnis pro Person -->
+<div class="card shadow-sm mb-4" id="savingsPerPersonCard">
+  <div class="card-header py-3"><h5 class="mb-0"><i class="fas fa-piggy-bank me-2 text-info"></i>{{ t('month.savings_per_person') }} – {{ month_name }} {{ year }}</h5></div>
+  <div class="card-body p-0" id="savingsPerPersonBody">
+    {% if savings_pp %}
+    <div class="table-responsive"><table class="table table-sm table-hover mb-0">
+      <thead class="table-secondary"><tr><th>{{ t('month.person') }}</th><th class="text-end text-success">{{ t('month.income') }}</th><th class="text-end text-danger">{{ t('month.expenses') }}</th><th class="text-end">{{ t('month.savings_label') }}</th></tr></thead>
+      <tbody>{% for row in savings_pp %}<tr>
+        <td class="fw-semibold">{{ row.name }}</td>
+        <td class="text-end text-success">+{{ "%.2f"|format(row.income)|replace(".",",") }} €</td>
+        <td class="text-end text-danger">{{ "%.2f"|format(row.expenses)|replace(".",",") }} €</td>
+        <td class="text-end fw-bold {% if row.savings >= 0 %}text-success{% else %}text-danger{% endif %}">{% if row.savings >= 0 %}+{% endif %}{{ "%.2f"|format(row.savings)|replace(".",",") }} €</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}
+    <div class="text-center text-muted py-4" id="savingsEmptyMsg"><i class="fas fa-piggy-bank fa-2x mb-2 d-block"></i>{{ t('month.savings_empty') }}</div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Abrechnung -->
+<div class="card shadow-sm {% if is_settled %}border-success{% else %}border-warning{% endif %}" id="settlementCard">
+  <div class="card-header py-3 settlement-header {% if is_settled %}settlement-settled{% else %}settlement-pending{% endif %}" id="settlementHeader">
+    <h5 class="mb-0"><i class="fas {% if is_settled %}fa-check-circle text-success{% else %}fa-scale-balanced text-warning{% endif %} me-2" id="settlementHeaderIcon"></i>{{ t('month.settlement') }} – <span id="settlementHeaderTitle">{% if is_settled %}{{ t('month.settlement_settled_title') }}{% else %}{{ t('month.settlement_open_title') }}{% endif %}</span></h5>
+  </div>
+  <div class="card-body p-0" id="settlementBody">
+    {% set s = settlement %}
+    {% if s is none %}<p class="text-muted text-center py-4 mb-0"><i class="fas fa-info-circle me-1"></i>{{ t('month.settlement_no_split') | safe }}</p>
+    {% elif s.is_settled %}
+      <div class="text-center py-4 px-3"><div class="text-success mb-2" style="font-size:2.5rem"><i class="fas fa-circle-check"></i></div><div class="fw-bold text-success fs-5 mb-1">{{ t('month.settlement_all_settled') }}</div><div class="text-muted small">{{ t('month.settled_at_prefix', date=settled_at) }}</div><div class="mt-3 text-muted small"><i class="fas fa-undo me-1"></i>{{ t('month.settlement_reopen_hint') }}</div></div>
+    {% elif not s.cat_details %}<p class="text-success text-center py-4 mb-0"><i class="fas fa-check-circle me-1"></i>{{ t('month.settlement_no_split_expenses') }}</p>
+    {% elif not s.transactions %}<p class="text-success text-center py-4 mb-0"><i class="fas fa-check-circle me-1"></i>{{ t('month.settlement_all_balanced') }}</p>
+    {% else %}
+      <div class="p-3 d-flex flex-wrap gap-2">
+        {% for txn in s.transactions %}
+        <div class="d-flex align-items-center gap-2 bg-warning bg-opacity-10 border border-warning rounded px-3 py-2 flex-grow-1">
+          <i class="fas fa-arrow-right text-warning"></i>
+          <span>{{ t('month.settlement_owes', payer='<strong>' + txn['from'] + '</strong>', payee='<strong>' + txn.to + '</strong>') | safe }}</span>
+          <span class="ms-auto fw-bold text-warning fs-5">{{ "%.2f"|format(txn.amount)|replace(".",",") }} €</span>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="px-3 pb-3 text-muted small"><i class="fas fa-circle-info me-1"></i>{{ t('month.settlement_details_hint') }}</div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+/* ══════════════════════════════════════════════════════════════
+   KASSENSTÜRZLE – month.html JavaScript
+   Alle Funktionen in EINEM einzigen <script>-Block.
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Jinja-Daten ──────────────────────────────────────────── */
+const YEAR  = {{ year }};
+const MONTH = {{ month }};
+const PERSONS  = {{ persons | tojson }};
+const CATS     = {{ categories | tojson }};
+const EXISTING = {{ expenses | tojson }};
+let isSettled            = {{ 'true' if is_settled else 'false' }};
+let currentSettlement    = {{ settlement | tojson }};
+let currentOvSettlements = {{ ov_settlements | tojson }};
+const INCOME_INIT = {{ income | tojson }};
+let incTotal  = {{ income_total | default(0) }};
+let expTotal  = {{ expense_total | default(0) }};
+let savingsVal= {{ savings | default(0) }};
+
+/* ── Hilfsfunktionen ──────────────────────────────────────── */
+const fmt = (v) => Number(v || 0).toFixed(2).replace('.', ',');
+
+let _suppressAutoSave = false;
+let _saveExpInFlight  = false;
+let _saveIncInFlight  = false;
+let _asExpTimer = null;
+let _asIncTimer = null;
+
+/* ── FORMEL-LOGIK ─────────────────────────────────────────── */
+
+/**
+ * Wertet einen Formelausdruck aus (nach dem führenden '=').
+ * Erlaubt: Ziffern, Punkt, Komma, +  -  *  /  (  )
+ * Komma wird als Dezimaltrennzeichen behandelt.
+ * Gibt NaN zurück wenn die Formel ungültig ist.
+ */
+function normalizeFormula(expr) {
+  let s = String(expr).trim();
+  // Alle Leerzeichen-Varianten und unsichtbare Steuerzeichen entfernen
+  s = s.replace(/[\s\u00A0\u200B-\u200F\u202A-\u202F\u2060\uFEFF]/g, '');
+  // Dezimal-Komma -> Punkt
+  s = s.replace(/,/g, '.');
+  // Mal-Zeichen-Varianten -> '*'
+  s = s.replace(/[×✕✖∗·]/g, '*');
+  // Geteilt-Zeichen-Varianten -> '/'
+  s = s.replace(/[÷∕:]/g, '/');
+  // Alles Unbekannte (z.B. exotische Bindestriche) -> Minus
+  s = s.replace(/[^0-9.()+*/-]/g, '-');
+  return s;
+}
+
+/**
+ * Sicherer Formel-Parser ohne eval()/new Function() - CSP-konform (kein unsafe-eval nötig).
+ * Unterstützt +, -, *, /, Klammern und Dezimalzahlen (rekursiver Abstiegsparser).
+ */
+function parseAndEvalSafe(str) {
+  let pos = 0;
+
+  function peek() { return str[pos]; }
+  function error(msg) {
+    const posInfo = t('month.formula_position', {pos, before: str.slice(0, pos), char: str[pos] ?? t('month.formula_end'), after: str.slice(pos + 1)});
+    throw new Error(msg + ` (${posInfo})`);
+  }
+
+  function parseNumber() {
+    const start = pos;
+    if (peek() === '-') pos++;
+    let hasDigits = false;
+    while (pos < str.length && /[0-9]/.test(peek())) { pos++; hasDigits = true; }
+    if (peek() === '.') {
+      pos++;
+      while (pos < str.length && /[0-9]/.test(peek())) { pos++; hasDigits = true; }
+    }
+    if (!hasDigits) error(t('month.formula_number_expected'));
+    return parseFloat(str.slice(start, pos));
+  }
+
+  function parseFactor() {
+    if (peek() === '(') {
+      pos++;
+      const val = parseExpression();
+      if (peek() !== ')') error(t('month.formula_closing_paren'));
+      pos++;
+      return val;
+    }
+    if (peek() === '-') {
+      pos++;
+      return -parseFactor();
+    }
+    if (peek() === '+') {
+      pos++;
+      return parseFactor();
+    }
+    return parseNumber();
+  }
+
+  function parseTerm() {
+    let val = parseFactor();
+    while (pos < str.length && (peek() === '*' || peek() === '/')) {
+      const op = peek();
+      pos++;
+      const rhs = parseFactor();
+      if (op === '*') val *= rhs;
+      else {
+        if (rhs === 0) error(t('month.formula_div_by_zero'));
+        val /= rhs;
+      }
+    }
+    return val;
+  }
+
+  function parseExpression() {
+    let val = parseTerm();
+    while (pos < str.length && (peek() === '+' || peek() === '-')) {
+      const op = peek();
+      pos++;
+      const rhs = parseTerm();
+      val = op === '+' ? val + rhs : val - rhs;
+    }
+    return val;
+  }
+
+  const result = parseExpression();
+  if (pos < str.length) error(t('month.formula_unexpected_char', {char: str[pos]}));
+  return result;
+}
+
+function analyzeFormula(expr) {
+  if (expr === null || expr === undefined || String(expr).trim() === '') {
+    return { value: NaN, reason: t('month.formula_empty') };
+  }
+  const normalized = normalizeFormula(expr);
+  if (!normalized) return { value: NaN, reason: t('month.formula_empty_after_clean') };
+
+  try {
+    const result = parseAndEvalSafe(normalized);
+    if (typeof result !== 'number' || !isFinite(result)) {
+      return { value: NaN, reason: t('month.formula_not_a_number', {input: expr, normalized}) };
+    }
+    return { value: Math.round(result * 10000) / 10000, reason: null };
+  } catch (e) {
+    return { value: NaN, reason: t('month.formula_syntax_error', {input: expr, normalized, message: e.message}) };
+  }
+}
+
+function evalFormula(expr) {
+  return analyzeFormula(expr).value;
+}
+
+/**
+ * Liest den numerischen Wert eines Betrags-Inputs.
+ * Unterstützt:  "12,34"  |  "12.34"  |  "=12+3,5"  |  gespeicherte data-formula
+ */
+function parseAmtVal(input) {
+  if (!input) return NaN;
+  const raw = String(input.value ?? '').trim();
+  // Formel im Eingabefeld (noch nicht aufgelöst)
+  if (raw.startsWith('=')) return evalFormula(raw.slice(1));
+  // Gespeicherte Formel (Feld zeigt bereits berechneten Wert)
+  if (input.dataset && input.dataset.formula) {
+    const cached = evalFormula(String(input.dataset.formula).replace(/^=/, ''));
+    if (!isNaN(cached)) return cached;
+  }
+  if (!raw) return NaN;
+  // Komma vorhanden -> deutsches Format (Punkt = Tausendertrennzeichen)
+  // sonst -> Punkt ist Dezimaltrennzeichen, nur bei mehreren Punkten als Tausender werten
+  let cleaned = raw;
+  if (raw.includes(',')) {
+    cleaned = raw.replace(/\./g, '').replace(',', '.');
+  } else {
+    const dotCount = (raw.match(/\./g) || []).length;
+    if (dotCount > 1) cleaned = raw.replace(/\./g, '');
+  }
+  const num = Number(cleaned);
+  return isFinite(num) ? num : NaN;
+}
+
+/**
+ * Formatiert einen Rohtext-Betrag als "12,34".
+ * Gibt '' zurück wenn die Eingabe keine gültige Zahl ergibt.
+ */
+function toAmtStr(raw) {
+  if (!raw && raw !== 0) return '';
+  const txt = String(raw).trim();
+  if (!txt) return '';
+  let cleaned = txt;
+  if (txt.includes(',')) {
+    cleaned = txt.replace(/\./g, '').replace(',', '.');
+  } else {
+    const dotCount = (txt.match(/\./g) || []).length;
+    if (dotCount > 1) cleaned = txt.replace(/\./g, '');
+  }
+  const num = Number(cleaned);
+  return isFinite(num) ? num.toFixed(2).replace('.', ',') : '';
+}
+
+/** Wenn das Feld den Fokus bekommt: gespeicherte Formel wieder anzeigen. */
+function formulaFocus(input) {
+  if (input.classList.contains('is-invalid') && input.dataset.errorReason) {
+    showToast(input.dataset.errorReason, 'danger');
+  }
+  if (input.dataset.formula) input.value = input.dataset.formula;
+  input.classList.add('formula-active');
+  clearInputError(input);
+  setTimeout(() => input.select(), 0);
+}
+
+/**
+ * Wenn das Feld den Fokus verliert:
+ * - Formel auswerten und Ergebnis anzeigen
+ * - Normale Zahl normalisieren
+ */
+function setInputError(input, reason) {
+  input.classList.add('is-invalid');
+  input.dataset.errorReason = reason;
+  input.title = reason;
+}
+function clearInputError(input) {
+  input.classList.remove('is-invalid');
+  delete input.dataset.errorReason;
+  input.removeAttribute('title');
+}
+
+function formulaBlur(input) {
+  input.classList.remove('formula-active');
+  const raw = String(input.value ?? '').trim();
+
+  if (!raw) {
+    delete input.dataset.formula;
+    clearInputError(input);
+    return;
+  }
+
+  if (raw.startsWith('=')) {
+    const { value: result, reason } = analyzeFormula(raw.slice(1));
+    if (isNaN(result)) {
+      setInputError(input, reason || t('month.formula_could_not_calc'));
+      showToast(reason || t('month.formula_could_not_calc'), 'danger');
+      return;
+    }
+    input.dataset.formula = raw;
+    input.value = fmt(result);
+    clearInputError(input);
+    input.classList.add('formula-resolved');
+    setTimeout(() => input.classList.remove('formula-resolved'), 800);
+    return;
+  }
+
+  const formatted = toAmtStr(raw);
+  if (formatted === '') {
+    const reason = t('month.amount_invalid');
+    setInputError(input, reason);
+    showToast(reason, 'danger');
+    return;
+  }
+  delete input.dataset.formula;
+  clearInputError(input);
+  input.value = formatted;
+}
+
+/** Zeigt bei erneutem Antippen/Fokussieren eines fehlerhaften Feldes die Fehlermeldung erneut an (wichtig für Touch-Geräte ohne Hover). */
+function formulaShowErrorIfAny(input) {
+  if (input.classList.contains('is-invalid') && input.dataset.errorReason) {
+    showToast(input.dataset.errorReason, 'danger');
+  }
+}
+
+/* ── SELECT-OPTIONEN ──────────────────────────────────────── */
+function buildPersonOpts(sel) {
+  let s = '<option value="">—</option>';
+  PERSONS.forEach(x => { s += `<option value="${x.id}"${String(x.id) === String(sel) ? ' selected' : ''}>${x.name}</option>`; });
+  return s;
+}
+function buildCatOpts(sel) {
+  let s = '<option value="">—</option>';
+  CATS.forEach(x => { s += `<option value="${x.id}"${String(x.id) === String(sel) ? ' selected' : ''}>${x.name}${x.is_split ? ' ⚖️' : ''}</option>`; });
+  return s;
+}
+
+/* ── ZEILEN HINZUFÜGEN ────────────────────────────────────── */
+function addRow(day='', desc='', pid='', cid='', amt='', isCash=false, pfpid='', receiptFn='', focusRow=true) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input type="number" class="form-control form-control-sm text-center" name="day" value="${day ?? ''}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
+    <td><input type="text" class="form-control form-control-sm" name="description" value="${(desc ?? '').replace(/"/g,'&quot;')}" placeholder="${t('month.description_placeholder')}"></td>
+    <td><select class="form-select form-select-sm" name="person_id" onchange="scheduleAutoSaveExpense()">${buildPersonOpts(pid)}</select></td>
+    <td><select class="form-select form-select-sm" name="paid_for_person_id" onchange="updatePaidForStyle(this); scheduleAutoSaveExpense()">${buildPersonOpts(pfpid)}</select></td>
+    <td><select class="form-select form-select-sm cat-select" name="category_id" onchange="updateRowColor(this); scheduleAutoSaveExpense()">${buildCatOpts(cid)}</select></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="" placeholder="${t('month.amount_placeholder')}"
+         onfocus="formulaFocus(this)" onblur="formulaBlur(this); updateFooter()" oninput="updateFooter()" onkeydown="handleAmountTab(event, this)"></td>
+    <td class="text-center align-middle"><div class="form-check d-flex justify-content-center mb-0"><input class="form-check-input cash-check" type="checkbox" name="is_cash" ${isCash ? 'checked' : ''} onchange="updateFooter(); scheduleAutoSaveExpense()"></div></td>
+    <td class="receipt-cell">
+      <button type="button" class="btn btn-sm btn-receipt px-2" title="${t('month.receipt_add')}" onclick="receiptClick(this)"><i class="bi bi-camera"></i></button>
+      <input type="hidden" name="receipt_filename" value="">
+      <div class="receipt-preview" style="display:none"></div>
+    </td>
+    <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('tr').remove(); updateFooter()"><i class="fas fa-times"></i></button></td>`;
+  document.getElementById('expenseBody').appendChild(tr);
+
+  // Betrag korrekt setzen (Formel oder Zahl)
+  const amtInput = tr.querySelector('[name=amount]');
+  const amtStr = String(amt ?? '').trim();
+  if (amtStr.startsWith('=')) {
+    amtInput.dataset.formula = amtStr;
+    const v = evalFormula(amtStr.slice(1));
+    amtInput.value = isNaN(v) ? amtStr : fmt(v);
+  } else if (amtStr !== '') {
+    const f = toAmtStr(amtStr);
+    amtInput.value = f !== '' ? f : amtStr;
+  }
+
+  updateRowColor(tr.querySelector('.cat-select'));
+  updatePaidForStyle(tr.querySelector('[name=paid_for_person_id]'));
+  if (receiptFn) setReceiptOnRow(tr, receiptFn);
+  updateFooter();
+  if (focusRow) tr.querySelector('[name=day]').focus();
+  reapplyFilters();
+}
+
+function addIncomeRow(day='', desc='', pid='', cid='', amt='', focusRow=true) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input type="number" class="form-control form-control-sm text-center" name="inc_day" value="${day ?? ''}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
+    <td><input type="text" class="form-control form-control-sm" name="inc_desc" value="${(desc ?? '').replace(/"/g,'&quot;')}" placeholder="${t('month.income_desc_placeholder')}"></td>
+    <td><select class="form-select form-select-sm" name="inc_pid" onchange="scheduleAutoSaveIncome()">${buildPersonOpts(pid)}</select></td>
+    <td><select class="form-select form-select-sm" name="inc_cid" onchange="scheduleAutoSaveIncome()">${buildCatOpts(cid)}</select></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="" placeholder="${t('month.amount_placeholder')}"
+         onfocus="formulaFocus(this)" onblur="formulaBlur(this); updateFooter()" oninput="updateIncomeFooter()" onkeydown="handleAmountTab(event, this)"></td>
+    <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('tr').remove(); updateIncomeFooter()"><i class="fas fa-times"></i></button></td>`;
+  document.getElementById('incomeBody').appendChild(tr);
+
+  const amtInput = tr.querySelector('[name=amount]');
+  const amtStr = String(amt ?? '').trim();
+  if (amtStr.startsWith('=')) {
+    amtInput.dataset.formula = amtStr;
+    const v = evalFormula(amtStr.slice(1));
+    amtInput.value = isNaN(v) ? amtStr : fmt(v);
+  } else if (amtStr !== '') {
+    const f = toAmtStr(amtStr);
+    amtInput.value = f !== '' ? f : amtStr;
+  }
+
+  updateIncomeFooter();
+  if (focusRow) tr.querySelector('[name=inc_day]').focus();
+  reapplyFilters();
+}
+
+/* ── ZEILEN-STYLING ───────────────────────────────────────── */
+function updatePaidForStyle(sel) {
+  const tr = sel?.closest('tr');
+  if (tr) tr.classList.toggle('paid-for-row', !!sel.value);
+}
+function updateRowColor(sel) {
+  const tr = sel?.closest('tr');
+  if (!tr) return;
+  const cat = CATS.find(c => String(c.id) === String(sel.value));
+  tr.style.borderLeft = cat ? `4px solid ${cat.color}` : '4px solid transparent';
+}
+
+/* ── FOOTER-SUMMEN ────────────────────────────────────────── */
+function updateFooter() {
+  const rows = document.querySelectorAll('#expenseBody tr');
+  let total = 0, cash = 0;
+  rows.forEach(r => {
+    if (r.style.display === 'none') return;
+    const v = parseAmtVal(r.querySelector('[name=amount]'));
+    if (!isNaN(v)) { total += v; if (r.querySelector('.cash-check')?.checked) cash += v; }
+  });
+  document.getElementById('rowCount').textContent = rows.length;
+  document.getElementById('totalSum').textContent = fmt(total);
+  document.getElementById('cashSum').textContent = fmt(cash);
+}
+function updateIncomeFooter() {
+  const rows = document.querySelectorAll('#incomeBody tr');
+  let total = 0;
+  rows.forEach(r => { if (r.style.display === 'none') return; const v = parseAmtVal(r.querySelector('[name=amount]')); if (!isNaN(v)) total += v; });
+  document.getElementById('incomeCount').textContent = rows.length;
+  document.getElementById('incomeTotalSum').textContent = fmt(total);
+}
+
+/* ── DATEN EINSAMMELN ─────────────────────────────────────── */
+function collectRows() {
+  return Array.from(document.querySelectorAll('#expenseBody tr')).map(r => ({
+    day: r.querySelector('[name=day]').value,
+    description: r.querySelector('[name=description]').value,
+    person_id: r.querySelector('[name=person_id]').value,
+    paid_for_person_id: r.querySelector('[name=paid_for_person_id]').value || '',
+    category_id: r.querySelector('[name=category_id]').value,
+    amount: parseAmtVal(r.querySelector('[name=amount]')),
+    is_cash: r.querySelector('.cash-check')?.checked || false,
+    receipt_filename: r.querySelector('[name=receipt_filename]')?.value || ''
+  }));
+}
+function getIncomeRows() {
+  return Array.from(document.querySelectorAll('#incomeBody tr')).map(r => ({
+    day: r.querySelector('[name=inc_day]').value,
+    description: r.querySelector('[name=inc_desc]').value,
+    person_id: r.querySelector('[name=inc_pid]').value,
+    category_id: r.querySelector('[name=inc_cid]').value,
+    amount: parseAmtVal(r.querySelector('[name=amount]'))
+  }));
+}
+
+/* ── TABELLE SORTIEREN ────────────────────────────────────── */
+function sortTable() {
+  const tbody = document.getElementById('expenseBody');
+  const data = Array.from(tbody.querySelectorAll('tr')).map(tr => ({
+    day: parseInt(tr.querySelector('[name=day]').value) || 0,
+    description: tr.querySelector('[name=description]').value,
+    person_id: tr.querySelector('[name=person_id]').value,
+    paid_for_person_id: tr.querySelector('[name=paid_for_person_id]').value || '',
+    category_id: tr.querySelector('[name=category_id]').value,
+    amount: tr.querySelector('[name=amount]').dataset.formula || tr.querySelector('[name=amount]').value,
+    is_cash: tr.querySelector('.cash-check')?.checked || false,
+    receipt_filename: tr.querySelector('[name=receipt_filename]')?.value || ''
+  }));
+  data.sort((a, b) => a.day !== b.day ? a.day - b.day : a.description.localeCompare(b.description, 'de', {sensitivity: 'base'}));
+  tbody.innerHTML = '';
+  data.forEach(r => addRow(r.day || '', r.description, r.person_id, r.category_id, r.amount, r.is_cash, r.paid_for_person_id, r.receipt_filename, false));
+}
+
+/* ── TABELLE LEEREN ───────────────────────────────────────── */
+function clearTable(bodyId, isExpense) {
+  document.getElementById(bodyId).innerHTML = '';
+  if (isExpense) updateFooter(); else updateIncomeFooter();
+}
+
+/* ── SPEICHERN ────────────────────────────────────────────── */
+function getCsrfToken() {
+  return document.querySelector('meta[name="csrf-token"]')?.content || '';
+}
+
+async function saveExpenses(silent=false) {
+  if (_saveExpInFlight) return;
+  _saveExpInFlight = true;
+  const btn = document.getElementById('saveBtn');
+  btn.disabled = true;
+  btn.innerHTML = silent ? `<i class="fas fa-spinner fa-spin me-1"></i><small>${t('month.auto_saving')}</small>` : `<i class="fas fa-spinner fa-spin me-1"></i>${t('month.saving')}`;
+  try {
+    const res = await fetch('/api/expenses/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+      body: JSON.stringify({ year: YEAR, month: MONTH, expenses: collectRows() })
+    });
+    const data = await res.json();
+    if (data.success) {
+      _suppressAutoSave = true;
+      try {
+        if (!silent) sortTable();
+        currentOvSettlements = data.ov_settlements || {};
+        currentSettlement = data.settlement || null;
+        renderOverview(data.ov_p || {}, data.ov_c || [], currentOvSettlements, isSettled);
+        renderWallet(data.wallet || []);
+        renderSettlement(currentSettlement);
+        renderSavings(data.savings_pp || []);
+      } finally { setTimeout(() => { _suppressAutoSave = false; }, 150); }
+      if (!silent) showToast(t('month.toast_expenses_saved'), 'success'); else showAutoSavedBadge('saveBtn');
+    } else { showToast(t('month.toast_save_error'), 'danger'); }
+  } catch (e) { showToast(t('month.toast_error', {message: e.message}), 'danger'); }
+  finally { _saveExpInFlight = false; btn.disabled = false; btn.innerHTML = `<i class="fas fa-save me-1"></i>${t('month.save')}`; }
+}
+
+async function saveIncome(silent=false) {
+  if (_saveIncInFlight) return;
+  _saveIncInFlight = true;
+  const btn = document.getElementById('saveIncomeBtn');
+  btn.disabled = true;
+  btn.innerHTML = silent ? `<i class="fas fa-spinner fa-spin me-1"></i><small>${t('month.auto_saving')}</small>` : `<i class="fas fa-spinner fa-spin me-1"></i>${t('month.saving')}`;
+  try {
+    const res = await fetch('/api/income/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+      body: JSON.stringify({ year: YEAR, month: MONTH, income: getIncomeRows() })
+    });
+    const data = await res.json();
+    if (data.success) {
+      _suppressAutoSave = true;
+      try {
+        incTotal = data.income_total ?? incTotal;
+        expTotal = data.expense_total ?? expTotal;
+        savingsVal = data.savings ?? savingsVal;
+        updateSavingsBar(incTotal, expTotal, savingsVal);
+        renderSavings(data.savings_pp || []);
+      } finally { setTimeout(() => { _suppressAutoSave = false; }, 150); }
+      if (!silent) showToast(t('month.toast_income_saved'), 'success'); else showAutoSavedBadge('saveIncomeBtn');
+    }
+  } catch (e) { showToast(t('month.toast_error', {message: e.message}), 'danger'); }
+  finally { _saveIncInFlight = false; btn.disabled = false; btn.innerHTML = `<i class="fas fa-save me-1"></i>${t('month.save')}`; }
+}
+
+/** Spiegelt den is_settled-Status auf allen dazugehörigen UI-Elementen,
+ * die sonst nur beim initialen Jinja-Render korrekt gesetzt werden. */
+function updateSettleUI(settled, settledAt) {
+  const label = document.getElementById('settleLabel');
+  const icon  = document.getElementById('settleLabelIcon');
+  if (label) label.style.color = settled ? '#198754' : '';
+  if (icon)  icon.className = `fas ${settled ? 'fa-check-circle text-success' : 'fa-circle-dot text-warning'} me-1`;
+
+  const info = document.getElementById('settledAtInfo');
+  const infoText = document.getElementById('settledAtText');
+  if (info) info.style.display = settled ? '' : 'none';
+  if (infoText) infoText.textContent = settled ? t('month.settled_at_prefix', {date: settledAt || ''}) : '';
+
+  const card = document.getElementById('settlementCard');
+  const header = document.getElementById('settlementHeader');
+  const headerIcon = document.getElementById('settlementHeaderIcon');
+  const headerTitle = document.getElementById('settlementHeaderTitle');
+  if (card) { card.classList.toggle('border-success', settled); card.classList.toggle('border-warning', !settled); }
+  if (header) { header.classList.toggle('settlement-settled', settled); header.classList.toggle('settlement-pending', !settled); }
+  if (headerIcon) headerIcon.className = `fas ${settled ? 'fa-check-circle text-success' : 'fa-scale-balanced text-warning'} me-2`;
+  if (headerTitle) headerTitle.textContent = settled ? t('month.settlement_settled_title') : t('month.settlement_open_title');
+}
+
+async function toggleSettle(checked) {
+  const cb = document.getElementById('settleCheck');
+  cb.disabled = true;
+  try {
+    const res = await fetch('/api/month/settle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
+      body: JSON.stringify({ year: YEAR, month: MONTH, settled: checked })
+    });
+    const data = await res.json();
+    if (data.success) {
+      isSettled = data.settled;
+      currentOvSettlements = data.ov_settlements || {};
+      currentSettlement = data.settlement || null;
+      renderOverview(data.ov_p || {}, data.ov_c || [], currentOvSettlements, isSettled);
+      renderSettlement(currentSettlement);
+      renderWallet(data.wallet || []);
+      renderSavings(data.savings_pp || []);
+      updateSettleUI(isSettled, data.settled_at);
+      showToast(data.settled ? t('month.toast_settled') : t('month.toast_reopened'), data.settled ? 'success' : 'warning');
+    }
+  } catch (e) { showToast(t('month.toast_error', {message: e.message}), 'danger'); }
+  cb.disabled = false;
+}
+
+async function insertRecurring() {
+  const btn = document.getElementById('recurBtn');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/recurring/for-month/${YEAR}/${MONTH}`);
+    const data = await res.json();
+    if (data.recurring && data.recurring.length) {
+      data.recurring.forEach(r => addRow(r.day || '', r.description || '', r.person_id || '', r.category_id || '', r.amount || '', !!r.is_cash, r.paid_for_person_id || '', r.receipt_filename || '', false));
+      showToast(t('month.toast_recurring_inserted', {count: data.recurring.length}), 'success');
+    } else { showToast(t('month.toast_recurring_none'), 'warning'); }
+  } catch (e) { showToast(t('month.toast_error', {message: e.message}), 'danger'); }
+  btn.disabled = false;
+}
+
+/* ── FILTER ───────────────────────────────────────────────── */
+function applyExpenseFilter() {
+  const pv = document.getElementById('filterPerson').value;
+  const cv = document.getElementById('filterCat').value;
+  let visible = 0, total = 0;
+  document.querySelectorAll('#expenseBody tr').forEach(tr => {
+    total++;
+    const pid = tr.querySelector('[name=person_id]')?.value || '';
+    const cid = tr.querySelector('[name=category_id]')?.value || '';
+    const show = (!pv || pid === pv) && (!cv || cid === cv);
+    tr.style.display = show ? '' : 'none';
+    if (show) visible++;
+  });
+  const info = document.getElementById('filterInfo');
+  if (pv || cv) info.textContent = t('month.filter_of', {visible, total});
+  else info.textContent = '';
+  updateFooter();
+}
+function resetExpenseFilter() {
+  document.getElementById('filterPerson').value = '';
+  document.getElementById('filterCat').value = '';
+  applyExpenseFilter();
+}
+function applyIncomeFilter() {
+  const pv = document.getElementById('incFilterPerson').value;
+  let visible = 0, total = 0;
+  document.querySelectorAll('#incomeBody tr').forEach(tr => {
+    total++;
+    const pid = tr.querySelector('[name=inc_pid]')?.value || '';
+    const show = !pv || pid === pv;
+    tr.style.display = show ? '' : 'none';
+    if (show) visible++;
+  });
+  const info = document.getElementById('incFilterInfo');
+  if (pv) info.textContent = t('month.filter_of', {visible, total});
+  else info.textContent = '';
+  updateIncomeFooter();
+}
+function resetIncomeFilter() { document.getElementById('incFilterPerson').value = ''; applyIncomeFilter(); }
+function reapplyFilters() { applyExpenseFilter(); applyIncomeFilter(); }
+
+/* ── FILTER-SELECTS BEFÜLLEN ──────────────────────────────── */
+function populateFilterSelects() {
+  const fp = document.getElementById('filterPerson');
+  const fc = document.getElementById('filterCat');
+  const ip = document.getElementById('incFilterPerson');
+  PERSONS.forEach(p => {
+    [fp, ip].forEach(sel => { const o = new Option(p.name, p.id); sel.appendChild(o); });
+  });
+  CATS.forEach(c => { fc.appendChild(new Option(c.name, c.id)); });
+}
+
+/* ── SAVINGS BAR ──────────────────────────────────────────── */
+function updateSavingsBar(inc, exp, sav) {
+  const incEl = document.getElementById('savingsBarInc');
+  const expEl = document.getElementById('savingsBarExp');
+  const savEl = document.getElementById('savingsAmt');
+  if (incEl) incEl.textContent = '+' + fmt(inc) + ' €';
+  if (expEl) expEl.textContent = fmt(exp) + ' €';
+  if (savEl) { savEl.textContent = (sav >= 0 ? '+' : '') + fmt(sav) + ' €'; savEl.className = sav >= 0 ? 'text-success' : 'text-danger'; }
+}
+
+/* ── RENDER-FUNKTIONEN ────────────────────────────────────── */
+function renderSavings(spp) {
+  const body = document.getElementById('savingsPerPersonBody');
+  if (!body) return;
+  if (!spp || !spp.length) { body.innerHTML = `<div class="text-center text-muted py-4"><i class="fas fa-piggy-bank fa-2x mb-2 d-block"></i>${t('month.no_data_short')}</div>`; return; }
+  const rows = spp.map(r => `<tr><td class="fw-semibold">${r.name}</td><td class="text-end text-success">+${fmt(r.income)} €</td><td class="text-end text-danger">${fmt(r.expenses)} €</td><td class="text-end fw-bold ${r.savings >= 0 ? 'text-success' : 'text-danger'}">${r.savings >= 0 ? '+' : ''}${fmt(r.savings)} €</td></tr>`).join('');
+  body.innerHTML = `<div class="table-responsive"><table class="table table-sm table-hover mb-0"><thead class="table-secondary"><tr><th>${t('month.person')}</th><th class="text-end text-success">${t('month.income')}</th><th class="text-end text-danger">${t('month.expenses')}</th><th class="text-end">${t('month.savings_label')}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function renderWallet(wallet) {
+  const card = document.getElementById('walletBody');
+  if (!card) return;
+  if (!wallet || !wallet.length) { card.innerHTML = `<p class="text-muted text-center py-4 mb-0"><i class="fas fa-info-circle me-1"></i>${t('month.wallet_empty')}</p>`; return; }
+  let html = `<div class="table-responsive"><table class="table table-sm table-hover mb-0"><thead class="table-secondary"><tr><th>${t('month.person')}</th><th class="text-end">${t('month.wallet_start')}</th><th class="text-end text-danger">${t('month.wallet_cash_exp')}</th><th class="text-end">${t('month.wallet_end')}</th></tr></thead><tbody>`;
+  wallet.forEach(w => { html += `<tr><td><i class="fas fa-user me-2 text-muted"></i><strong>${w.name}</strong></td><td class="text-end">${fmt(w.start_balance)} €</td><td class="text-end text-danger">${w.cash_expenses > 0 ? '–' + fmt(w.cash_expenses) + ' €' : '<span class="text-muted">—</span>'}</td><td class="text-end fw-bold ${w.end_balance >= 0 ? 'text-success' : 'text-danger'}">${fmt(w.end_balance)} €</td></tr>`; });
+  html += `</tbody></table></div><div class="px-3 py-2 text-muted small border-top bg-light rounded-bottom"><i class="fas fa-info-circle me-1"></i>${t('month.wallet_hint')}</div>`;
+  card.innerHTML = html;
+}
+
+function renderSettlement(s) {
+  const card = document.getElementById('settlementBody');
+  if (!card) return;
+  if (!s) { card.innerHTML = `<p class="text-muted text-center py-4 mb-0"><i class="fas fa-info-circle me-1"></i>${t('month.settlement_no_split')}</p>`; return; }
+  if (s.is_settled) { card.innerHTML = `<div class="text-center py-4 px-3"><div class="text-success mb-2" style="font-size:2.5rem"><i class="fas fa-circle-check"></i></div><div class="fw-bold text-success fs-5 mb-1">${t('month.settlement_all_settled')}</div><div class="text-muted small">${t('month.settled_at_prefix', {date: s.settled_at || '–'})}</div></div>`; return; }
+  if (!s.transactions || !s.transactions.length) { card.innerHTML = `<p class="text-success text-center py-4 mb-0"><i class="fas fa-check-circle me-1"></i>${t('month.settlement_all_balanced')}</p>`; return; }
+  let html = '<div class="p-3 d-flex flex-wrap gap-2">';
+  s.transactions.forEach(txn => { html += `<div class="d-flex align-items-center gap-2 bg-warning bg-opacity-10 border border-warning rounded px-3 py-2 flex-grow-1"><i class="fas fa-arrow-right text-warning"></i><span>${t('month.settlement_owes', {payer: '<strong>' + txn.from + '</strong>', payee: '<strong>' + txn.to + '</strong>'})}</span><span class="ms-auto fw-bold text-warning fs-5">${fmt(txn.amount)} €</span></div>`; });
+  html += `</div><div class="px-3 pb-3 text-muted small"><i class="fas fa-circle-info me-1"></i>${t('month.settlement_details_hint_short')}</div>`;
+  card.innerHTML = html;
+}
+
+/**
+ * Rendert die Monatsübersicht-Tabelle (#overviewTableWrap) neu.
+ * Muss exakt das Jinja-Markup aus month.html spiegeln (siehe dort), da diese
+ * Funktion nach saveExpenses()/toggleSettle() aufgerufen wird und ohne
+ * Seiten-Reload die aktuellen Server-Daten (inkl. "bezahlt für"-Umbuchung
+ * auf die Zielperson bei abgerechnetem Monat) anzeigen muss.
+ */
+function renderOverview(ovp, ovc, ovs, settled) {
+  const wrap = document.getElementById('overviewTableWrap');
+  if (!wrap) return;
+  ovs = ovs || {};
+  const ps = Object.keys(ovp || {}).sort();
+
+  if (!ps.length) {
+    wrap.innerHTML = `<p class="text-muted text-center py-4 mb-0"><i class="fas fa-info-circle me-1"></i>${t('month.no_data_yet')}</p>`;
+    return;
+  }
+
+  const thead = `<tr><th>${t('month.category')}</th>` +
+    ps.map(pn => `<th class="text-end">${pn}</th>`).join('') +
+    `<th class="text-end fw-bold">${t('month.total')}</th></tr>`;
+
+  const grandByPerson = {}; ps.forEach(p => { grandByPerson[p] = 0; });
+  let grandTotal = 0;
+  let body = '';
+
+  (ovc || []).forEach(([cn, col]) => {
+    const hasData = ps.some(pn => (ovp[pn] && ovp[pn][cn]) ? true : false);
+    if (!hasData) return;
+
+    let rowTotal = 0;
+    const cells = ps.map(pn => {
+      const cv = (ovp[pn] && ovp[pn][cn]) || 0;
+      rowTotal += cv;
+      grandByPerson[pn] += cv;
+      if (cv > 0) return `<td class="text-end">${fmt(cv)} €</td>`;
+      if (cv < 0) return `<td class="text-end"><span class="text-success"><i class="fas fa-arrow-down me-1" style="font-size:.7em"></i>${fmt(-cv)} €</span></td>`;
+      return `<td class="text-end"><span class="text-muted">—</span></td>`;
+    }).join('');
+    grandTotal += rowTotal;
+
+    const isSplitCat = Object.prototype.hasOwnProperty.call(ovs, cn);
+    body += `<tr>
+      <td><span class="badge rounded-pill me-1" style="background:${col}">&#8203;</span>${cn}${isSplitCat ? ' <i class="fas fa-scale-balanced ms-1 text-warning" style="font-size:.7em"></i>' : ''}</td>
+      ${cells}
+      <td class="text-end fw-bold">${fmt(rowTotal)} €</td>
+    </tr>`;
+
+    if (isSplitCat) {
+      const rowClass = settled ? 'settlement-settled-row' : 'settlement-sub-row';
+      const label = settled
+        ? `<i class="fas fa-check-circle me-1 text-success"></i><em>${t('month.settlement_credited')}</em>`
+        : `<i class="fas fa-scale-balanced me-1 text-warning" style="font-size:.8em"></i><em>${t('month.settlement_adjust')}</em>`;
+      const subCells = ps.map(pn => {
+        const sv = (ovs[cn] && ovs[cn][pn]) || 0;
+        if (settled) {
+          const adj = -sv;
+          if (adj < -0.005) return `<td class="text-end small fw-semibold text-success"><i class="fas fa-minus me-1" style="font-size:.7em"></i>${fmt(adj)} €</td>`;
+          if (adj > 0.005) return `<td class="text-end small fw-semibold text-warning"><i class="fas fa-plus me-1" style="font-size:.7em"></i>+${fmt(adj)} €</td>`;
+          return `<td class="text-end small fw-semibold text-muted">—</td>`;
+        }
+        if (sv > 0.005) return `<td class="text-end small fw-semibold text-success"><i class="fas fa-arrow-down me-1" style="font-size:.7em"></i>+${fmt(sv)} €</td>`;
+        if (sv < -0.005) return `<td class="text-end small fw-semibold text-warning"><i class="fas fa-arrow-up me-1" style="font-size:.7em"></i>${fmt(sv)} €</td>`;
+        return `<td class="text-end small fw-semibold text-muted">—</td>`;
+      }).join('');
+      body += `<tr class="${rowClass}"><td>${label}</td>${subCells}<td class="text-end text-muted small">${settled ? '✓' : '±0'}</td></tr>`;
+    }
+  });
+
+  const footCells = ps.map(pn => `<td class="text-end">${fmt(grandByPerson[pn])} €</td>`).join('');
+  const legend = (Object.keys(ovs).length && !settled)
+    ? `<div class="px-3 py-2 bg-light border-top text-muted" style="font-size:.8rem">
+         <i class="fas fa-circle-info me-1"></i><span class="text-success fw-semibold">${t('month.legend_gets_back')}</span> ${t('month.legend_gets_back_desc')} &nbsp;|&nbsp; <span class="text-warning fw-semibold">${t('month.legend_pays')}</span> ${t('month.legend_pays_desc')} &nbsp;|&nbsp; ${t('month.legend_checkbox_hint')}
+       </div>`
+    : '';
+
+  wrap.innerHTML = `<div class="table-responsive"><table class="table table-bordered table-sm overview-table mb-0">
+      <thead class="table-secondary">${thead}</thead>
+      <tbody>${body}</tbody>
+      <tfoot class="table-dark fw-bold"><tr><td>${t('month.total')}</td>${footCells}<td class="text-end">${fmt(grandTotal)} €</td></tr></tfoot>
+    </table></div>${legend}`;
+}
+
+/* ── TOAST & AUTO-SAVE BADGE ──────────────────────────────── */
+function showToast(msg, type='success') {
+  const div = document.createElement('div');
+  div.className = `toast align-items-center text-bg-${type} border-0 show position-fixed bottom-0 end-0 m-3`;
+  div.style.zIndex = 2000;
+  div.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button type="button" class="btn-close btn-close-white me-2 m-auto" onclick="this.closest('.toast').remove()"></button></div>`;
+  document.body.appendChild(div);
+  setTimeout(() => div.remove(), 3000);
+}
+function showAutoSavedBadge(btnId) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  let badge = btn.parentElement.querySelector('.autosave-badge');
+  if (!badge) { badge = document.createElement('span'); badge.className = 'autosave-badge badge bg-success ms-2'; badge.style.cssText = 'font-size:.72rem;opacity:0;transition:opacity .3s'; btn.parentElement.appendChild(badge); }
+  badge.innerHTML = `<i class="fas fa-check me-1"></i>${t('month.auto_saved')}`;
+  badge.style.opacity = '1';
+  clearTimeout(badge._t);
+  badge._t = setTimeout(() => { badge.style.opacity = '0'; }, 2200);
+}
+
+/* ── AUTO-SAVE ────────────────────────────────────────────── */
+function hasValidExpenseRows() { return Array.from(document.querySelectorAll('#expenseBody tr')).some(r => { const v = parseAmtVal(r.querySelector('[name=amount]')); return !isNaN(v) && v > 0; }); }
+function hasValidIncomeRows() { return Array.from(document.querySelectorAll('#incomeBody tr')).some(r => { const v = parseAmtVal(r.querySelector('[name=amount]')); return !isNaN(v) && v > 0; }); }
+function scheduleAutoSaveExpense() { if (_suppressAutoSave || _saveExpInFlight) return; clearTimeout(_asExpTimer); _asExpTimer = setTimeout(async () => { if (!_suppressAutoSave && !_saveExpInFlight && hasValidExpenseRows()) await saveExpenses(true); }, 800); }
+function scheduleAutoSaveIncome() { if (_suppressAutoSave || _saveIncInFlight) return; clearTimeout(_asIncTimer); _asIncTimer = setTimeout(async () => { if (!_suppressAutoSave && !_saveIncInFlight && hasValidIncomeRows()) await saveIncome(true); }, 800); }
+
+/* ── BELEG-FUNKTIONEN ─────────────────────────────────────── */
+function setReceiptOnRow(tr, filename) {
+  const btn = tr.querySelector('.btn-receipt');
+  const hidden = tr.querySelector('[name=receipt_filename]');
+  const preview = tr.querySelector('.receipt-preview');
+  if (!btn || !hidden) return;
+  hidden.value = filename;
+  btn.classList.add('has-receipt');
+  btn.title = t('month.receipt_view_delete');
+  if (preview) {
+    const ext = (filename || '').split('.').pop().toLowerCase();
+    const url = `/api/receipt/${filename}`;
+    preview.innerHTML = ext === 'pdf'
+      ? `<div class="receipt-pdf-icon"><i class="bi bi-file-earmark-pdf-fill"></i></div><div class="text-center text-muted" style="font-size:.75rem">${filename}</div>`
+      : `<img src="${url}" alt="${t('month.receipt_add')}" loading="lazy">`;
+    preview.innerHTML += `<div class="receipt-actions"><a href="${url}" target="_blank" class="btn btn-sm btn-outline-secondary"><i class="bi bi-eye me-1"></i>${t('month.receipt_open')}</a><button class="btn btn-sm btn-outline-danger" onclick="deleteReceipt(this)"><i class="bi bi-trash me-1"></i>${t('month.receipt_delete')}</button></div>`;
+  }
+}
+function receiptClick(btn) {
+  const tr = btn.closest('tr');
+  const hidden = tr.querySelector('[name=receipt_filename]');
+  const preview = tr.querySelector('.receipt-preview');
+  if (hidden.value) {
+    const visible = preview.style.display !== 'none';
+    document.querySelectorAll('.receipt-preview').forEach(p => p.style.display = 'none');
+    preview.style.display = visible ? 'none' : 'block';
+    return;
+  }
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = 'image/*,.pdf';
+  input.onchange = () => { if (input.files.length) uploadReceipt(input.files[0], tr); };
+  input.click();
+}
+function uploadReceipt(file, tr) {
+  const btn = tr.querySelector('.btn-receipt');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  const fd = new FormData(); fd.append('file', file);
+  fetch('/api/receipt/upload', { method: 'POST', headers: { 'X-CSRF-Token': getCsrfToken() }, body: fd })
+    .then(r => r.json())
+    .then(data => { btn.disabled = false; btn.innerHTML = '<i class="bi bi-camera"></i>'; if (data.success) setReceiptOnRow(tr, data.filename); else alert(t('month.receipt_upload_failed', {error: data.error || ''})); })
+    .catch(() => { btn.disabled = false; btn.innerHTML = '<i class="bi bi-camera"></i>'; alert(t('month.receipt_upload_failed_generic')); });
+}
+function deleteReceipt(deleteBtn) {
+  const tr = deleteBtn.closest('tr');
+  const hidden = tr.querySelector('[name=receipt_filename]');
+  const btn = tr.querySelector('.btn-receipt');
+  const preview = tr.querySelector('.receipt-preview');
+  if (!hidden.value || !confirm(t('month.receipt_delete_confirm'))) return;
+  fetch(`/api/receipt/${hidden.value}`, { method: 'DELETE', headers: { 'X-CSRF-Token': getCsrfToken() } })
+    .then(r => r.json()).then(data => { if (data.success) { hidden.value = ''; btn.classList.remove('has-receipt'); btn.title = t('month.receipt_add'); btn.innerHTML = '<i class="bi bi-camera"></i>'; preview.style.display = 'none'; preview.innerHTML = ''; } });
+}
+document.addEventListener('click', function(e) { if (!e.target.closest('.receipt-cell')) document.querySelectorAll('.receipt-preview').forEach(p => p.style.display = 'none'); });
+
+let _receiptScanFile = null;
+
+async function scanReceipt() {
+  const file = document.getElementById('receiptFile').files[0]; if (!file) return;
+  const btn      = document.getElementById('receiptScanBtn');
+  const resultEl = document.getElementById('receiptResult');
+  const errEl    = document.getElementById('receiptError');
+  const fieldsEl = document.getElementById('receiptFields');
+
+  btn.disabled = true; btn.innerHTML = `<i class="bi bi-arrow-repeat spin"></i> ${t('month.processing')}`;
+  resultEl.style.display = 'block'; errEl.style.display = 'none'; fieldsEl.style.display = 'none';
+
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const res = await fetch('/api/import/receipt-parse', { method: 'POST', body: fd });
+    const d = await res.json();
+    if (!d.success) {
+      errEl.textContent = d.error || t('month.receipt_not_readable');
+      errEl.style.display = 'block';
+    } else {
+      _receiptScanFile = file;
+      document.getElementById('receiptDay').value = d.day || '';
+      document.getElementById('receiptAmount').value = d.amount != null ? fmt(d.amount) : '';
+      document.getElementById('receiptDesc').value = d.description || '';
+      document.getElementById('receiptPerson').innerHTML = buildPersonOpts('');
+      document.getElementById('receiptCat').innerHTML = buildCatOpts('');
+      fieldsEl.style.display = 'block';
+    }
+  } catch (e) {
+    errEl.textContent = t('month.receipt_network_error');
+    errEl.style.display = 'block';
+  }
+  btn.disabled = false; btn.innerHTML = `<i class="bi bi-magic me-1"></i>${t('month.receipt_scan_btn')}`;
+}
+
+async function applyReceiptScan() {
+  const day  = document.getElementById('receiptDay').value;
+  const desc = document.getElementById('receiptDesc').value;
+  const amt  = document.getElementById('receiptAmount').value;
+  const pid  = document.getElementById('receiptPerson').value;
+  const cid  = document.getElementById('receiptCat').value;
+
+  const applyBtn = document.getElementById('receiptApplyBtn');
+  applyBtn.disabled = true;
+
+  // Foto gleich als Beleg-Anhang für die neue Zeile mit hochladen (best effort)
+  let receiptFn = '';
+  if (_receiptScanFile) {
+    try {
+      const fd = new FormData(); fd.append('file', _receiptScanFile);
+      const res = await fetch('/api/receipt/upload', { method: 'POST', body: fd });
+      const d = await res.json();
+      if (d.success) receiptFn = d.filename;
+    } catch (e) { /* Beleg-Anhang ist optional - Fehler hier ignorieren */ }
+  }
+
+  addRow(day, desc, pid, cid, amt, false, '', receiptFn, true);
+
+  bootstrap.Modal.getInstance(document.getElementById('receiptModal'))?.hide();
+  showToast(t('month.receipt_applied'), 'success');
+}
+
+// Modal-Status zurücksetzen, sobald es geschlossen oder eine neue Datei gewählt wird
+document.getElementById('receiptModal').addEventListener('hidden.bs.modal', () => {
+  document.getElementById('receiptFile').value = '';
+  document.getElementById('receiptResult').style.display = 'none';
+  document.getElementById('receiptError').style.display = 'none';
+  document.getElementById('receiptFields').style.display = 'none';
+  document.getElementById('receiptApplyBtn').disabled = false;
+  _receiptScanFile = null;
+});
+document.getElementById('receiptFile').addEventListener('change', () => {
+  document.getElementById('receiptError').style.display = 'none';
+  document.getElementById('receiptFields').style.display = 'none';
+  _receiptScanFile = null;
+});
+
+/* ── TAB-TASTE AM ZEILENENDE FÜGT NEUE ZEILE HINZU ───────────── */
+function getFocusableInRow(tr) {
+  return Array.from(tr.querySelectorAll('input, select, button')).filter(el => !el.disabled && el.tabIndex !== -1);
+}
+
+function setupTabToNewRow(bodyId, addRowFn) {
+  const body = document.getElementById(bodyId);
+  if (!body) return;
+  body.addEventListener('keydown', function (e) {
+    if (e.key !== 'Tab' || e.shiftKey) return;
+    const tr = e.target.closest('tr');
+    if (!tr) return;
+    const isLastRow = tr === body.lastElementChild;
+    if (!isLastRow) return;
+    const focusables = getFocusableInRow(tr);
+    const isLastFocusable = focusables.length && e.target === focusables[focusables.length - 1];
+    if (!isLastFocusable) return;
+    e.preventDefault();
+    addRowFn();
+    const newTr = body.lastElementChild;
+    const first = newTr ? newTr.querySelector('[name=day], [name=inc_day]') : null;
+    if (first) first.focus();
+  });
+}
+
+/* ── TAB IM BETRAG-FELD DER LETZTEN ZEILE FÜGT NEUE ZEILE HINZU ───────────── */
+function handleAmountTab(e, input) {
+  if (e.key !== 'Tab' || e.shiftKey) return;
+  const tr = input.closest('tr');
+  const tbody = tr.parentElement;
+  const isLastRow = tr === tbody.lastElementChild;
+  if (!isLastRow) return;
+  e.preventDefault();
+
+  _suppressAutoSave = true;
+  formulaBlur(input);
+  const isIncome = tbody.id === 'incomeBody';
+  if (isIncome) addIncomeRow(); else addRow();
+
+  requestAnimationFrame(() => {
+    const newTr = tbody.lastElementChild;
+    const first = newTr ? newTr.querySelector('[name=day], [name=inc_day]') : null;
+    if (first) first.focus();
+    setTimeout(() => { _suppressAutoSave = false; }, 200);
+  });
+}
+
+/* ── INITIALISIERUNG ──────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', function () {
+  populateFilterSelects();
+  EXISTING.forEach(e => addRow(e.day, e.description, e.person_id, e.category_id, e.amount, !!e.is_cash, e.paid_for_person_id || '', e.receipt_filename || '', false));
+  INCOME_INIT.forEach(i => addIncomeRow(i.day, i.description, i.person_id, i.category_id, i.amount, false));
+  updateFooter();
+  updateIncomeFooter();
+
+  const expBody = document.getElementById('expenseBody');
+  const incBody = document.getElementById('incomeBody');
+  if (expBody) expBody.addEventListener('focusout', e => { const fr = e.target.closest('tr'); const tr2 = e.relatedTarget?.closest('tr'); if (!_suppressAutoSave && fr !== tr2) scheduleAutoSaveExpense(); });
+  if (incBody) incBody.addEventListener('focusout', e => { const fr = e.target.closest('tr'); const tr2 = e.relatedTarget?.closest('tr'); if (!_suppressAutoSave && fr !== tr2) scheduleAutoSaveIncome(); });
+});
+</script>
+{% endblock %}

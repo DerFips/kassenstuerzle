@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="{{ current_lang|default('de') }}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ t('nav.brand') }} – {{ t('offline.title') }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3;
+           display: flex; align-items: center; justify-content: center;
+           min-height: 100vh; margin: 0; text-align: center; padding: 2rem; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+            padding: 2.5rem; max-width: 360px; }
+    .icon { font-size: 3.5rem; margin-bottom: 1rem; }
+    h1 { font-size: 1.5rem; margin: 0 0 .5rem; color: #58a6ff; }
+    p  { color: #8b949e; margin: 0 0 1.5rem; }
+    button { background: #198754; color: white; border: none; border-radius: 8px;
+             padding: .65rem 1.5rem; font-size: 1rem; cursor: pointer; }
+    button:hover { background: #157347; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">📡</div>
+    <h1>{{ t('offline.title') }}</h1>
+    <p>{{ t('offline.text') }}</p>
+    <button onclick="location.reload()">{{ t('offline.retry') }}</button>
+  </div>
+</body>
+</html>

@@ -1,0 +1,748 @@
+{% extends 'base.html' %}
+{% import 'macros.html' as m %}
+
+{% block styles %}
+<style>
+.stat-card { border: 1px solid rgba(0,0,0,.06); transition: transform .15s ease, box-shadow .15s ease; }
+.stat-card:hover { transform: translateY(-2px); box-shadow: 0 .5rem 1.25rem rgba(0,0,0,.08) !important; }
+.stat-icon {
+  width: 44px; height: 44px; border-radius: .75rem; display: flex; align-items: center;
+  justify-content: center; font-size: 1.1rem; margin-bottom: .6rem;
+}
+.stat-value { font-size: 1.5rem; font-weight: 700; line-height: 1.1; }
+.stat-label { color: var(--bs-secondary-color, #6c757d); font-size: .82rem; }
+.chart-wrap { position: relative; height: 260px; }
+.chart-wrap.chart-wrap-sm { height: 220px; }
+#categoryLegend { display: flex; flex-wrap: wrap; gap: .35rem .9rem; }
+#categoryLegend .legend-item { display: flex; align-items: center; gap: .4rem; font-size: .8rem; color: #495057; }
+#categoryLegend .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.ov-empty-hero { border-radius: 1rem; }
+[data-bs-theme="dark"] .stat-card { border-color: rgba(255,255,255,.08); }
+</style>
+{% endblock %}
+
+{% block content %}
+
+{% if not persons_list %}
+<div class="ov-empty-hero text-center py-5 px-3 bg-body-tertiary">
+  <i class="fas fa-chart-pie text-warning mb-3" style="font-size:2.5rem"></i>
+  <h4 class="fw-bold mb-2">{{ t('overview.welcome_title') }}</h4>
+  <p class="text-muted mb-3">{{ t('overview.welcome_text') }}</p>
+  <a href="{{ url_for('main.month_view', year=now_dt.year, month=now_dt.month) }}" class="btn btn-primary">
+    <i class="fas fa-plus me-1"></i>{{ t('overview.add_expenses') }}
+  </a>
+</div>
+{% else %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-4">
+  <div>
+    <h2 class="fw-bold mb-1"><i class="fas fa-chart-pie me-2 text-warning"></i>{{ t('overview.title') }}</h2>
+    <p class="text-muted mb-0">{{ t('overview.subtitle') }}</p>
+  </div>
+  <a href="{{ url_for('main.month_view', year=now_dt.year, month=now_dt.month) }}" class="btn btn-outline-primary btn-sm">
+    <i class="fas fa-calendar-day me-1"></i>{{ t('overview.to_current_month') }}
+  </a>
+</div>
+
+{# ── Kennzahlen-Kacheln ───────────────────────────────────────────────────── #}
+<div class="row g-3 mb-4">
+  <div class="col-6 col-lg-3">
+    <div class="card stat-card shadow-sm h-100">
+      <div class="card-body">
+        <div class="stat-icon bg-success bg-opacity-10 text-success"><i class="fas fa-arrow-trend-up"></i></div>
+        <div class="stat-value text-success">+{{ m.eur(grand_income) }} €</div>
+        <div class="stat-label">{{ t('overview.stat_income') }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card stat-card shadow-sm h-100">
+      <div class="card-body">
+        <div class="stat-icon bg-danger bg-opacity-10 text-danger"><i class="fas fa-arrow-trend-down"></i></div>
+        <div class="stat-value text-danger">{{ m.eur(grand_expense) }} €</div>
+        <div class="stat-label">{{ t('overview.stat_expense') }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card stat-card shadow-sm h-100">
+      <div class="card-body">
+        <div class="stat-icon {% if grand_savings >= 0 %}bg-primary text-primary{% else %}bg-warning text-warning{% endif %} bg-opacity-10">
+          <i class="fas fa-piggy-bank"></i>
+        </div>
+        <div class="stat-value {% if grand_savings >= 0 %}text-primary{% else %}text-warning{% endif %}">
+          {% if grand_savings >= 0 %}+{% endif %}{{ m.eur(grand_savings) }} €
+        </div>
+        <div class="stat-label">{{ t('overview.stat_savings') }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card stat-card shadow-sm h-100">
+      <div class="card-body">
+        <div class="stat-icon {% if open_settlements_count %}bg-secondary text-secondary{% else %}bg-success text-success{% endif %} bg-opacity-10">
+          <i class="fas fa-scale-balanced"></i>
+        </div>
+        <div class="stat-value">{{ open_settlements_count }}</div>
+        <div class="stat-label">{{ t('overview.stat_open_settlements') if open_settlements_count == 1 else t('overview.stat_open_settlements_plural') }}</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Diagramme ────────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header py-3 d-flex flex-wrap justify-content-between align-items-center gap-2">
+    <h5 class="mb-0"><i class="fas fa-chart-line me-2 text-primary"></i>{{ t('overview.charts_title') }}</h5>
+    <select id="chartYearFilter" class="form-select form-select-sm" style="width:auto">
+      <option value="all">{{ t('overview.charts_all_years') }}</option>
+      {% for y in months_by_year.keys() %}<option value="{{ y }}">{{ y }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="card-body">
+    <div class="row g-4">
+      <div class="col-lg-7">
+        <h6 class="text-muted small text-uppercase mb-2">{{ t('overview.chart_trend_title') }}</h6>
+        <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+      </div>
+      <div class="col-lg-5">
+        <h6 class="text-muted small text-uppercase mb-2">{{ t('overview.chart_category_title') }}</h6>
+        <div class="chart-wrap chart-wrap-sm"><canvas id="categoryChart"></canvas></div>
+        <div id="categoryLegend" class="mt-2"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── AP5: Jahresübersicht ─────────────────────────────────────────────────── #}
+{% if months_by_year %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header py-3 d-flex flex-wrap justify-content-between align-items-center gap-1">
+    <h5 class="mb-0"><i class="fas fa-calendar me-2 text-warning"></i>{{ t('overview.year_overview') }}</h5>
+    <small class="text-muted">{{ months_by_year|length }} {{ t('overview.year_singular') if months_by_year|length == 1 else t('overview.years_plural') }}</small>
+  </div>
+  <div class="card-body p-0">
+    {%- set grand = namespace(inc=0, exp=0) %}
+    <div class="accordion accordion-flush" id="yearAccordion">
+    {% for year_y, months_y in months_by_year.items() %}
+    {%- set ytot = namespace(inc=0, exp=0) %}
+    {%- for row in months_y %}{%- set ytot.inc = ytot.inc + row.inc %}{%- set ytot.exp = ytot.exp + row.exp %}{%- endfor %}
+    {%- set grand.inc = grand.inc + ytot.inc %}{%- set grand.exp = grand.exp + ytot.exp %}
+    {%- set ysav = ytot.inc - ytot.exp %}
+    <div class="accordion-item border-0 border-bottom">
+      <h2 class="accordion-header">
+        <button class="accordion-button flex-wrap row-gap-1 {% if not loop.first %}collapsed{% endif %} fw-bold py-2 px-3"
+          type="button" data-bs-toggle="collapse" data-bs-target="#year-{{ year_y }}"
+          aria-expanded="{{ 'true' if loop.first else 'false' }}">
+          <span class="me-3">{{ year_y }}</span>
+          <span class="badge bg-success me-1">+{{ m.eur(ytot.inc) }} €</span>
+          <span class="badge bg-danger me-1">{{ m.eur(ytot.exp) }} €</span>
+          <span class="badge {% if ysav >= 0 %}bg-primary{% else %}bg-warning text-dark{% endif %}">
+            {% if ysav >= 0 %}+{% endif %}{{ m.eur(ysav) }} €
+          </span>
+        </button>
+      </h2>
+      <div id="year-{{ year_y }}" class="accordion-collapse collapse {% if loop.first %}show{% endif %}">
+        <div class="accordion-body p-0">
+          <div class="table-responsive">
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-secondary">
+              <tr><th class="ps-3">{{ t('overview.month_col') }}</th><th class="text-end text-success">{{ t('overview.income_col') }}</th><th class="text-end text-danger">{{ t('overview.expense_col') }}</th><th class="text-end">{{ t('overview.savings_col') }}</th></tr>
+            </thead>
+            <tbody>
+              {% for row in months_y %}
+              {%- set sav = row.inc - row.exp %}
+              <tr>
+                <td class="ps-3"><a href="/month/{{ year_y }}/{{ row.month }}" class="text-decoration-none">{{ month_names[row.month-1] }}</a>
+                  {% if row.settled %}<span class="badge bg-success ms-1" style="font-size:.6em"><i class="fas fa-check"></i></span>{% endif %}</td>
+                <td class="text-end text-success">+{{ m.eur(row.inc) }} €</td>
+                <td class="text-end text-danger">{{ m.eur(row.exp) }} €</td>
+                <td class="text-end fw-semibold {% if sav >= 0 %}text-success{% else %}text-danger{% endif %}">{% if sav >= 0 %}+{% endif %}{{ m.eur(sav) }} €</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+            <tfoot class="table-dark">
+              <tr class="fw-bold">
+                <td class="ps-3">{{ t('overview.sum_year', year=year_y) }}</td>
+                <td class="text-end text-success">+{{ m.eur(ytot.inc) }} €</td>
+                <td class="text-end text-danger">{{ m.eur(ytot.exp) }} €</td>
+                <td class="text-end {% if ysav >= 0 %}text-success{% else %}text-danger{% endif %}">{% if ysav >= 0 %}+{% endif %}{{ m.eur(ysav) }} €</td>
+              </tr>
+            </tfoot>
+          </table>
+          </div>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+    </div>
+    {%- set grand_sav = grand.inc - grand.exp %}
+    <div class="d-flex flex-wrap gap-2 gap-md-4 px-3 py-2 border-top fw-bold">
+      <span>{{ t('overview.grand_total_years') }}</span>
+      <span class="ms-auto text-success">+{{ m.eur(grand.inc) }} €</span>
+      <span class="text-danger">{{ m.eur(grand.exp) }} €</span>
+      <span class="{% if grand_sav >= 0 %}text-success{% else %}text-danger{% endif %}">{% if grand_sav >= 0 %}+{% endif %}{{ m.eur(grand_sav) }} €</span>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{# ── AP6: Personen-Übersicht ──────────────────────────────────────────────── #}
+{% if person_totals %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header py-3 d-flex flex-wrap justify-content-between align-items-center gap-1">
+    <h5 class="mb-0"><i class="fas fa-users me-2 text-primary"></i>{{ t('overview.person_overview') }}</h5>
+    <small class="text-muted">{{ t('overview.person_overview_hint') }}</small>
+  </div>
+  <div class="card-body p-0">
+
+    {# ── Gesamt-Tabelle (alle Personen auf einen Blick) ─────────────────── #}
+    <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0 border-bottom">
+      <thead class="table-secondary">
+        <tr>
+          <th class="ps-3" style="min-width:140px">{{ t('overview.person_col') }}</th>
+          <th class="text-end text-success">{{ t('overview.income_total_col') }}</th>
+          <th class="text-end text-danger">{{ t('overview.expense_total_col') }}</th>
+          <th class="text-end">{{ t('overview.savings_total_col') }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {%- set all_inc = namespace(v=0) %}{%- set all_exp = namespace(v=0) %}
+        {% for pn, pt in person_totals.items() %}
+        {%- set all_inc.v = all_inc.v + pt.inc %}{%- set all_exp.v = all_exp.v + pt.exp %}
+        <tr>
+          <td class="fw-semibold ps-3">{{ pn }}</td>
+          <td class="text-end text-success">+{{ m.eur(pt.inc) }} €</td>
+          <td class="text-end text-danger">{{ m.eur(pt.exp) }} €</td>
+          <td class="text-end fw-bold {% if pt.savings >= 0 %}text-success{% else %}text-danger{% endif %}">
+            {% if pt.savings >= 0 %}+{% endif %}{{ m.eur(pt.savings) }} €
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot class="table-dark fw-bold">
+        {%- set all_sav = all_inc.v - all_exp.v %}
+        <tr>
+          <td class="ps-3">{{ t('overview.grand_total_persons') }}</td>
+          <td class="text-end text-success">+{{ m.eur(all_inc.v) }} €</td>
+          <td class="text-end text-danger">{{ m.eur(all_exp.v) }} €</td>
+          <td class="text-end {% if all_sav >= 0 %}text-success{% else %}text-danger{% endif %}">
+            {% if all_sav >= 0 %}+{% endif %}{{ m.eur(all_sav) }} €
+          </td>
+        </tr>
+      </tfoot>
+    </table>
+    </div>
+
+    {# ── Pro Person: Akkordeon nach Jahren ──────────────────────────────── #}
+    {% if person_totals_by_year %}
+    <div class="border-top">
+      {%- set ploop = namespace(idx=0) %}
+      {% for pn, py_data in person_totals_by_year.items() %}
+      {%- set ploop.idx = loop.index %}
+      <div class="border-bottom">
+
+        {# Person-Header #}
+        <div class="px-3 py-2 d-flex align-items-center gap-2 bg-light">
+          <i class="fas fa-user text-muted"></i>
+          <span class="fw-bold">{{ pn }}</span>
+          {%- set ptot = person_totals.get(pn, {}) %}
+          <span class="ms-auto badge bg-success">+{{ m.eur(ptot.inc or 0) }} €</span>
+          <span class="badge bg-danger">{{ m.eur(ptot.exp or 0) }} €</span>
+          <span class="badge {% if (ptot.savings or 0) >= 0 %}bg-primary{% else %}bg-warning text-dark{% endif %}">
+            {% if (ptot.savings or 0) >= 0 %}+{% endif %}{{ m.eur(ptot.savings or 0) }} €
+          </span>
+        </div>
+
+        {# Akkordeon pro Jahr #}
+        <div class="accordion accordion-flush" id="p6acc-{{ loop.index }}">
+        {% for year_y, ydata in py_data.items() %}
+        {%- set ysav = ydata.inc - ydata.exp %}
+        <div class="accordion-item border-0 border-top">
+          <h2 class="accordion-header">
+            <button class="accordion-button flex-wrap row-gap-1 {% if not loop.first %}collapsed{% endif %} py-2 px-4"
+                    type="button" data-bs-toggle="collapse"
+                    data-bs-target="#p6-{{ ploop.idx }}-{{ year_y }}"
+                    aria-expanded="{{ 'true' if loop.first else 'false' }}">
+              <span class="fw-semibold me-3" style="min-width:44px">{{ year_y }}</span>
+              <span class="badge bg-success me-1">+{{ m.eur(ydata.inc) }} €</span>
+              <span class="badge bg-danger me-1">{{ m.eur(ydata.exp) }} €</span>
+              <span class="badge {% if ysav >= 0 %}bg-primary{% else %}bg-warning text-dark{% endif %}">
+                {% if ysav >= 0 %}+{% endif %}{{ m.eur(ysav) }} €
+              </span>
+            </button>
+          </h2>
+          <div id="p6-{{ ploop.idx }}-{{ year_y }}"
+               class="accordion-collapse collapse {% if loop.first %}show{% endif %}">
+            <div class="accordion-body p-0">
+              <div class="table-responsive">
+              <table class="table table-sm table-hover mb-0">
+                <thead class="table-light">
+                  <tr>
+                    <th class="ps-4" style="min-width:110px">{{ t('overview.month_col') }}</th>
+                    <th class="text-end text-success">{{ t('overview.income_col') }}</th>
+                    <th class="text-end text-danger">{{ t('overview.expense_col') }}</th>
+                    <th class="text-end">{{ t('overview.savings_col') }}</th>
+                    <th class="text-center" style="min-width:120px">{{ t('overview.status_settlement') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {%- set ytot = namespace(inc=0.0, exp=0.0) %}
+                  {% for row in ydata.months %}
+                  {% if row.inc != 0 or row.exp != 0 %}
+                  {%- set sav = row.inc - row.exp %}
+                  {%- set ytot.inc = ytot.inc + row.inc %}
+                  {%- set ytot.exp = ytot.exp + row.exp %}
+                  <tr>
+                    <td class="ps-4">
+                      <a href="/month/{{ year_y }}/{{ row.month }}"
+                         class="text-decoration-none">{{ month_names[row.month-1] }}</a>
+                    </td>
+                    <td class="text-end {% if row.inc > 0 %}text-success{% else %}text-muted{% endif %}">
+                      {% if row.inc != 0 %}+{{ m.eur(row.inc) }} €
+                      {% else %}—{% endif %}
+                    </td>
+                    <td class="text-end {% if row.exp > 0 %}text-danger{% else %}text-muted{% endif %}">
+                      {% if row.exp != 0 %}{{ m.eur(row.exp) }} €
+                      {% else %}—{% endif %}
+                    </td>
+                    <td class="text-end fw-semibold {% if sav >= 0 %}text-success{% else %}text-danger{% endif %}">
+                      {% if sav >= 0 %}+{% endif %}{{ m.eur(sav) }} €
+                    </td>
+                    <td class="text-center">
+                      {% if row.settled %}
+                        <span class="badge bg-success">
+                          <i class="fas fa-check me-1"></i>{{ t('overview.settled') }}
+                        </span>
+                        {% if row.sett_delta is not none and row.sett_delta != 0 %}
+                        <br>
+                        <small class="fw-semibold {% if row.sett_delta > 0 %}text-success{% else %}text-danger{% endif %}"
+                               title="{{ t('overview.settlement_delta_title') }}">
+                          {% if row.sett_delta > 0 %}▲ +{% else %}▼ {% endif %}{{ m.eur(row.sett_delta) }} €
+                        </small>
+                        {% endif %}
+                      {% else %}
+                        <span class="badge bg-secondary bg-opacity-50">{{ t('overview.open') }}</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                  {% endif %}
+                  {% endfor %}
+                </tbody>
+                <tfoot class="table-secondary fw-bold">
+                  {%- set ytot_sav = ytot.inc - ytot.exp %}
+                  <tr>
+                    <td class="ps-4">{{ t('overview.year_total', year=year_y) }}</td>
+                    <td class="text-end text-success">+{{ m.eur(ytot.inc) }} €</td>
+                    <td class="text-end text-danger">{{ m.eur(ytot.exp) }} €</td>
+                    <td class="text-end {% if ytot_sav >= 0 %}text-success{% else %}text-danger{% endif %}">
+                      {% if ytot_sav >= 0 %}+{% endif %}{{ m.eur(ytot_sav) }} €
+                    </td>
+                    <td></td>
+                  </tr>
+                </tfoot>
+              </table>
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+        </div>{# /accordion #}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+{% endif %}
+
+{# ── Monats-Kategorie-Matrix Tabs (3 Tabs) ────────────────────────────────── #}
+{# Monate chronologisch (ältestes zuerst) für Spalten #}
+{% set month_keys_asc = month_keys | sort %}
+
+<div class="d-grid mb-4">
+  <button class="btn btn-outline-secondary btn-sm" type="button"
+          data-bs-toggle="collapse" data-bs-target="#detailsSection"
+          aria-expanded="false" aria-controls="detailsSection">
+    <i class="fas fa-table-cells me-1"></i>{{ t('overview.details_toggle') }}
+  </button>
+</div>
+<div class="collapse" id="detailsSection">
+<div class="card shadow-sm mb-4">
+  <div class="card-header py-3">
+    <ul class="nav nav-tabs card-header-tabs" id="ovTabs">
+      <li class="nav-item">
+        <a class="nav-link active" data-bs-toggle="tab" href="#tab-ausgaben">
+          <i class="fas fa-arrow-up text-danger me-1"></i>{{ t('overview.tab_expenses') }}
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#tab-einnahmen">
+          <i class="fas fa-arrow-down text-success me-1"></i>{{ t('overview.tab_income') }}
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#tab-gesamt">
+          <i class="fas fa-scale-balanced text-primary me-1"></i>{{ t('overview.tab_total') }}
+        </a>
+      </li>
+    </ul>
+  </div>
+
+  <div class="tab-content">
+
+    {# ── TAB: AUSGABEN ────────────────────────────────────────────────────── #}
+    <div class="tab-pane fade show active p-0" id="tab-ausgaben">
+      {% for pn in persons_list %}
+      {%- set pdata = structured.get(pn, {}) %}
+      <div class="border-bottom">
+        <div class="px-3 py-2 bg-light fw-bold border-bottom">
+          <i class="fas fa-user me-2 text-muted"></i>{{ pn }}
+        </div>
+        <div class="table-responsive">
+        <table class="table table-sm table-hover overview-table mb-0">
+          <thead class="table-danger">
+            <tr>
+              <th style="min-width:130px">{{ t('month.category') }}</th>
+              {% for year_k, month_k in month_keys_asc %}
+              <th class="text-end" style="min-width:80px">{{ month_names[month_k-1][:3] }}&nbsp;{{ year_k }}</th>
+              {% endfor %}
+              <th class="text-end fw-bold" style="min-width:90px">{{ t('month.total') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {%- set col_totals = namespace(vals=[]) %}
+            {% for cn, col in all_cats %}
+            {%- set row = namespace(total=0, has_data=false) %}
+            {%- for year_k, month_k in month_keys_asc %}
+              {%- set mk = year_k|string + '-' + month_k|string %}
+              {%- set cv = pdata.get(mk, {}).get(cn, 0) %}
+              {%- if cv != 0 %}{%- set row.has_data = true %}{%- endif %}
+              {%- set row.total = row.total + cv %}
+            {%- endfor %}
+            {% if row.has_data %}
+            <tr>
+              <td><span class="badge rounded-pill me-1" style="background:{{ col }}">&#8203;</span>{{ cn }}</td>
+              {% for year_k, month_k in month_keys_asc %}
+              {%- set mk = year_k|string + '-' + month_k|string %}
+              {%- set cv = pdata.get(mk, {}).get(cn, 0) %}
+              <td class="text-end">{% if cv != 0 %}{{ m.eur(cv) }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
+              {% endfor %}
+              <td class="text-end fw-bold">{{ m.eur(row.total) }}</td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+          </tbody>
+          <tfoot class="table-dark fw-bold">
+            <tr>
+              <td>{{ t('month.total') }}</td>
+              {%- set grand = namespace(v=0) %}
+              {% for year_k, month_k in month_keys_asc %}
+              {%- set mk = year_k|string + '-' + month_k|string %}
+              {%- set col_sum = namespace(v=0) %}
+              {%- for cn, _ in all_cats %}{%- set col_sum.v = col_sum.v + pdata.get(mk, {}).get(cn, 0) %}{%- endfor %}
+              {%- set grand.v = grand.v + col_sum.v %}
+              <td class="text-end">{{ m.eur(col_sum.v) }}</td>
+              {% endfor %}
+              <td class="text-end">{{ m.eur(grand.v) }}</td>
+            </tr>
+          </tfoot>
+        </table>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    {# ── TAB: EINNAHMEN ───────────────────────────────────────────────────── #}
+    <div class="tab-pane fade p-0" id="tab-einnahmen">
+      {% for pn in persons_list %}
+      {%- set pdata = inc_structured.get(pn, {}) %}
+      <div class="border-bottom">
+        <div class="px-3 py-2 bg-light fw-bold border-bottom">
+          <i class="fas fa-user me-2 text-muted"></i>{{ pn }}
+        </div>
+        <div class="table-responsive">
+        <table class="table table-sm table-hover overview-table mb-0">
+          <thead class="table-success">
+            <tr>
+              <th style="min-width:130px">{{ t('month.category') }}</th>
+              {% for year_k, month_k in month_keys_asc %}
+              <th class="text-end" style="min-width:80px">{{ month_names[month_k-1][:3] }}&nbsp;{{ year_k }}</th>
+              {% endfor %}
+              <th class="text-end fw-bold" style="min-width:90px">{{ t('month.total') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {# Income rows – categories from inc_structured for this person #}
+            {%- set inc_cats = namespace(seen=[]) %}
+            {%- for mk_val, cats in pdata.items() %}
+              {%- for cn in cats.keys() %}
+                {%- if cn not in inc_cats.seen %}{%- set inc_cats.seen = inc_cats.seen + [cn] %}{%- endif %}
+              {%- endfor %}
+            {%- endfor %}
+            {% if not inc_cats.seen %}
+            <tr><td colspan="{{ month_keys_asc|length + 2 }}" class="text-muted text-center py-3">{{ t('overview.no_income') }}</td></tr>
+            {% else %}
+            {%- for cn in inc_cats.seen | sort %}
+            {%- set row = namespace(total=0, has_data=false) %}
+            {%- for year_k, month_k in month_keys_asc %}
+              {%- set mk = year_k|string + '-' + month_k|string %}
+              {%- set cv = pdata.get(mk, {}).get(cn, 0) %}
+              {%- if cv != 0 %}{%- set row.has_data = true %}{%- endif %}
+              {%- set row.total = row.total + cv %}
+            {%- endfor %}
+            {% if row.has_data %}
+            <tr>
+              <td>{{ cn }}</td>
+              {% for year_k, month_k in month_keys_asc %}
+              {%- set mk = year_k|string + '-' + month_k|string %}
+              {%- set cv = pdata.get(mk, {}).get(cn, 0) %}
+              <td class="text-end">{% if cv != 0 %}{{ m.eur(cv) }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
+              {% endfor %}
+              <td class="text-end fw-bold">{{ m.eur(row.total) }}</td>
+            </tr>
+            {% endif %}
+            {%- endfor %}
+            {% endif %}
+          </tbody>
+          <tfoot class="table-dark fw-bold">
+            <tr>
+              <td>{{ t('month.total') }}</td>
+              {%- set grand = namespace(v=0) %}
+              {% for year_k, month_k in month_keys_asc %}
+              {%- set mk = year_k|string + '-' + month_k|string %}
+              {%- set col_sum = namespace(v=0) %}
+              {%- for cn2, cv2 in pdata.get(mk, {}).items() %}{%- set col_sum.v = col_sum.v + cv2 %}{%- endfor %}
+              {%- set grand.v = grand.v + col_sum.v %}
+              <td class="text-end">{{ m.eur(col_sum.v) }}</td>
+              {% endfor %}
+              <td class="text-end">{{ m.eur(grand.v) }}</td>
+            </tr>
+          </tfoot>
+        </table>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    {# ── TAB: GESAMT (Einnahmen − Ausgaben pro Kategorie/Monat/Person) ─────── #}
+    <div class="tab-pane fade p-0" id="tab-gesamt">
+      <div class="px-3 py-2 border-bottom" style="background:var(--bs-secondary-bg,#f8f9fa)">
+        <small class="text-muted"><i class="fas fa-info-circle me-1"></i>{{ t('overview.total_hint') | safe }}</small>
+      </div>
+      {% for pn in persons_list %}
+      {%- set exp_pdata = structured.get(pn, {}) %}
+      {%- set inc_pdata = inc_structured.get(pn, {}) %}
+      <div class="border-bottom">
+        <div class="px-3 py-2 bg-light fw-bold border-bottom">
+          <i class="fas fa-user me-2 text-muted"></i>{{ pn }}
+        </div>
+        <div class="table-responsive">
+        <table class="table table-sm table-hover overview-table mb-0">
+          <thead class="table-primary">
+            <tr>
+              <th style="min-width:130px">{{ t('month.category') }}</th>
+              {% for year_k, month_k in month_keys_asc %}
+              <th class="text-end" style="min-width:80px">{{ month_names[month_k-1][:3] }}&nbsp;{{ year_k }}</th>
+              {% endfor %}
+              <th class="text-end fw-bold" style="min-width:90px">{{ t('month.total') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {%- set all_cn_gesamt = namespace(seen=[]) %}
+            {%- for mk_v, cats in exp_pdata.items() %}
+              {%- for cn in cats.keys() %}{%- if cn not in all_cn_gesamt.seen %}{%- set all_cn_gesamt.seen = all_cn_gesamt.seen + [cn] %}{%- endif %}{%- endfor %}
+            {%- endfor %}
+            {%- for mk_v, cats in inc_pdata.items() %}
+              {%- for cn in cats.keys() %}{%- if cn not in all_cn_gesamt.seen %}{%- set all_cn_gesamt.seen = all_cn_gesamt.seen + [cn] %}{%- endif %}{%- endfor %}
+            {%- endfor %}
+            {% if not all_cn_gesamt.seen %}
+            <tr><td colspan="{{ month_keys_asc|length + 2 }}" class="text-muted text-center py-3">{{ t('overview.no_data') }}</td></tr>
+            {% else %}
+            {%- for cn in all_cn_gesamt.seen | sort %}
+            {%- set row = namespace(total=0, has_data=false) %}
+            {%- for year_k, month_k in month_keys_asc %}
+              {%- set mk = year_k|string + '-' + month_k|string %}
+              {%- set exp_cv = exp_pdata.get(mk, {}).get(cn, 0) %}
+              {%- set inc_cv = inc_pdata.get(mk, {}).get(cn, 0) %}
+              {%- set net = inc_cv - exp_cv %}
+              {%- if net != 0 %}{%- set row.has_data = true %}{%- endif %}
+              {%- set row.total = row.total + net %}
+            {%- endfor %}
+            {% if row.has_data %}
+            <tr>
+              {%- set col_color = all_cats | selectattr('0', 'equalto', cn) | map(attribute='1') | first | default('#6c757d') %}
+              <td><span class="badge rounded-pill me-1" style="background:{{ col_color }}">&#8203;</span>{{ cn }}</td>
+              {% for year_k, month_k in month_keys_asc %}
+              {%- set mk = year_k|string + '-' + month_k|string %}
+              {%- set exp_cv = exp_pdata.get(mk, {}).get(cn, 0) %}
+              {%- set inc_cv = inc_pdata.get(mk, {}).get(cn, 0) %}
+              {%- set net = inc_cv - exp_cv %}
+              <td class="text-end {% if net > 0.005 %}text-success{% elif net < -0.005 %}text-danger{% endif %}">
+                {% if net != 0 %}{% if net > 0 %}+{% endif %}{{ m.eur(net) }}{% else %}<span class="text-muted">—</span>{% endif %}
+              </td>
+              {% endfor %}
+              <td class="text-end fw-bold {% if row.total > 0.005 %}text-success{% elif row.total < -0.005 %}text-danger{% endif %}">
+                {% if row.total > 0 %}+{% endif %}{{ m.eur(row.total) }}
+              </td>
+            </tr>
+            {% endif %}
+            {%- endfor %}
+            {% endif %}
+          </tbody>
+          <tfoot class="table-dark fw-bold">
+            <tr>
+              <td>{{ t('overview.net') }}</td>
+              {%- set grand = namespace(v=0) %}
+              {% for year_k, month_k in month_keys_asc %}
+              {%- set mk = year_k|string + '-' + month_k|string %}
+              {%- set exp_sum = namespace(v=0) %}{%- set inc_sum = namespace(v=0) %}
+              {%- for cn3, cv3 in exp_pdata.get(mk, {}).items() %}{%- set exp_sum.v = exp_sum.v + cv3 %}{%- endfor %}
+              {%- for cn3, cv3 in inc_pdata.get(mk, {}).items() %}{%- set inc_sum.v = inc_sum.v + cv3 %}{%- endfor %}
+              {%- set net_col = inc_sum.v - exp_sum.v %}
+              {%- set grand.v = grand.v + net_col %}
+              <td class="text-end {% if net_col > 0.005 %}text-success{% elif net_col < -0.005 %}text-danger{% endif %}">
+                {% if net_col > 0 %}+{% endif %}{{ m.eur(net_col) }}
+              </td>
+              {% endfor %}
+              <td class="text-end {% if grand.v > 0.005 %}text-success{% elif grand.v < -0.005 %}text-danger{% endif %}">
+                {% if grand.v > 0 %}+{% endif %}{{ m.eur(grand.v) }}
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+  </div>{# end tab-content #}
+</div>{# end card #}
+</div>{# end #detailsSection #}
+
+{% endif %}
+
+<script id="overviewChartData" type="application/json">{{ overview_chart_json | tojson }}</script>
+{% endblock %}
+
+{% block extra_script %}
+{% if persons_list %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"></script>
+<script>
+(function () {
+  const DATA = JSON.parse(document.getElementById('overviewChartData').textContent);
+  const yearFilter = document.getElementById('chartYearFilter');
+  const isDark = () => document.documentElement.getAttribute('data-bs-theme') === 'dark'
+    || (!document.documentElement.hasAttribute('data-bs-theme')
+        && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const gridColor = () => isDark() ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
+  const tickColor = () => isDark() ? '#adb5bd' : '#495057';
+
+  function monthsForYear(y) {
+    return y === 'all' ? DATA.months : DATA.months.filter(m => String(m.year) === String(y));
+  }
+
+  function categoryTotalsForYear(y) {
+    const totals = {};
+    monthsForYear(y).forEach(m => {
+      const cats = DATA.category_by_month[m.key] || {};
+      Object.entries(cats).forEach(([cn, val]) => {
+        totals[cn] = (totals[cn] || 0) + val;
+      });
+    });
+    return totals;
+  }
+
+  function fmtEur(v) {
+    return new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v) + ' €';
+  }
+
+  let trendChart, categoryChart;
+
+  function renderTrendChart(y) {
+    const months = monthsForYear(y);
+    const ctx = document.getElementById('trendChart');
+    const cfg = {
+      type: 'bar',
+      data: {
+        labels: months.map(m => m.label),
+        datasets: [
+          { label: t('overview.chart_legend_income'), data: months.map(m => m.inc), backgroundColor: '#198754', borderRadius: 4, maxBarThickness: 28 },
+          { label: t('overview.chart_legend_expense'), data: months.map(m => m.exp), backgroundColor: '#dc3545', borderRadius: 4, maxBarThickness: 28 },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { position: 'top', labels: { color: tickColor() } },
+          tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${fmtEur(c.parsed.y)}` } },
+        },
+        scales: {
+          x: { grid: { display: false }, ticks: { color: tickColor() } },
+          y: { grid: { color: gridColor() }, ticks: { color: tickColor(), callback: (v) => fmtEur(v) } },
+        },
+      },
+    };
+    if (trendChart) { trendChart.data = cfg.data; trendChart.options = cfg.options; trendChart.update(); }
+    else trendChart = new Chart(ctx, cfg);
+  }
+
+  function renderCategoryChart(y) {
+    const totals = categoryTotalsForYear(y);
+    const entries = Object.entries(totals).filter(([, v]) => v > 0.005).sort((a, b) => b[1] - a[1]);
+    const colorMap = Object.fromEntries(DATA.categories.map(c => [c.name, c.color]));
+    const ctx = document.getElementById('categoryChart');
+    const legendEl = document.getElementById('categoryLegend');
+
+    if (!entries.length) {
+      if (categoryChart) { categoryChart.destroy(); categoryChart = null; }
+      ctx.getContext('2d').clearRect(0, 0, ctx.width, ctx.height);
+      legendEl.innerHTML = `<span class="text-muted small">${t('overview.chart_no_expenses')}</span>`;
+      return;
+    }
+
+    const cfg = {
+      type: 'doughnut',
+      data: {
+        labels: entries.map(([cn]) => cn),
+        datasets: [{
+          data: entries.map(([, v]) => v),
+          backgroundColor: entries.map(([cn]) => colorMap[cn] || '#6c757d'),
+          borderWidth: 2,
+          borderColor: isDark() ? '#212529' : '#fff',
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: (c) => `${c.label}: ${fmtEur(c.parsed)}` } },
+        },
+      },
+    };
+    if (categoryChart) { categoryChart.data = cfg.data; categoryChart.options = cfg.options; categoryChart.update(); }
+    else categoryChart = new Chart(ctx, cfg);
+
+    const total = entries.reduce((s, [, v]) => s + v, 0);
+    legendEl.innerHTML = entries.map(([cn, v]) => `
+      <span class="legend-item">
+        <span class="legend-dot" style="background:${colorMap[cn] || '#6c757d'}"></span>
+        ${cn} <span class="text-muted">(${Math.round(v / total * 100)}%)</span>
+      </span>`).join('');
+  }
+
+  function renderAll() {
+    const y = yearFilter.value;
+    renderTrendChart(y);
+    renderCategoryChart(y);
+  }
+
+  yearFilter.addEventListener('change', renderAll);
+  renderAll();
+})();
+</script>
+{% endif %}
+{% endblock %}

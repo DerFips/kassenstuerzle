@@ -1,0 +1,322 @@
+{% extends 'base.html' %}
+{% block title %}Beleg scannen – Kassenstürzle{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0"><i class="fas fa-camera me-2 text-primary"></i>Beleg scannen</h4>
+  <a href="{{ url_for('main.month_view', year=now.year, month=now.month) }}"
+     class="btn btn-sm btn-outline-secondary">
+    <i class="fas fa-arrow-left me-1"></i>Zurück
+  </a>
+</div>
+
+<div class="row g-4">
+  {# ── Linke Spalte: Upload / Kamera ──────────────────────────────────────── #}
+  <div class="col-lg-5">
+    <div class="card shadow-sm h-100">
+      <div class="card-header py-3">
+        <h6 class="mb-0"><i class="fas fa-upload me-2"></i>Belegbild</h6>
+      </div>
+      <div class="card-body d-flex flex-column">
+
+        {# Drop-Zone #}
+        <div id="dropZone"
+             class="border border-2 border-dashed rounded-3 p-4 text-center mb-3
+                    d-flex flex-column align-items-center justify-content-center"
+             style="min-height:200px; cursor:pointer; border-color:#0d6efd !important"
+             onclick="document.getElementById('receiptFileInput').click()"
+             ondragover="event.preventDefault()"
+             ondrop="handleDrop(event)">
+          <i class="fas fa-file-image fa-3x text-primary mb-2"></i>
+          <p class="mb-1 fw-semibold">Datei hierher ziehen</p>
+          <p class="text-muted small">oder klicken zum Auswählen</p>
+          <small class="text-muted">JPG, PNG, WEBP, BMP, TIFF</small>
+        </div>
+        <input type="file" id="receiptFileInput" accept="image/*"
+               class="d-none" onchange="handleFileSelect(this)">
+
+        {# Kamera-Button (mobile) #}
+        <button class="btn btn-outline-primary mb-3" onclick="openCamera()">
+          <i class="fas fa-camera me-1"></i>Kamera öffnen
+        </button>
+        <input type="file" id="cameraInput" accept="image/*" capture="environment"
+               class="d-none" onchange="handleFileSelect(this)">
+
+        {# Vorschau #}
+        <div id="previewWrapper" class="d-none text-center">
+          <img id="previewImg" src="" alt="Vorschau"
+               class="img-fluid rounded shadow-sm" style="max-height:350px">
+          <button class="btn btn-sm btn-outline-danger mt-2" onclick="clearReceipt()">
+            <i class="fas fa-times me-1"></i>Entfernen
+          </button>
+        </div>
+
+        {# Scan-Button #}
+        <button id="scanBtn" class="btn btn-primary mt-auto d-none"
+                onclick="scanReceipt()">
+          <i class="fas fa-search me-1"></i>Beleg analysieren
+        </button>
+      </div>
+    </div>
+  </div>
+
+  {# ── Rechte Spalte: Erkannte Daten ──────────────────────────────────────── #}
+  <div class="col-lg-7">
+    <div class="card shadow-sm">
+      <div class="card-header py-3 d-flex justify-content-between">
+        <h6 class="mb-0"><i class="fas fa-magic me-2"></i>Erkannte Daten</h6>
+        <span id="ocrStatus" class="badge bg-secondary">Wartet auf Scan</span>
+      </div>
+      <div class="card-body">
+
+        {# Lade-Overlay #}
+        <div id="scanSpinner" class="text-center py-4 d-none">
+          <div class="spinner-border text-primary mb-2"></div>
+          <p class="text-muted">Analysiere Beleg…</p>
+        </div>
+
+        {# Formular #}
+        <form id="receiptForm" class="d-none" onsubmit="saveReceipt(event)">
+          <div class="row g-3">
+            <div class="col-sm-8">
+              <label class="form-label fw-semibold">Beschreibung / Händler</label>
+              <input type="text" id="rcptDesc" class="form-control" required
+                     placeholder="z.B. Rewe Marktplatz">
+            </div>
+            <div class="col-sm-4">
+              <label class="form-label fw-semibold">Betrag (€)</label>
+              <input type="number" id="rcptAmount" class="form-control"
+                     step="0.01" min="0.01" required placeholder="0,00">
+            </div>
+            <div class="col-sm-4">
+              <label class="form-label fw-semibold">Tag</label>
+              <input type="number" id="rcptDay" class="form-control"
+                     min="1" max="31" required>
+            </div>
+            <div class="col-sm-4">
+              <label class="form-label fw-semibold">Monat</label>
+              <input type="number" id="rcptMonth" class="form-control"
+                     min="1" max="12" required>
+            </div>
+            <div class="col-sm-4">
+              <label class="form-label fw-semibold">Jahr</label>
+              <input type="number" id="rcptYear" class="form-control"
+                     min="2000" max="2099" required>
+            </div>
+            <div class="col-sm-6">
+              <label class="form-label fw-semibold">Person</label>
+              <select id="rcptPerson" class="form-select">
+                <option value="">– Keine –</option>
+                {% for p in persons %}
+                <option value="{{ p.id }}">{{ p.name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-sm-6">
+              <label class="form-label fw-semibold">Kategorie</label>
+              <select id="rcptCategory" class="form-select">
+                <option value="">– Keine –</option>
+                {% for c in categories %}
+                <option value="{{ c.id }}">{{ c.name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+
+          {# OCR-Rohtext (aufklappbar) #}
+          <div class="mt-3">
+            <details>
+              <summary class="text-muted small" style="cursor:pointer">
+                <i class="fas fa-file-alt me-1"></i>OCR-Rohtext anzeigen
+              </summary>
+              <pre id="rawOcrText"
+                   class="mt-2 p-2 bg-dark text-light rounded small"
+                   style="max-height:150px;overflow-y:auto;font-size:.75rem"></pre>
+            </details>
+          </div>
+
+          <div class="d-flex gap-2 mt-4">
+            <button type="submit" class="btn btn-success flex-grow-1">
+              <i class="fas fa-check me-1"></i>Als Ausgabe speichern
+            </button>
+            <button type="button" class="btn btn-outline-secondary"
+                    onclick="clearReceipt()">
+              <i class="fas fa-redo me-1"></i>Neu
+            </button>
+          </div>
+        </form>
+
+        {# Leerzustand #}
+        <div id="emptyState" class="text-center text-muted py-4">
+          <i class="fas fa-receipt fa-3x mb-3 opacity-25"></i>
+          <p>Lade ein Belegbild hoch und klicke auf<br>
+            <strong>„Beleg analysieren"</strong></p>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+{# Erfolgs-Toast nach Speichern #}
+<div id="saveSuccessHint" class="d-none alert alert-success mt-3">
+  <i class="fas fa-check-circle me-2"></i>
+  Ausgabe gespeichert!
+  <a id="goToMonthLink" href="#" class="alert-link ms-2">Zum Monat</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const _NOW_Y = {{ now.year }};
+const _NOW_M = {{ now.month }};
+let _selectedFile = null;
+
+function openCamera() {
+  document.getElementById('cameraInput').click();
+}
+
+function handleDrop(e) {
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if (file) loadFile(file);
+}
+
+function handleFileSelect(input) {
+  if (input.files[0]) loadFile(input.files[0]);
+}
+
+function loadFile(file) {
+  _selectedFile = file;
+  const reader  = new FileReader();
+  reader.onload = ev => {
+    document.getElementById('previewImg').src = ev.target.result;
+    document.getElementById('previewWrapper').classList.remove('d-none');
+    document.getElementById('dropZone').classList.add('d-none');
+    document.getElementById('scanBtn').classList.remove('d-none');
+    document.getElementById('emptyState').classList.remove('d-none');
+    document.getElementById('receiptForm').classList.add('d-none');
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearReceipt() {
+  _selectedFile = null;
+  document.getElementById('previewImg').src = '';
+  document.getElementById('previewWrapper').classList.add('d-none');
+  document.getElementById('dropZone').classList.remove('d-none');
+  document.getElementById('scanBtn').classList.add('d-none');
+  document.getElementById('receiptForm').classList.add('d-none');
+  document.getElementById('emptyState').classList.remove('d-none');
+  document.getElementById('receiptFileInput').value = '';
+  document.getElementById('cameraInput').value = '';
+  document.getElementById('ocrStatus').textContent = 'Wartet auf Scan';
+  document.getElementById('ocrStatus').className = 'badge bg-secondary';
+  document.getElementById('saveSuccessHint').classList.add('d-none');
+}
+
+async function scanReceipt() {
+  if (!_selectedFile) return;
+  const spinner = document.getElementById('scanSpinner');
+  const form    = document.getElementById('receiptForm');
+  const empty   = document.getElementById('emptyState');
+  const status  = document.getElementById('ocrStatus');
+  const btn     = document.getElementById('scanBtn');
+
+  spinner.classList.remove('d-none');
+  form.classList.add('d-none');
+  empty.classList.add('d-none');
+  btn.disabled = true;
+  status.textContent = 'Analysiere…';
+  status.className   = 'badge bg-warning text-dark';
+
+  const fd = new FormData();
+  fd.append('file', _selectedFile);
+
+  try {
+    const r = await fetch('/api/receipt/parse', { method: 'POST', body: fd });
+    const d = await r.json();
+
+    spinner.classList.add('d-none');
+
+    if (!d.success) {
+      status.textContent = 'Fehler';
+      status.className   = 'badge bg-danger';
+      showToast('OCR-Fehler: ' + (d.error || 'Unbekannt'), 'danger');
+      empty.classList.remove('d-none');
+      btn.disabled = false;
+      return;
+    }
+
+    // Formular befuellen
+    document.getElementById('rcptDesc').value   = d.merchant || '';
+    document.getElementById('rcptAmount').value = d.amount   || '';
+    document.getElementById('rawOcrText').textContent = d.raw_text || '';
+
+    if (d.date) {
+      const parts = d.date.split('-');
+      document.getElementById('rcptYear').value  = parts[0];
+      document.getElementById('rcptMonth').value = parseInt(parts[1]);
+      document.getElementById('rcptDay').value   = parseInt(parts[2]);
+    } else {
+      const now = new Date();
+      document.getElementById('rcptYear').value  = now.getFullYear();
+      document.getElementById('rcptMonth').value = now.getMonth() + 1;
+      document.getElementById('rcptDay').value   = now.getDate();
+    }
+
+    form.classList.remove('d-none');
+    status.textContent = d.amount ? 'Erkannt ✓' : 'Prüfen erforderlich';
+    status.className   = d.amount ? 'badge bg-success' : 'badge bg-warning text-dark';
+
+    // Fokus auf Beschreibung
+    document.getElementById('rcptDesc').focus();
+
+  } catch (err) {
+    spinner.classList.add('d-none');
+    empty.classList.remove('d-none');
+    status.textContent = 'Fehler';
+    status.className   = 'badge bg-danger';
+    showToast('Fehler: ' + err.message, 'danger');
+    btn.disabled = false;
+  }
+}
+
+async function saveReceipt(e) {
+  e.preventDefault();
+  const year  = parseInt(document.getElementById('rcptYear').value);
+  const month = parseInt(document.getElementById('rcptMonth').value);
+
+  const payload = {
+    year,
+    month,
+    day:         parseInt(document.getElementById('rcptDay').value),
+    description: document.getElementById('rcptDesc').value.trim(),
+    amount:      parseFloat(document.getElementById('rcptAmount').value),
+    person_id:   document.getElementById('rcptPerson').value   || null,
+    category_id: document.getElementById('rcptCategory').value || null,
+  };
+
+  try {
+    const r = await fetch('/api/receipt/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload)
+    });
+    const d = await r.json();
+    if (d.success) {
+      const hint = document.getElementById('saveSuccessHint');
+      const link = document.getElementById('goToMonthLink');
+      link.href = `/month/${year}/${month}`;
+      hint.classList.remove('d-none');
+      showToast('Ausgabe gespeichert!', 'success');
+      document.getElementById('receiptForm').classList.add('d-none');
+      document.getElementById('scanBtn').disabled = false;
+    } else {
+      showToast('Fehler: ' + (d.error || 'Unbekannt'), 'danger');
+    }
+  } catch (err) {
+    showToast('Fehler: ' + err.message, 'danger');
+  }
+}
+</script>
+{% endblock %}

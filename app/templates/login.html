@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row justify-content-center mt-5">
+    <div class="col-md-6 col-lg-4 mt-5">
+
+        <div class="text-center mb-4">
+            <h1 class="display-1 text-primary mb-2"><i class="bi bi-cash-coin"></i></h1>
+            <h2 class="fw-bold">{{ t('nav.brand') }}</h2>
+            <p class="text-muted">{{ t('login.subtitle') }}</p>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="card shadow-sm">
+            <div class="card-body p-4">
+                <form method="POST" action="{{ url_for('main.login') }}">
+                    <div class="mb-3">
+                        <label for="username" class="form-label">{{ t('login.username') }}</label>
+                        <div class="input-group">
+                            <span class="input-group-text bg-light"><i class="fas fa-user text-muted"></i></span>
+                            <input type="text" class="form-control" id="username" name="username" required autofocus autocomplete="username">
+                        </div>
+                    </div>
+                    <div class="mb-4">
+                        <label for="password" class="form-label">{{ t('login.password') }}</label>
+                        <div class="input-group">
+                            <span class="input-group-text bg-light"><i class="fas fa-lock text-muted"></i></span>
+                            <input type="password" class="form-control" id="password" name="password" required autocomplete="current-password">
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100 fw-bold py-2"><i class="fas fa-sign-in-alt me-2"></i> {{ t('login.submit') }}</button>
+                </form>
+            </div>
+        </div>
+
+    </div>
+</div>
+{% endblock %}

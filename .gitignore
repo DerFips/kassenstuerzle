@@ -1,0 +1,28 @@
+# ── Geheimnisse und Nutzdaten ─────────────────────────────────────────────────
+# .env enthält DB_ENCRYPTION_KEY und darf niemals eingecheckt werden.
+.env
+.env.*
+!.env.example
+
+# Datenverzeichnisse: echte Datenbank, Backups, Belege, Secret-Key, VAPID-Key
+data/
+data_/
+*.db
+*.db-wal
+*.db-shm
+*.db.unencrypted.bak
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-dev/
+venv/
+
+# ── Werkzeuge ─────────────────────────────────────────────────────────────────
+.pytest_cache/
+.superpowers/
+
+# ── Betriebssystem ────────────────────────────────────────────────────────────
+.DS_Store
