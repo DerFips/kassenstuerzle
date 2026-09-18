@@ -2535,15 +2535,41 @@ def create_backup(label: str = "") -> Path:
     bak.close()
     src.close()
     # Sicherungskopien vor der Profil-Migration ('pre-profiles') und vor einem
-    # Restore ('pre-restore') sind von der Rotation ausgenommen: bricht die
-    # Migration wiederholt ab (z.B. ein fehlerhaftes ALTER), legt jeder
-    # Neustart des Workers eine neue 'pre-profiles'-Sicherung an - ohne diese
-    # Ausnahme wuerden 30 Neustarts jede vorher vorhandene Sicherung verdraengen.
-    existing = sorted(p for p in backup_dir.glob("kassenstuerzle_*.db")
-                      if 'pre-profiles' not in p.name and 'pre-restore' not in p.name)
-    for old in existing[:-30]:
-        old.unlink(missing_ok=True)
+    # Restore ('pre-restore') rotieren getrennt von den gewoehnlichen: bricht
+    # die Migration wiederholt ab (z.B. ein fehlerhaftes ALTER), legt jeder
+    # Neustart des Workers eine neue 'pre-profiles'-Sicherung an - in einem
+    # gemeinsamen Topf wuerden 30 Neustarts jede vorher vorhandene Sicherung
+    # verdraengen. Ein eigener, kleiner Topf schuetzt sie davor, ohne dass sie
+    # unbegrenzt wachsen koennen: das Label kommt aus einer Benutzereingabe
+    # (api_backup_create laesst Bindestriche stehen), ein reiner Ausschluss von
+    # der Rotation waere also beliebig oft ausloesbar.
+    _rotiere(backup_dir, schutzkopie=True,  limit=_MAX_SCHUTZ_BACKUPS)
+    _rotiere(backup_dir, schutzkopie=False, limit=_MAX_BACKUPS)
     return dest
+
+
+_MAX_BACKUPS = 30
+_MAX_SCHUTZ_BACKUPS = 5
+_SCHUTZ_LABELS = ('pre-profiles', 'pre-restore')
+
+
+def _ist_schutzkopie(name: str) -> bool:
+    """Sicherung, die vor einem riskanten Schritt automatisch angelegt wurde."""
+    return any(name.endswith(f'_{label}.db') for label in _SCHUTZ_LABELS)
+
+
+def _rotiere(backup_dir: Path, schutzkopie: bool, limit: int) -> None:
+    """Behaelt die juengsten `limit` Sicherungen der jeweiligen Art.
+
+    Sortiert nach Aenderungszeit, nicht nach Dateiname: der Zeitstempel im
+    Namen ist minutengenau, mehrere Sicherungen derselben Minute liessen sich
+    ueber den Namen nicht in eine verlaessliche Reihenfolge bringen.
+    """
+    vorhanden = [p for p in backup_dir.glob("kassenstuerzle_*.db")
+                 if _ist_schutzkopie(p.name) == schutzkopie]
+    vorhanden.sort(key=lambda p: (p.stat().st_mtime, p.name))
+    for alt in vorhanden[:-limit]:
+        alt.unlink(missing_ok=True)
 
 @main_bp.route('/api/backup/create', methods=['POST'])
 @admin_required
