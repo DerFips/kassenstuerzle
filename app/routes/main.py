@@ -936,63 +936,134 @@ def save_expenses():
 @main_bp.route('/api/persons/save', methods=['POST'])
 @login_required
 def save_persons():
-    data = request.json; conn = get_db()
-    existing = {r['id'] for r in conn.execute('SELECT id FROM persons')}
-    incoming = {int(p['id']) for p in data if p.get('id')}   # <-- int() hinzugefügt
-    for did in existing - incoming: conn.execute('DELETE FROM persons WHERE id=?', (did,))
-    for p in data:
+    import re as _re
+    d = request.get_json(silent=True)
+    stale = _require_v2(d)
+    if stale:
+        return stale
+    conn = get_db()
+    id_map = {}
+    conflicts = []
+
+    for raw in (d.get('deleted_ids') or []):
+        try:
+            did = int(raw)
+        except (TypeError, ValueError):
+            continue
+        conn.execute('DELETE FROM persons WHERE id=?', (did,))
+
+    for p in (d.get('rows') or []):
         n = (p.get('name') or '').strip()
+        if not n:
+            continue
         wd_raw = (p.get('wallet_start_date') or '').strip()
-        import re as _re
-        wd = wd_raw if wd_raw and _re.match(r'^\d{4}-\d{2}$', wd_raw) else None
-        wa = float(p.get('wallet_start_amount') or 0)
-        if not n: continue
-        if p.get('id'):
-            conn.execute('UPDATE persons SET name=?, wallet_start_date=?, wallet_start_amount=? WHERE id=?',
-                (n, wd, wa, int(p['id'])))   # <-- int() auch hier zur Sicherheit
+        wd = wd_raw if _re.match(r'^\d{4}-\d{2}$', wd_raw) else None
+        try:
+            wa = float(p.get('wallet_start_amount') or 0)
+        except (TypeError, ValueError):
+            wa = 0.0
+        try:
+            rid = int(p['id']) if p.get('id') else None
+        except (TypeError, ValueError):
+            rid = None
+
+        # Namen sind UNIQUE. Kollisionen werden gemeldet statt verschluckt,
+        # die übrigen Zeilen desselben Requests trotzdem gespeichert.
+        if rid is not None:
+            try:
+                conn.execute(
+                    'UPDATE persons SET name=?, wallet_start_date=?, wallet_start_amount=? WHERE id=?',
+                    (n, wd, wa, rid))
+            except Exception:
+                conflicts.append(n)
         else:
-            try: conn.execute('INSERT INTO persons (name, wallet_start_date, wallet_start_amount) VALUES (?,?,?)', (n, wd, wa))
-            except: pass
+            try:
+                cur = conn.execute(
+                    'INSERT INTO persons (name, wallet_start_date, wallet_start_amount) VALUES (?,?,?)',
+                    (n, wd, wa))
+                ck = p.get('client_key')
+                if ck:
+                    id_map[str(ck)] = cur.lastrowid
+            except Exception:
+                conflicts.append(n)
+
+    activity_version = _bump_activity(conn, 'settings')
     conn.commit()
     result = [dict(r) for r in conn.execute('SELECT * FROM persons ORDER BY name')]
-    conn.close(); return jsonify({'success': True, 'persons': result})
+    conn.close()
+    return jsonify({'success': True, 'persons': result, 'id_map': id_map,
+                    'activity_version': activity_version, 'conflicts': conflicts})
 
 @main_bp.route('/api/categories/save', methods=['POST'])
 @login_required
 def save_categories():
-    data = request.json; conn = get_db()
-    existing = {r['id'] for r in conn.execute('SELECT id FROM categories')}
-    incoming = {int(c['id']) for c in data if c.get('id')}
-    for did in existing - incoming: conn.execute('DELETE FROM categories WHERE id=?', (did,))
-    for c in data:
-        n = (c.get('name') or '').strip(); col = c.get('color','#6c757d')
+    d = request.get_json(silent=True)
+    stale = _require_v2(d)
+    if stale:
+        return stale
+    conn = get_db()
+    id_map = {}
+    conflicts = []
+
+    for raw in (d.get('deleted_ids') or []):
+        try:
+            did = int(raw)
+        except (TypeError, ValueError):
+            continue
+        conn.execute('DELETE FROM categories WHERE id=?', (did,))
+
+    for c in (d.get('rows') or []):
+        n = (c.get('name') or '').strip()
+        if not n:
+            continue
+        col = c.get('color', '#6c757d')
         sp = 1 if c.get('is_split') else 0
-        if not n: continue
-        cid = None
-        if c.get('id'):
-            cid = int(c['id'])
-            conn.execute('UPDATE categories SET name=?, color=?, is_split=? WHERE id=?', (n, col, sp, cid))
+        try:
+            cid = int(c['id']) if c.get('id') else None
+        except (TypeError, ValueError):
+            cid = None
+
+        # Namen sind UNIQUE. Kollisionen werden gemeldet statt verschluckt.
+        if cid is not None:
+            try:
+                conn.execute('UPDATE categories SET name=?, color=?, is_split=? WHERE id=?',
+                             (n, col, sp, cid))
+            except Exception:
+                conflicts.append(n)
+                cid = None   # Splits dieser Zeile nicht anfassen
         else:
             try:
-                cur = conn.execute('INSERT INTO categories (name, color, is_split) VALUES (?,?,?)', (n, col, sp))
+                cur = conn.execute(
+                    'INSERT INTO categories (name, color, is_split) VALUES (?,?,?)', (n, col, sp))
                 cid = cur.lastrowid
+                ck = c.get('client_key')
+                if ck:
+                    id_map[str(ck)] = cid
             except Exception:
+                conflicts.append(n)
                 cid = None
+
         if cid is not None:
-            # Aufteilungsverhältnis komplett neu setzen (einfaches Replace-All wie
-            # bei den anderen Save-Endpunkten dieser App)
+            # Aufteilungsverhältnis dieser einen Kategorie neu setzen. Bewusst
+            # weiterhin Replace-All, aber auf die Kategorie begrenzt.
             conn.execute('DELETE FROM category_splits WHERE category_id=?', (cid,))
             for pid_str, share in (c.get('splits') or {}).items():
                 try:
-                    pid = int(pid_str); share_v = float(share)
+                    pid = int(pid_str)
+                    share_v = float(share)
                 except (TypeError, ValueError):
                     continue
                 if share_v > 0:
-                    conn.execute('INSERT INTO category_splits (category_id, person_id, share) VALUES (?,?,?)',
-                                 (cid, pid, share_v))
+                    conn.execute(
+                        'INSERT INTO category_splits (category_id, person_id, share) VALUES (?,?,?)',
+                        (cid, pid, share_v))
+
+    activity_version = _bump_activity(conn, 'settings')
     conn.commit()
     result = [dict(r) for r in conn.execute('SELECT * FROM categories ORDER BY name')]
-    conn.close(); return jsonify({'success': True, 'categories': result})
+    conn.close()
+    return jsonify({'success': True, 'categories': result, 'id_map': id_map,
+                    'activity_version': activity_version, 'conflicts': conflicts})
 
 
 

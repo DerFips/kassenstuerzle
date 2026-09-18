@@ -33,10 +33,18 @@ def test_restore_removes_stale_wal_sidecars(app, auth_client, csrf, tmp_path, mo
 
     monkeypatch.setattr(m.os, 'remove', tracking_remove)
 
-    # Gueltige SQLite-Datei als Upload erzeugen
+    # Gueltige SQLite-Datei als Upload erzeugen. Schema entspricht bewusst dem
+    # echten `persons`-Schema (inkl. UNIQUE): der Restore ersetzt die komplette
+    # DB-Datei (main.py:2085, shutil.copy), init_db() in `finally` unten repariert
+    # fehlende Tabellen/Spalten nur additiv (CREATE TABLE IF NOT EXISTS / ALTER
+    # TABLE ADD COLUMN) und kann eine fehlende UNIQUE-Constraint nicht nachtragen.
+    # Ein unrealistisch minimales Test-Backup wuerde also `persons.name` fuer den
+    # Rest der Testsession dauerhaft nicht mehr UNIQUE machen.
     src = tmp_path / 'backup.db'
     con = m.sqlite3.connect(str(src))
-    con.execute('CREATE TABLE persons (id INTEGER PRIMARY KEY, name TEXT)')
+    con.execute('CREATE TABLE persons (id INTEGER PRIMARY KEY AUTOINCREMENT,'
+                ' name TEXT NOT NULL UNIQUE,'
+                ' wallet_start_date TEXT DEFAULT NULL, wallet_start_amount REAL DEFAULT 0)')
     con.commit()
     con.close()
 

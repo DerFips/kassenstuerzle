@@ -187,6 +187,7 @@ TRANSLATIONS = {
 
         # ── Einstellungen (settings.html) ────────────────────────────────
         'settings.title': 'Einstellungen',
+        'settings.name_conflict': 'Name bereits vergeben, nicht gespeichert: {names}',
         'settings.persons': 'Personen',
         'settings.add_person': 'Person hinzufügen',
         'settings.save_persons': 'Personen speichern',
@@ -529,6 +530,7 @@ TRANSLATIONS = {
 
         # ── Settings (settings.html) ──────────────────────────────────────
         'settings.title': 'Settings',
+        'settings.name_conflict': 'Name already taken, not saved: {names}',
         'settings.persons': 'Persons',
         'settings.add_person': 'Add person',
         'settings.save_persons': 'Save persons',
