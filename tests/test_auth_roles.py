@@ -125,3 +125,51 @@ def test_check_password_hash_wird_auch_fuer_deaktivierten_account_aufgerufen(cli
         'check_password_hash muss auch beim aktiven Account mit falschem '
         'Passwort aufgerufen werden'
     )
+
+
+def test_erzwungener_wechsel_leitet_um(auth_client, db):
+    db.execute("UPDATE users SET must_change_password=1 WHERE username='admin'")
+    db.commit()
+    res = auth_client.get('/overview')
+    assert res.status_code == 302
+    assert '/password/aendern' in res.headers['Location']
+    db.execute("UPDATE users SET must_change_password=0 WHERE username='admin'")
+    db.commit()
+
+
+def test_wechselseite_selbst_ist_erreichbar(auth_client, db):
+    db.execute("UPDATE users SET must_change_password=1 WHERE username='admin'")
+    db.commit()
+    assert auth_client.get('/password/aendern').status_code == 200
+    db.execute("UPDATE users SET must_change_password=0 WHERE username='admin'")
+    db.commit()
+
+
+def test_wechsel_setzt_flag_zurueck(auth_client, csrf, db):
+    db.execute("UPDATE users SET must_change_password=1 WHERE username='admin'")
+    db.commit()
+    res = auth_client.post('/password/aendern',
+                           data={'new_password': 'neues-passwort-123',
+                                 'new_password2': 'neues-passwort-123',
+                                 'csrf_token': csrf})
+    assert res.status_code == 302
+    row = db.execute("SELECT must_change_password FROM users WHERE username='admin'").fetchone()
+    assert row['must_change_password'] == 0
+    # Fuer die uebrigen Tests das urspruengliche Passwort wiederherstellen
+    from werkzeug.security import generate_password_hash
+    db.execute("UPDATE users SET password_hash=? WHERE username='admin'",
+               (generate_password_hash('test-password-123'),))
+    db.commit()
+
+
+def test_zu_kurzes_passwort_wird_abgelehnt(auth_client, csrf, db):
+    db.execute("UPDATE users SET must_change_password=1 WHERE username='admin'")
+    db.commit()
+    res = auth_client.post('/password/aendern',
+                           data={'new_password': 'kurz', 'new_password2': 'kurz',
+                                 'csrf_token': csrf})
+    assert res.status_code == 200
+    assert db.execute("SELECT must_change_password FROM users WHERE username='admin'"
+                      ).fetchone()['must_change_password'] == 1
+    db.execute("UPDATE users SET must_change_password=0 WHERE username='admin'")
+    db.commit()

@@ -946,6 +946,34 @@ def change_password():
 
     return jsonify({'success': True})
 
+@main_bp.route('/password/aendern', methods=['GET', 'POST'])
+@login_required
+def force_password_change():
+    """Eigenstaendige Seite fuer den erzwungenen Wechsel eines Initialpassworts.
+    login_required leitet hierher um, solange must_change_password gesetzt ist."""
+    if request.method == 'GET':
+        return render_template('force_password_change.html')
+
+    neu  = request.form.get('new_password') or ''
+    neu2 = request.form.get('new_password2') or ''
+    if neu != neu2:
+        flash(t('settings.pw_mismatch'), 'danger')
+        return render_template('force_password_change.html')
+    if len(neu) < 8:
+        flash(t('srv.new_password_too_short'), 'danger')
+        return render_template('force_password_change.html')
+
+    conn = get_db()
+    conn.execute('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?',
+                 (generate_password_hash(neu), session['user_id']))
+    _bump_session_epoch(conn, session['user_id'])
+    conn.commit()
+    session['session_epoch'] = conn.execute(
+        'SELECT session_epoch FROM users WHERE id=?',
+        (session['user_id'],)).fetchone()['session_epoch']
+    flash(t('settings.pw_changed'), 'success')
+    return redirect(url_for('main.index'))
+
 @main_bp.route('/')
 @login_required
 def index():
