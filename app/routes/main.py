@@ -1190,23 +1190,58 @@ def export_years():
 @main_bp.route('/api/recurring/save', methods=['POST'])
 @login_required
 def save_recurring():
-    data = request.json; conn = get_db()
-    conn.execute('DELETE FROM recurring_expenses')
-    for r in data:
-        try: amt = float(r.get('amount') or 0)
-        except: amt = 0
+    d = request.get_json(silent=True)
+    stale = _require_v2(d)
+    if stale:
+        return stale
+    conn = get_db()
+    id_map = {}
+
+    for raw in (d.get('deleted_ids') or []):
+        try:
+            did = int(raw)
+        except (TypeError, ValueError):
+            continue
+        conn.execute('DELETE FROM recurring_expenses WHERE id=?', (did,))
+
+    for r in (d.get('rows') or []):
+        try:
+            amt = float(r.get('amount') or 0)
+        except (TypeError, ValueError):
+            amt = 0
         desc = (r.get('description') or '').strip()
-        if not desc and amt == 0: continue
+        if not desc and amt == 0:
+            continue
         pid  = int(r['person_id'])   if r.get('person_id')   else None
         cid  = int(r['category_id']) if r.get('category_id') else None
-        freq = r.get('frequency','monthly')
-        sm   = int(r.get('start_month',1)) if freq != 'monthly' else 1
-        conn.execute('INSERT INTO recurring_expenses (day,description,person_id,category_id,amount,frequency,start_month,active) VALUES (?,?,?,?,?,?,?,1)',
-                     (int(r.get('day') or 1), desc, pid, cid, amt, freq, sm))
+        freq = r.get('frequency', 'monthly')
+        sm   = int(r.get('start_month', 1)) if freq != 'monthly' else 1
+        day  = int(r.get('day') or 1)
+        try:
+            rid = int(r['id']) if r.get('id') else None
+        except (TypeError, ValueError):
+            rid = None
+
+        if rid is not None:
+            conn.execute(
+                'UPDATE recurring_expenses SET day=?, description=?, person_id=?, category_id=?,'
+                ' amount=?, frequency=?, start_month=? WHERE id=?',
+                (day, desc, pid, cid, amt, freq, sm, rid))
+        else:
+            cur = conn.execute(
+                'INSERT INTO recurring_expenses (day,description,person_id,category_id,amount,'
+                'frequency,start_month,active) VALUES (?,?,?,?,?,?,?,1)',
+                (day, desc, pid, cid, amt, freq, sm))
+            ck = r.get('client_key')
+            if ck:
+                id_map[str(ck)] = cur.lastrowid
+
+    activity_version = _bump_activity(conn, 'settings')
     conn.commit()
     result = [dict(r) for r in conn.execute('SELECT * FROM recurring_expenses ORDER BY id')]
     conn.close()
-    return jsonify({'success': True, 'recurring': result})
+    return jsonify({'success': True, 'recurring': result,
+                    'id_map': id_map, 'activity_version': activity_version})
 
 @main_bp.route('/api/recurring/for-month/<int:year>/<int:month>')
 @login_required

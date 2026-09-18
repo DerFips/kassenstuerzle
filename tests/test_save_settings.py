@@ -134,3 +134,54 @@ def test_duplicate_category_name_is_reported(auth_client, csrf, db):
     body = _save_cats(auth_client, csrf, rows=[{'client_key': 'b', 'name': 'Miete'}]).get_json()
     assert body['conflicts'] == ['Miete']
     assert db.execute('SELECT COUNT(*) c FROM categories').fetchone()['c'] == 1
+
+
+def _save_recur(client, csrf, **payload):
+    body = {'v': 2, 'rows': [], 'deleted_ids': []}
+    body.update(payload)
+    return client.post('/api/recurring/save', json=body, headers={'X-CSRF-Token': csrf})
+
+
+def test_recurring_legacy_array_rejected(auth_client, csrf):
+    res = auth_client.post('/api/recurring/save', json=[{'description': 'Netflix'}],
+                           headers={'X-CSRF-Token': csrf})
+    assert res.status_code == 409
+
+
+def test_recurring_added_by_other_user_survives(auth_client, csrf, db):
+    netflix = _save_recur(auth_client, csrf, rows=[
+        {'client_key': 'a', 'day': 1, 'description': 'Netflix', 'amount': 17.99}]).get_json()['id_map']['a']
+    _save_recur(auth_client, csrf, rows=[
+        {'client_key': 'b', 'day': 5, 'description': 'Spotify', 'amount': 9.99}])
+
+    # Veralteter Stand mit nur Netflix darf Spotify nicht loeschen
+    _save_recur(auth_client, csrf, rows=[
+        {'id': netflix, 'day': 1, 'description': 'Netflix', 'amount': 17.99}])
+
+    descs = {r['description'] for r in db.execute('SELECT description FROM recurring_expenses').fetchall()}
+    assert descs == {'Netflix', 'Spotify'}
+
+
+def test_recurring_update_and_explicit_delete(auth_client, csrf, db):
+    rid = _save_recur(auth_client, csrf, rows=[
+        {'client_key': 'a', 'day': 1, 'description': 'Netflix', 'amount': 17.99}]).get_json()['id_map']['a']
+
+    _save_recur(auth_client, csrf, rows=[
+        {'id': rid, 'day': 3, 'description': 'Netflix Premium', 'amount': 19.99,
+         'frequency': 'yearly', 'start_month': 4}])
+    row = db.execute('SELECT * FROM recurring_expenses WHERE id=?', (rid,)).fetchone()
+    assert row['description'] == 'Netflix Premium'
+    assert row['day'] == 3
+    assert row['frequency'] == 'yearly'
+    assert row['start_month'] == 4
+
+    _save_recur(auth_client, csrf, deleted_ids=[rid])
+    assert db.execute('SELECT COUNT(*) c FROM recurring_expenses').fetchone()['c'] == 0
+
+
+def test_recurring_monthly_forces_start_month_one(auth_client, csrf, db):
+    rid = _save_recur(auth_client, csrf, rows=[
+        {'client_key': 'a', 'day': 1, 'description': 'Miete', 'amount': 750.0,
+         'frequency': 'monthly', 'start_month': 7}]).get_json()['id_map']['a']
+    row = db.execute('SELECT start_month FROM recurring_expenses WHERE id=?', (rid,)).fetchone()
+    assert row['start_month'] == 1
