@@ -129,6 +129,7 @@
   </h2>
   <a href="/month/{{ next_year }}/{{ next_month }}" class="btn btn-outline-secondary btn-sm month-nav-btn"><i class="fas fa-chevron-right"></i></a>
 </div>
+<div id="activityBar" class="mb-3 d-flex flex-wrap gap-2"></div>
 
 <!-- Ausgaben -->
 <div class="card shadow-sm mb-4">
@@ -368,6 +369,11 @@ let isSettled            = {{ 'true' if is_settled else 'false' }};
 let currentSettlement    = {{ settlement | tojson }};
 let currentOvSettlements = {{ ov_settlements | tojson }};
 const INCOME_INIT = {{ income | tojson }};
+const ACTIVITY_SCOPE   = {{ activity_scope | tojson }};
+const ACTIVITY_VERSION = {{ activity_version | tojson }};
+let _pendingExpDeletes = [];
+let _pendingIncDeletes = [];
+let _ckSeq = 0;
 let incTotal  = {{ income_total | default(0) }};
 let expTotal  = {{ expense_total | default(0) }};
 let savingsVal= {{ savings | default(0) }};
@@ -633,8 +639,9 @@ function buildCatOpts(sel) {
 }
 
 /* ── ZEILEN HINZUFÜGEN ────────────────────────────────────── */
-function addRow(day='', desc='', pid='', cid='', amt='', isCash=false, pfpid='', receiptFn='', focusRow=true) {
+function addRow(day='', desc='', pid='', cid='', amt='', isCash=false, pfpid='', receiptFn='', focusRow=true, rowId=null) {
   const tr = document.createElement('tr');
+  if (rowId) tr.dataset.rowId = rowId;
   tr.innerHTML = `
     <td><input type="number" class="form-control form-control-sm text-center" name="day" value="${day ?? ''}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
     <td><input type="text" class="form-control form-control-sm" name="description" value="${(desc ?? '').replace(/"/g,'&quot;')}" placeholder="${t('month.description_placeholder')}"></td>
@@ -649,7 +656,7 @@ function addRow(day='', desc='', pid='', cid='', amt='', isCash=false, pfpid='',
       <input type="hidden" name="receipt_filename" value="">
       <div class="receipt-preview" style="display:none"></div>
     </td>
-    <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('tr').remove(); updateFooter()"><i class="fas fa-times"></i></button></td>`;
+    <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="removeExpenseRow(this)"><i class="fas fa-times"></i></button></td>`;
   document.getElementById('expenseBody').appendChild(tr);
 
   // Betrag korrekt setzen (Formel oder Zahl)
@@ -672,8 +679,9 @@ function addRow(day='', desc='', pid='', cid='', amt='', isCash=false, pfpid='',
   reapplyFilters();
 }
 
-function addIncomeRow(day='', desc='', pid='', cid='', amt='', focusRow=true) {
+function addIncomeRow(day='', desc='', pid='', cid='', amt='', focusRow=true, rowId=null) {
   const tr = document.createElement('tr');
+  if (rowId) tr.dataset.rowId = rowId;
   tr.innerHTML = `
     <td><input type="number" class="form-control form-control-sm text-center" name="inc_day" value="${day ?? ''}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
     <td><input type="text" class="form-control form-control-sm" name="inc_desc" value="${(desc ?? '').replace(/"/g,'&quot;')}" placeholder="${t('month.income_desc_placeholder')}"></td>
@@ -681,7 +689,7 @@ function addIncomeRow(day='', desc='', pid='', cid='', amt='', focusRow=true) {
     <td><select class="form-select form-select-sm" name="inc_cid" onchange="scheduleAutoSaveIncome()">${buildCatOpts(cid)}</select></td>
     <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="" placeholder="${t('month.amount_placeholder')}"
          onfocus="formulaFocus(this)" onblur="formulaBlur(this); updateFooter()" oninput="updateIncomeFooter()" onkeydown="handleAmountTab(event, this)"></td>
-    <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="this.closest('tr').remove(); updateIncomeFooter()"><i class="fas fa-times"></i></button></td>`;
+    <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="removeIncomeRow(this)"><i class="fas fa-times"></i></button></td>`;
   document.getElementById('incomeBody').appendChild(tr);
 
   const amtInput = tr.querySelector('[name=amount]');
@@ -698,6 +706,25 @@ function addIncomeRow(day='', desc='', pid='', cid='', amt='', focusRow=true) {
   updateIncomeFooter();
   if (focusRow) tr.querySelector('[name=inc_day]').focus();
   reapplyFilters();
+}
+
+/* ── ZEILEN ENTFERNEN ─────────────────────────────────────────
+ * Die DB-id muss vor dem Entfernen gemerkt werden, sonst weiss der Server
+ * nicht, dass diese Zeile geloescht werden soll (nicht-destruktives Speichern). */
+function removeExpenseRow(btn) {
+  const tr = btn.closest('tr');
+  if (tr.dataset.rowId) _pendingExpDeletes.push(parseInt(tr.dataset.rowId, 10));
+  tr.remove();
+  updateFooter();
+  scheduleAutoSaveExpense();
+}
+
+function removeIncomeRow(btn) {
+  const tr = btn.closest('tr');
+  if (tr.dataset.rowId) _pendingIncDeletes.push(parseInt(tr.dataset.rowId, 10));
+  tr.remove();
+  updateIncomeFooter();
+  scheduleAutoSaveIncome();
 }
 
 /* ── ZEILEN-STYLING ───────────────────────────────────────── */
@@ -733,9 +760,18 @@ function updateIncomeFooter() {
   document.getElementById('incomeTotalSum').textContent = fmt(total);
 }
 
-/* ── DATEN EINSAMMELN ─────────────────────────────────────── */
+/* ── DATEN EINSAMMELN ─────────────────────────────────────────
+ * Zeilen mit dataset.rowId werden serverseitig aktualisiert, Zeilen ohne
+ * erhalten einen client_key, unter dem der Server die neue id zurueckmeldet. */
+function rowIdentity(r) {
+  if (r.dataset.rowId) return { id: parseInt(r.dataset.rowId, 10) };
+  if (!r.dataset.clientKey) r.dataset.clientKey = 'c' + (++_ckSeq);
+  return { client_key: r.dataset.clientKey };
+}
+
 function collectRows() {
   return Array.from(document.querySelectorAll('#expenseBody tr')).map(r => ({
+    ...rowIdentity(r),
     day: r.querySelector('[name=day]').value,
     description: r.querySelector('[name=description]').value,
     person_id: r.querySelector('[name=person_id]').value,
@@ -746,8 +782,10 @@ function collectRows() {
     receipt_filename: r.querySelector('[name=receipt_filename]')?.value || ''
   }));
 }
+
 function getIncomeRows() {
   return Array.from(document.querySelectorAll('#incomeBody tr')).map(r => ({
+    ...rowIdentity(r),
     day: r.querySelector('[name=inc_day]').value,
     description: r.querySelector('[name=inc_desc]').value,
     person_id: r.querySelector('[name=inc_pid]').value,
@@ -760,6 +798,7 @@ function getIncomeRows() {
 function sortTable() {
   const tbody = document.getElementById('expenseBody');
   const data = Array.from(tbody.querySelectorAll('tr')).map(tr => ({
+    rowId: tr.dataset.rowId || null,
     day: parseInt(tr.querySelector('[name=day]').value) || 0,
     description: tr.querySelector('[name=description]').value,
     person_id: tr.querySelector('[name=person_id]').value,
@@ -771,12 +810,18 @@ function sortTable() {
   }));
   data.sort((a, b) => a.day !== b.day ? a.day - b.day : a.description.localeCompare(b.description, 'de', {sensitivity: 'base'}));
   tbody.innerHTML = '';
-  data.forEach(r => addRow(r.day || '', r.description, r.person_id, r.category_id, r.amount, r.is_cash, r.paid_for_person_id, r.receipt_filename, false));
+  data.forEach(r => addRow(r.day || '', r.description, r.person_id, r.category_id, r.amount, r.is_cash, r.paid_for_person_id, r.receipt_filename, false, r.rowId));
 }
 
 /* ── TABELLE LEEREN ───────────────────────────────────────── */
 function clearTable(bodyId, isExpense) {
-  document.getElementById(bodyId).innerHTML = '';
+  const body = document.getElementById(bodyId);
+  Array.from(body.querySelectorAll('tr')).forEach(tr => {
+    if (!tr.dataset.rowId) return;
+    const id = parseInt(tr.dataset.rowId, 10);
+    if (isExpense) _pendingExpDeletes.push(id); else _pendingIncDeletes.push(id);
+  });
+  body.innerHTML = '';
   if (isExpense) updateFooter(); else updateIncomeFooter();
 }
 
@@ -792,13 +837,23 @@ async function saveExpenses(silent=false) {
   btn.disabled = true;
   btn.innerHTML = silent ? `<i class="fas fa-spinner fa-spin me-1"></i><small>${t('month.auto_saving')}</small>` : `<i class="fas fa-spinner fa-spin me-1"></i>${t('month.saving')}`;
   try {
+    const sentDeletes = _pendingExpDeletes.slice();
     const res = await fetch('/api/expenses/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
-      body: JSON.stringify({ year: YEAR, month: MONTH, expenses: collectRows() })
+      body: JSON.stringify({ v: 2, year: YEAR, month: MONTH,
+                             rows: collectRows(), deleted_ids: sentDeletes })
     });
     const data = await res.json();
     if (data.success) {
+      // Neue ids einstempeln, BEVOR sortiert wird - sonst legt der naechste
+      // Autosave dieselben Zeilen erneut an.
+      Object.entries(data.id_map || {}).forEach(([ck, id]) => {
+        const tr = document.querySelector(`#expenseBody tr[data-client-key="${ck}"]`);
+        if (tr) { tr.dataset.rowId = id; delete tr.dataset.clientKey; }
+      });
+      _pendingExpDeletes = _pendingExpDeletes.filter(id => !sentDeletes.includes(id));
+      if (typeof activityWatchVersion === 'function') activityWatchVersion(data.activity_version);
       _suppressAutoSave = true;
       try {
         if (!silent) sortTable();
@@ -822,13 +877,21 @@ async function saveIncome(silent=false) {
   btn.disabled = true;
   btn.innerHTML = silent ? `<i class="fas fa-spinner fa-spin me-1"></i><small>${t('month.auto_saving')}</small>` : `<i class="fas fa-spinner fa-spin me-1"></i>${t('month.saving')}`;
   try {
+    const sentDeletes = _pendingIncDeletes.slice();
     const res = await fetch('/api/income/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
-      body: JSON.stringify({ year: YEAR, month: MONTH, income: getIncomeRows() })
+      body: JSON.stringify({ v: 2, year: YEAR, month: MONTH,
+                             rows: getIncomeRows(), deleted_ids: sentDeletes })
     });
     const data = await res.json();
     if (data.success) {
+      Object.entries(data.id_map || {}).forEach(([ck, id]) => {
+        const tr = document.querySelector(`#incomeBody tr[data-client-key="${ck}"]`);
+        if (tr) { tr.dataset.rowId = id; delete tr.dataset.clientKey; }
+      });
+      _pendingIncDeletes = _pendingIncDeletes.filter(id => !sentDeletes.includes(id));
+      if (typeof activityWatchVersion === 'function') activityWatchVersion(data.activity_version);
       _suppressAutoSave = true;
       try {
         incTotal = data.income_total ?? incTotal;
@@ -1287,8 +1350,8 @@ function handleAmountTab(e, input) {
 /* ── INITIALISIERUNG ──────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', function () {
   populateFilterSelects();
-  EXISTING.forEach(e => addRow(e.day, e.description, e.person_id, e.category_id, e.amount, !!e.is_cash, e.paid_for_person_id || '', e.receipt_filename || '', false));
-  INCOME_INIT.forEach(i => addIncomeRow(i.day, i.description, i.person_id, i.category_id, i.amount, false));
+  EXISTING.forEach(e => addRow(e.day, e.description, e.person_id, e.category_id, e.amount, !!e.is_cash, e.paid_for_person_id || '', e.receipt_filename || '', false, e.id));
+  INCOME_INIT.forEach(i => addIncomeRow(i.day, i.description, i.person_id, i.category_id, i.amount, false, i.id));
   updateFooter();
   updateIncomeFooter();
 
@@ -1296,6 +1359,14 @@ document.addEventListener('DOMContentLoaded', function () {
   const incBody = document.getElementById('incomeBody');
   if (expBody) expBody.addEventListener('focusout', e => { const fr = e.target.closest('tr'); const tr2 = e.relatedTarget?.closest('tr'); if (!_suppressAutoSave && fr !== tr2) scheduleAutoSaveExpense(); });
   if (incBody) incBody.addEventListener('focusout', e => { const fr = e.target.closest('tr'); const tr2 = e.relatedTarget?.closest('tr'); if (!_suppressAutoSave && fr !== tr2) scheduleAutoSaveIncome(); });
+
+  initActivityWatch({
+    scope: ACTIVITY_SCOPE,
+    version: ACTIVITY_VERSION,
+    container: 'activityBar'
+    // Absichtlich kein onRemoteChange: kein Auto-Reload waehrend der Eingabe.
+    // Der Nutzer entscheidet ueber den "Neu laden"-Button im Banner.
+  });
 });
 </script>
 {% endblock %}
