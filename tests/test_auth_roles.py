@@ -173,3 +173,49 @@ def test_zu_kurzes_passwort_wird_abgelehnt(auth_client, csrf, db):
                       ).fetchone()['must_change_password'] == 1
     db.execute("UPDATE users SET must_change_password=0 WHERE username='admin'")
     db.commit()
+
+
+def test_zu_kurzes_passwort_zeigt_fehlermeldung(auth_client, csrf, db):
+    """Regression: Flash-Meldungen muessen auf der Wechselseite sichtbar sein.
+
+    Ohne den Flash-Block in force_password_change.html ist ein abgelehnter
+    Versuch ein stilles Neuladen mit keiner erklaerung - ein UX-Fallstrick.
+    Dieser Test verifyifiziert, dass die 'Passwort zu kurz'-Meldung tatsaechlich
+    im HTML auftaucht, nicht nur aufgerufen wird.
+    """
+    from app.translations import TRANSLATIONS
+    expected_msg = TRANSLATIONS['de']['srv.new_password_too_short']
+
+    db.execute("UPDATE users SET must_change_password=1 WHERE username='admin'")
+    db.commit()
+
+    try:
+        # Mit ungueltigem Passwort sollte alert-danger im HTML vorkommen
+        res = auth_client.post('/password/aendern',
+                               data={'new_password': 'kurz', 'new_password2': 'kurz',
+                                     'csrf_token': csrf})
+        assert res.status_code == 200
+        # Marker ist das alert-danger Markup, das nur die Flash-Block erzeugt
+        assert 'alert alert-danger' in res.text, (
+            f"Flash-Meldung nicht gerendert; erwartet: '{expected_msg}'"
+        )
+
+        # Mit gueltigem Passwort sollte kein Fehler-Alert sein
+        res_ok = auth_client.post('/password/aendern',
+                                  data={'new_password': 'valid-passwort-123',
+                                        'new_password2': 'valid-passwort-123',
+                                        'csrf_token': csrf})
+        # Erfolgreiche Aenderung leitet um
+        assert res_ok.status_code == 302
+
+        # Flag sollte zurueck auf 0 sein
+        row = db.execute("SELECT must_change_password FROM users WHERE username='admin'").fetchone()
+        assert row['must_change_password'] == 0
+
+    finally:
+        # Zuruecksetzen auf Ausgangszustand
+        db.execute("UPDATE users SET must_change_password=0 WHERE username='admin'")
+        from werkzeug.security import generate_password_hash
+        db.execute("UPDATE users SET password_hash=? WHERE username='admin'",
+                   (generate_password_hash('test-password-123'),))
+        db.commit()
