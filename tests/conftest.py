@@ -14,6 +14,10 @@ _TMPDIR = tempfile.mkdtemp(prefix='kassenstuerzle-tests-')
 os.environ['DATABASE_PATH'] = os.path.join(_TMPDIR, 'test.db')
 os.environ['ADMIN_PASSWORD'] = 'test-password-123'
 os.environ['DISABLE_SCHEDULER'] = '1'
+# Rate-Limits in der Suite abschalten: viele Tests melden sich nacheinander an
+# und wuerden sonst am 10/min-Limit des Logins scheitern. test_rate_limit.py
+# schaltet sie fuer seine eigene App-Instanz gezielt wieder ein.
+os.environ['DISABLE_RATE_LIMIT'] = '1'
 os.environ.pop('DB_ENCRYPTION_KEY', None)   # Tests laufen unverschlüsselt
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))

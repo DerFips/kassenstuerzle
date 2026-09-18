@@ -94,6 +94,10 @@ def create_app():
         default_limits=[],           # Kein globales Limit; selektiv per Decorator
         storage_uri="memory://",
         strategy="fixed-window",
+        # In der Testsuite abschaltbar: dort melden sich viele Tests nacheinander
+        # an und wuerden sonst reihenweise 429 bekommen. NUR fuer Tests gedacht -
+        # im Betrieb ist die Variable nicht gesetzt und das Limit aktiv.
+        enabled=os.environ.get('DISABLE_RATE_LIMIT') != '1',
     )
     app.extensions['limiter'] = limiter  # Für Zugriff in Blueprints
 
@@ -104,7 +108,12 @@ def create_app():
     for endpoint, limit_str in RATE_LIMITS.items():
         view_fn = app.view_functions.get(endpoint)
         if view_fn:
-            limiter.limit(limit_str)(view_fn)
+            # Das Ergebnis MUSS zurueckgeschrieben werden. limiter.limit() gibt
+            # eine umhuellte Funktion zurueck; wird sie verworfen, zeigt
+            # app.view_functions weiter auf die ungebremste Originalfunktion und
+            # die gesamte Rate-Limit-Schicht ist wirkungslos - nachgewiesen mit
+            # 15 Login-Versuchen ohne einen einzigen 429.
+            app.view_functions[endpoint] = limiter.limit(limit_str)(view_fn)
 
     @app.context_processor
     def inject_now():
