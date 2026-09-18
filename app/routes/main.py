@@ -357,6 +357,8 @@ def _autolink_single_person(conn) -> None:
     if len(users) == 1 and len(persons) == 1 and users[0]['person_id'] is None:
         conn.execute('UPDATE users SET person_id=? WHERE id=?',
                      (persons[0]['id'], users[0]['id']))
+        log.info("Automatische Verknuepfung: Benutzer id=%s <-> Person id=%s",
+                 users[0]['id'], persons[0]['id'])
 
 
 def init_db():
@@ -485,8 +487,15 @@ def init_db():
         'ALTER TABLE users ADD COLUMN last_login TEXT',
         'ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0',
     ]:
-        try: conn.execute(sql)
-        except: pass
+        # Bei verschluesselter Produktions-DB ist dieses Log der einzige Weg
+        # zur Nachvollziehbarkeit, was eine Migration tatsaechlich getan hat.
+        # DEBUG fuer den Normalfall (Spalte existiert schon und wird
+        # uebersprungen), INFO nur wenn tatsaechlich etwas geaendert wurde.
+        try:
+            conn.execute(sql)
+            log.info("Migration angewendet: %s", sql)
+        except Exception as _exc:
+            log.debug("Migration uebersprungen (vermutlich bereits vorhanden): %s (%s)", sql, _exc)
 
     # 1:1-Verknuepfung Benutzer <-> Person; beide Seiten bleiben optional.
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person'
@@ -1084,8 +1093,13 @@ def api_users_update(user_id):
         conn.execute(f"UPDATE users SET {', '.join(felder)} WHERE id=?", werte)
     except sqlite3.IntegrityError:
         return jsonify(success=False, error=t('srv.person_already_linked')), 409
-    # Rollen- und Statuswechsel beenden bestehende Sessions dieses Benutzers.
-    _bump_session_epoch(conn, user_id)
+    if neue_rolle is not None or neu_aktiv is not None:
+        # Nur Rollen- und Statuswechsel beenden bestehende Sitzungen. Eine
+        # reine Personen-Verknuepfung darf das nicht - sonst wuerde ein Admin,
+        # der auf der eigenen Zeile nur die Person auswaehlt, sich selbst
+        # aussperren (der Setup-Wizard macht das fuer einen reinen
+        # Personen-Wechsel in Schritt 1 bewusst genauso nicht).
+        _bump_session_epoch(conn, user_id)
     conn.commit()
     return jsonify(success=True)
 
@@ -1096,6 +1110,13 @@ def api_users_reset_password(user_id):
     conn = get_db()
     if conn.execute('SELECT id FROM users WHERE id=?', (user_id,)).fetchone() is None:
         return jsonify(success=False, error=t('srv.user_not_found')), 404
+    if user_id == session.get('user_id'):
+        # Das neue Passwort wird nur einmalig in einem <div> angezeigt, das
+        # bei der naechsten Navigation verschwindet - beim eigenen Konto
+        # bumped der Reset zudem sofort die eigene Session (session_epoch),
+        # man wird also ausgeloggt, bevor man es notieren kann. Ohne diese
+        # Sperre gaebe es dann kein Break-Glass-Konto mehr.
+        return jsonify(success=False, error=t('srv.cannot_reset_own')), 400
     passwort = _neues_initialpasswort()
     conn.execute('UPDATE users SET password_hash=?, must_change_password=1 WHERE id=?',
                  (generate_password_hash(passwort), user_id))
@@ -2513,7 +2534,13 @@ def create_backup(label: str = "") -> Path:
     src.backup(bak)
     bak.close()
     src.close()
-    existing = sorted(backup_dir.glob("kassenstuerzle_*.db"))
+    # Sicherungskopien vor der Profil-Migration ('pre-profiles') und vor einem
+    # Restore ('pre-restore') sind von der Rotation ausgenommen: bricht die
+    # Migration wiederholt ab (z.B. ein fehlerhaftes ALTER), legt jeder
+    # Neustart des Workers eine neue 'pre-profiles'-Sicherung an - ohne diese
+    # Ausnahme wuerden 30 Neustarts jede vorher vorhandene Sicherung verdraengen.
+    existing = sorted(p for p in backup_dir.glob("kassenstuerzle_*.db")
+                      if 'pre-profiles' not in p.name and 'pre-restore' not in p.name)
     for old in existing[:-30]:
         old.unlink(missing_ok=True)
     return dest

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from app.routes import main as m
 
@@ -138,3 +139,26 @@ def test_restore_einer_vor_phase_b_datenbank_bleibt_benutzbar(app, auth_client, 
         conn.close()
         with app.app_context():
             m.init_db()
+
+
+def test_pre_profiles_backup_uebersteht_rotation(app):
+    """Regression Important 6: eine Absturzschleife waehrend der Migration
+    schreibt bei jedem Neustart eine neue 'pre-profiles'-Sicherung (init_db()
+    prueft nur, ob die Spalte 'role' noch fehlt, und schreibt bei jedem
+    fehlgeschlagenen Neustart erneut). Ohne Ausnahme von der 30er-Rotation
+    wuerden 31 gewoehnliche Sicherungen die Migrations-Sicherung verdraengen -
+    genau die Sicherung, die im Ernstfall die letzte Rettung waere.
+    """
+    backup_dir = Path(os.path.dirname(m.DB_PATH)) / 'backups'
+    # Saubere Ausgangslage fuer eine deterministische Zaehlung.
+    for f in backup_dir.glob('kassenstuerzle_*.db'):
+        f.unlink()
+    try:
+        with app.app_context():
+            schutz = m.create_backup('pre-profiles')
+            for i in range(31):
+                m.create_backup(f'normal{i}')
+        assert schutz.exists(), 'pre-profiles-Sicherung wurde trotz Ausnahme rotiert'
+    finally:
+        for f in backup_dir.glob('kassenstuerzle_*.db'):
+            f.unlink()
