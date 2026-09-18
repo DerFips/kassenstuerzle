@@ -851,7 +851,12 @@ def login():
             "SELECT id, password_hash, is_active, session_epoch FROM users WHERE username = ?",
             (username,)).fetchone()
 
-        if user and user['is_active'] and check_password_hash(user['password_hash'], password):
+        # Reihenfolge ist sicherheitsrelevant: and kurzschliesst, deshalb muss
+        # die Passwortpruefung VOR is_active stehen. Sonst antwortet ein
+        # deaktiviertes Konto ohne den teuren Hash-Vergleich und damit messbar
+        # schneller - ein Zeitkanal, der genau das verraet, was die
+        # unspezifische Fehlermeldung verbergen soll.
+        if user and check_password_hash(user['password_hash'], password) and user['is_active']:
             # Erfolg: Zähler zurücksetzen, Session neu aufbauen
             _login_attempts[ip] = {'count': 0, 'locked_until': 0}
             lang = session.get('lang')  # Sprachwahl übersteht session.clear()
