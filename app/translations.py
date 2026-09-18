@@ -325,6 +325,7 @@ TRANSLATIONS = {
 
         # ── Server-seitige Meldungen (main.py) ────────────────────────────
         'srv.csrf_invalid': 'Ungültiger CSRF-Token',
+        'srv.admin_only': 'Nur Administratoren dürfen das.',
         'srv.rate_limited': 'Zu viele Anfragen. Limit: {limit}',
         'srv.stale_client': 'Diese Seite ist nicht mehr aktuell. Bitte neu laden.',
         'srv.old_password_wrong': 'Altes Passwort ist falsch.',
@@ -670,6 +671,7 @@ TRANSLATIONS = {
 
         # ── Server-side messages (main.py) ────────────────────────────────
         'srv.csrf_invalid': 'Invalid CSRF token',
+        'srv.admin_only': 'Administrators only.',
         'srv.rate_limited': 'Too many requests. Limit: {limit}',
         'srv.stale_client': 'This page is out of date. Please reload.',
         'srv.old_password_wrong': 'The old password is incorrect.',

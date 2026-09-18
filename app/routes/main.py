@@ -225,8 +225,44 @@ def login_required(f):
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in'):
             return redirect(url_for('main.login'))
+        row = get_db().execute(
+            'SELECT id, username, role, is_active, session_epoch, must_change_password, person_id'
+            ' FROM users WHERE id=?', (session.get('user_id'),)).fetchone()
+        # Deaktiviert, geloescht oder die Session wurde serverseitig beendet
+        # (Passwortwechsel, Rollenaenderung, Umbenennung erhoehen session_epoch).
+        if row is None or not row['is_active'] \
+                or row['session_epoch'] != session.get('session_epoch', 0):
+            lang = session.get('lang')
+            session.clear()
+            if lang:
+                session['lang'] = lang
+            return redirect(url_for('main.login'))
+        g.current_user = row
+        if row['must_change_password'] and request.endpoint not in (
+                'main.force_password_change', 'main.logout', 'static'):
+            return redirect(url_for('main.force_password_change'))
         return f(*args, **kwargs)
     return decorated_function
+
+
+def admin_required(f):
+    """Ergaenzt login_required um die Rollenpruefung. Serverseitig, nicht nur im UI."""
+    @wraps(f)
+    @login_required
+    def decorated_function(*args, **kwargs):
+        row = getattr(g, 'current_user', None)
+        if row is None or row['role'] != 'admin':
+            if request.path.startswith('/api/'):
+                return jsonify(success=False, error=t('srv.admin_only')), 403
+            flash(t('srv.admin_only'), 'danger')
+            return redirect(url_for('main.index'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def _bump_session_epoch(conn, user_id: int) -> None:
+    """Beendet alle bestehenden Sessions dieses Benutzers sofort."""
+    conn.execute('UPDATE users SET session_epoch = session_epoch + 1 WHERE id=?', (user_id,))
 
 
 @main_bp.route('/api/activity', methods=['POST'])
@@ -811,9 +847,11 @@ def login():
         password = request.form.get('password', '')
 
         conn = get_db()
-        user = conn.execute("SELECT id, password_hash FROM users WHERE username = ?", (username,)).fetchone()
+        user = conn.execute(
+            "SELECT id, password_hash, is_active, session_epoch FROM users WHERE username = ?",
+            (username,)).fetchone()
 
-        if user and check_password_hash(user['password_hash'], password):
+        if user and user['is_active'] and check_password_hash(user['password_hash'], password):
             # Erfolg: Zähler zurücksetzen, Session neu aufbauen
             _login_attempts[ip] = {'count': 0, 'locked_until': 0}
             lang = session.get('lang')  # Sprachwahl übersteht session.clear()
@@ -824,6 +862,10 @@ def login():
             session['username'] = username
             # CSRF-Token bei Login frisch erstellen
             session['csrf_token'] = _secrets.token_hex(32)
+            session['session_epoch'] = user['session_epoch'] or 0
+            conn.execute("UPDATE users SET last_login=? WHERE id=?",
+                         (datetime.now().isoformat(timespec='seconds'), user['id']))
+            conn.commit()
             if lang:
                 session['lang'] = lang
             return redirect(url_for('main.index'))
@@ -867,7 +909,12 @@ def change_password():
 
     conn.execute("UPDATE users SET password_hash = ? WHERE id = ?",
                  (generate_password_hash(new_pw), session['user_id']))
+    _bump_session_epoch(conn, session['user_id'])
+    conn.execute("UPDATE users SET must_change_password=0 WHERE id=?", (session['user_id'],))
     conn.commit()
+    # Die eigene Session bleibt gueltig - Epoch in der Session nachziehen.
+    session['session_epoch'] = conn.execute(
+        'SELECT session_epoch FROM users WHERE id=?', (session['user_id'],)).fetchone()['session_epoch']
     conn.close()
 
     return jsonify({'success': True})
@@ -2162,7 +2209,7 @@ def create_backup(label: str = "") -> Path:
     return dest
 
 @main_bp.route('/api/backup/create', methods=['POST'])
-@login_required
+@admin_required
 def api_backup_create():
     import re
     label = request.json.get('label', '')[:50]
@@ -2172,7 +2219,7 @@ def api_backup_create():
     return jsonify({"success": True, "filename": dest.name, "size_kb": round(stat.st_size / 1024, 1)})
 
 @main_bp.route('/api/backup/list')
-@login_required
+@admin_required
 def api_backup_list():
     from datetime import datetime
     db_path = DB_PATH
@@ -2189,7 +2236,7 @@ def api_backup_list():
     return jsonify({"backups": backups})
 
 @main_bp.route('/api/backup/download/<filename>')
-@login_required
+@admin_required
 def api_backup_download(filename):
     import re
     from flask import send_file
@@ -2203,7 +2250,7 @@ def api_backup_download(filename):
     return send_file(str(path), as_attachment=True, download_name=filename, mimetype="application/x-sqlite3")
 
 @main_bp.route('/api/backup/restore', methods=['POST'])
-@login_required
+@admin_required
 def api_backup_restore():
     if 'file' not in request.files:
         return jsonify(success=False, error=t('srv.no_file')), 400
@@ -2244,7 +2291,7 @@ def api_backup_restore():
     return jsonify(success=True)
 
 @main_bp.route('/api/backup/delete/<filename>', methods=['DELETE'])
-@login_required
+@admin_required
 def api_backup_delete(filename):
     import re
     if not re.match(r'^kassenstuerzle_.*\.db$', filename):
