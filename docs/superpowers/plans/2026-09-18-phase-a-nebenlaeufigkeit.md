@@ -407,7 +407,7 @@ In `app/routes/main.py`, `init_db()`, direkt nach dem `CREATE TABLE ... push_sub
 
 - [ ] **Step 4: Helfer und Route ergänzen**
 
-In `app/routes/main.py` direkt nach der Funktion `_get_limiter()` einfügen:
+In `app/routes/main.py` die Helfer `_require_v2`, `_bump_activity` und `_month_scope` direkt nach der Funktion `_get_limiter()` einfügen. **Die Route `/api/activity` gehört dagegen hinter die Definition von `login_required`** (`main.py:184`) — der Decorator existiert vorher noch nicht und der Import würde mit `NameError` abbrechen:
 
 ```python
 # ── Nebenläufigkeit: Payload-Version und Änderungszähler ─────────────────────
@@ -496,6 +496,7 @@ In `month_view`, direkt vor dem `return render_template(...)` (nach der `year_ra
 
 ```python
     _scope = _month_scope(year, month)
+    g.pop('db', None)   # conn.close() oben leert den g.db-Cache nicht
     _act_row = get_db().execute('SELECT version FROM activity WHERE scope=?', (_scope,)).fetchone()
     activity_version = _act_row['version'] if _act_row else 0
 ```
@@ -506,7 +507,7 @@ Und im `render_template`-Aufruf ergänzen:
         activity_scope=_scope, activity_version=activity_version,
 ```
 
-Hinweis: An dieser Stelle steht bereits ein `conn.close()` weiter oben, deshalb wird die Verbindung über `get_db()` erneut geholt. `get_db()` cached pro Request in `g.db`; `close_db` räumt am Requestende auf.
+Hinweis: Weiter oben in `month_view` steht bereits ein `conn.close()`. `get_db()` cached die Verbindung aber in `g.db` — ohne das `g.pop` würde die bereits **geschlossene** Verbindung zurückgegeben. `close_db` räumt die neue Verbindung am Requestende auf.
 
 - [ ] **Step 7: Tests ausführen, Erfolg bestätigen**
 
