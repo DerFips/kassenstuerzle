@@ -974,6 +974,133 @@ def force_password_change():
     flash(t('settings.pw_changed'), 'success')
     return redirect(url_for('main.index'))
 
+# ── Benutzerverwaltung (nur Admin) ────────────────────────────────────────────
+def _neues_initialpasswort() -> str:
+    return _secrets.token_urlsafe(9)
+
+
+def _anzahl_aktiver_admins(conn, ausser_id: int | None = None) -> int:
+    if ausser_id is None:
+        return conn.execute(
+            "SELECT COUNT(*) c FROM users WHERE role='admin' AND is_active=1").fetchone()['c']
+    return conn.execute(
+        "SELECT COUNT(*) c FROM users WHERE role='admin' AND is_active=1 AND id<>?",
+        (ausser_id,)).fetchone()['c']
+
+
+@main_bp.route('/api/users')
+@admin_required
+def api_users_list():
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT u.id, u.username, u.role, u.is_active, u.person_id, u.last_login,'
+        ' u.created_at, p.name AS person_name'
+        ' FROM users u LEFT JOIN persons p ON p.id = u.person_id ORDER BY u.id').fetchall()
+    conn.close()
+    return jsonify(success=True, users=[dict(r) for r in rows])
+
+
+@main_bp.route('/api/users', methods=['POST'])
+@admin_required
+def api_users_create():
+    d = request.get_json(silent=True) or {}
+    username = (d.get('username') or '').strip()
+    role = d.get('role') if d.get('role') in ('admin', 'member') else 'member'
+    person_id = int(d['person_id']) if d.get('person_id') else None
+    if not username:
+        return jsonify(success=False, error=t('srv.missing_data')), 400
+
+    passwort = _neues_initialpasswort()
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            'INSERT INTO users (username, password_hash, role, is_active,'
+            ' must_change_password, created_at, person_id, session_epoch)'
+            ' VALUES (?,?,?,1,1,?,?,0)',
+            (username, generate_password_hash(passwort), role,
+             datetime.now().isoformat(timespec='seconds'), person_id))
+    except sqlite3.IntegrityError:
+        # Benutzername oder Personen-Verknuepfung bereits vergeben
+        return jsonify(success=False, error=t('srv.username_taken')), 409
+    conn.commit()
+    # Das Initialpasswort wird genau einmal zurueckgegeben (Entscheidung P1).
+    return jsonify(success=True, id=cur.lastrowid, password=passwort)
+
+
+@main_bp.route('/api/users/<int:user_id>', methods=['POST'])
+@admin_required
+def api_users_update(user_id):
+    d = request.get_json(silent=True) or {}
+    conn = get_db()
+    row = conn.execute('SELECT id, role, is_active FROM users WHERE id=?', (user_id,)).fetchone()
+    if row is None:
+        return jsonify(success=False, error=t('srv.user_not_found')), 404
+
+    eigene = user_id == session.get('user_id')
+    neue_rolle = d.get('role') if d.get('role') in ('admin', 'member') else None
+    neu_aktiv = None if d.get('is_active') is None else (1 if d.get('is_active') else 0)
+
+    if eigene and (neue_rolle is not None or neu_aktiv == 0):
+        return jsonify(success=False, error=t('srv.cannot_change_own_role')), 400
+
+    # Der letzte aktive Admin darf weder degradiert noch deaktiviert werden.
+    entzieht_admin = (neue_rolle == 'member' and row['role'] == 'admin') or \
+                     (neu_aktiv == 0 and row['role'] == 'admin')
+    if entzieht_admin and _anzahl_aktiver_admins(conn, ausser_id=user_id) == 0:
+        return jsonify(success=False, error=t('srv.last_admin')), 400
+
+    felder, werte = [], []
+    if neue_rolle is not None:
+        felder.append('role=?'); werte.append(neue_rolle)
+    if neu_aktiv is not None:
+        felder.append('is_active=?'); werte.append(neu_aktiv)
+    if 'person_id' in d:
+        felder.append('person_id=?')
+        werte.append(int(d['person_id']) if d['person_id'] else None)
+    if not felder:
+        return jsonify(success=True)
+
+    werte.append(user_id)
+    try:
+        conn.execute(f"UPDATE users SET {', '.join(felder)} WHERE id=?", werte)
+    except sqlite3.IntegrityError:
+        return jsonify(success=False, error=t('srv.person_already_linked')), 409
+    # Rollen- und Statuswechsel beenden bestehende Sessions dieses Benutzers.
+    _bump_session_epoch(conn, user_id)
+    conn.commit()
+    return jsonify(success=True)
+
+
+@main_bp.route('/api/users/<int:user_id>/reset-password', methods=['POST'])
+@admin_required
+def api_users_reset_password(user_id):
+    conn = get_db()
+    if conn.execute('SELECT id FROM users WHERE id=?', (user_id,)).fetchone() is None:
+        return jsonify(success=False, error=t('srv.user_not_found')), 404
+    passwort = _neues_initialpasswort()
+    conn.execute('UPDATE users SET password_hash=?, must_change_password=1 WHERE id=?',
+                 (generate_password_hash(passwort), user_id))
+    _bump_session_epoch(conn, user_id)
+    conn.commit()
+    return jsonify(success=True, password=passwort)
+
+
+@main_bp.route('/api/users/<int:user_id>', methods=['DELETE'])
+@admin_required
+def api_users_delete(user_id):
+    conn = get_db()
+    row = conn.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
+    if row is None:
+        return jsonify(success=False, error=t('srv.user_not_found')), 404
+    if user_id == session.get('user_id'):
+        return jsonify(success=False, error=t('srv.cannot_delete_self')), 400
+    if row['role'] == 'admin' and _anzahl_aktiver_admins(conn, ausser_id=user_id) == 0:
+        return jsonify(success=False, error=t('srv.last_admin')), 400
+    conn.execute('DELETE FROM users WHERE id=?', (user_id,))
+    conn.commit()
+    return jsonify(success=True)
+
+
 @main_bp.route('/')
 @login_required
 def index():
@@ -1126,10 +1253,19 @@ def save_persons():
     id_map = {}
     conflicts = []
 
+    blocked = []
     for raw in (d.get('deleted_ids') or []):
         try:
             did = int(raw)
         except (TypeError, ValueError):
+            continue
+        # Eine Person, an der ein aktiver Login haengt, darf nicht verschwinden -
+        # sonst zeigt das Konto ins Leere.
+        verknuepft = conn.execute(
+            'SELECT u.username, p.name FROM users u JOIN persons p ON p.id = u.person_id'
+            ' WHERE u.person_id=? AND u.is_active=1', (did,)).fetchone()
+        if verknuepft:
+            blocked.append(verknuepft['name'])
             continue
         conn.execute('DELETE FROM persons WHERE id=?', (did,))
 
@@ -1179,7 +1315,8 @@ def save_persons():
     result = [dict(r) for r in conn.execute('SELECT * FROM persons ORDER BY name')]
     conn.close()
     return jsonify({'success': True, 'persons': result, 'id_map': id_map,
-                    'activity_version': activity_version, 'conflicts': conflicts})
+                    'activity_version': activity_version, 'conflicts': conflicts,
+                    'blocked': blocked})
 
 @main_bp.route('/api/categories/save', methods=['POST'])
 @login_required

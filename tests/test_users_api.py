@@ -1,0 +1,125 @@
+def _anlegen(client, csrf, **felder):
+    body = {'username': 'bob', 'role': 'member', 'person_id': None}
+    body.update(felder)
+    return client.post('/api/users', json=body, headers={'X-CSRF-Token': csrf})
+
+
+def test_liste_nur_fuer_admin(auth_client, db):
+    db.execute("UPDATE users SET role='member' WHERE username='admin'")
+    db.commit()
+    assert auth_client.get('/api/users').status_code == 403
+    db.execute("UPDATE users SET role='admin' WHERE username='admin'")
+    db.commit()
+    assert auth_client.get('/api/users').status_code == 200
+
+
+def test_anlegen_liefert_initialpasswort_und_erzwingt_wechsel(auth_client, csrf, db):
+    try:
+        res = _anlegen(auth_client, csrf)
+        assert res.status_code == 200
+        body = res.get_json()
+        assert body['success'] is True
+        assert len(body['password']) >= 10
+        row = db.execute("SELECT must_change_password, role FROM users WHERE username='bob'").fetchone()
+        assert row['must_change_password'] == 1
+        assert row['role'] == 'member'
+    finally:
+        db.execute("DELETE FROM users WHERE username='bob'")
+        db.commit()
+
+
+def test_doppelter_benutzername_wird_abgelehnt(auth_client, csrf, db):
+    try:
+        _anlegen(auth_client, csrf, username='carla')
+        res = _anlegen(auth_client, csrf, username='carla')
+        assert res.status_code == 409
+        assert res.get_json()['success'] is False
+    finally:
+        db.execute("DELETE FROM users WHERE username='carla'")
+        db.commit()
+
+
+def test_eigene_rolle_nicht_aenderbar(auth_client, csrf, db):
+    eigene = db.execute("SELECT id FROM users WHERE username='admin'").fetchone()['id']
+    res = auth_client.post(f'/api/users/{eigene}', json={'role': 'member'},
+                           headers={'X-CSRF-Token': csrf})
+    assert res.status_code == 400
+    assert db.execute('SELECT role FROM users WHERE id=?', (eigene,)).fetchone()['role'] == 'admin'
+
+
+def test_letzter_admin_nicht_deaktivierbar(auth_client, csrf, db):
+    """Ein zweiter Admin wird angelegt, degradiert - dann darf der letzte
+    verbliebene Admin sich nicht selbst aus dem System nehmen."""
+    try:
+        res = _anlegen(auth_client, csrf, username='zweitadmin', role='admin')
+        neue_id = res.get_json()['id']
+        auth_client.post(f'/api/users/{neue_id}', json={'is_active': 0},
+                         headers={'X-CSRF-Token': csrf})
+        eigene = db.execute("SELECT id FROM users WHERE username='admin'").fetchone()['id']
+        res = auth_client.post(f'/api/users/{eigene}', json={'is_active': 0},
+                               headers={'X-CSRF-Token': csrf})
+        assert res.status_code == 400
+        assert db.execute('SELECT is_active FROM users WHERE id=?', (eigene,)).fetchone()['is_active'] == 1
+    finally:
+        db.execute("DELETE FROM users WHERE username='zweitadmin'")
+        db.commit()
+
+
+def test_deaktivierung_beendet_sessions(auth_client, csrf, db):
+    try:
+        res = _anlegen(auth_client, csrf, username='dora')
+        neue_id = res.get_json()['id']
+        vorher = db.execute('SELECT session_epoch FROM users WHERE id=?', (neue_id,)).fetchone()['session_epoch']
+        auth_client.post(f'/api/users/{neue_id}', json={'is_active': 0}, headers={'X-CSRF-Token': csrf})
+        nachher = db.execute('SELECT session_epoch FROM users WHERE id=?', (neue_id,)).fetchone()['session_epoch']
+        assert nachher > vorher
+    finally:
+        db.execute("DELETE FROM users WHERE username='dora'")
+        db.commit()
+
+
+def test_passwort_zuruecksetzen(auth_client, csrf, db):
+    try:
+        res = _anlegen(auth_client, csrf, username='erik')
+        neue_id = res.get_json()['id']
+        res = auth_client.post(f'/api/users/{neue_id}/reset-password', headers={'X-CSRF-Token': csrf})
+        assert res.status_code == 200
+        assert len(res.get_json()['password']) >= 10
+        assert db.execute('SELECT must_change_password FROM users WHERE id=?',
+                          (neue_id,)).fetchone()['must_change_password'] == 1
+    finally:
+        db.execute("DELETE FROM users WHERE username='erik'")
+        db.commit()
+
+
+def test_loeschen_und_letzter_admin_geschuetzt(auth_client, csrf, db):
+    try:
+        res = _anlegen(auth_client, csrf, username='frida')
+        neue_id = res.get_json()['id']
+        assert auth_client.delete(f'/api/users/{neue_id}', headers={'X-CSRF-Token': csrf}).status_code == 200
+        assert db.execute('SELECT COUNT(*) c FROM users WHERE id=?', (neue_id,)).fetchone()['c'] == 0
+
+        eigene = db.execute("SELECT id FROM users WHERE username='admin'").fetchone()['id']
+        assert auth_client.delete(f'/api/users/{eigene}', headers={'X-CSRF-Token': csrf}).status_code == 400
+    finally:
+        db.execute("DELETE FROM users WHERE username='frida'")
+        db.commit()
+
+
+def test_verknuepfte_person_nicht_loeschbar(auth_client, csrf, db):
+    cur = db.execute("INSERT INTO persons (name) VALUES ('Greta')")
+    pid = cur.lastrowid
+    db.commit()
+    try:
+        _anlegen(auth_client, csrf, username='greta', person_id=pid)
+
+        res = auth_client.post('/api/persons/save',
+                               json={'v': 2, 'rows': [], 'deleted_ids': [pid]},
+                               headers={'X-CSRF-Token': csrf})
+        assert res.status_code == 200
+        assert res.get_json()['blocked'] == ['Greta']
+        assert db.execute('SELECT COUNT(*) c FROM persons WHERE id=?', (pid,)).fetchone()['c'] == 1
+    finally:
+        db.execute("DELETE FROM users WHERE username='greta'")
+        db.execute('DELETE FROM persons WHERE id=?', (pid,))
+        db.commit()
