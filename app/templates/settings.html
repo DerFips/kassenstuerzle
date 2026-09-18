@@ -429,6 +429,9 @@ async function createBackup() {
             document.getElementById('backupLabel').value = '';
             loadBackups();
             showToast(t('settings.backup_created'), 'success');
+        } else {
+            // z.B. reserviertes Label (Befund M2) - sonst bliebe der Klick stumm.
+            alert(data.error || t('settings.backup_create_error'));
         }
     } catch (e) {
         alert(t('settings.backup_create_error'));

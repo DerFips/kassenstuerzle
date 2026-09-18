@@ -491,7 +491,7 @@ def init_db():
     _user_cols = {r[1] for r in conn.execute('PRAGMA table_info(users)')}
     if 'role' not in _user_cols:
         try:
-            _dest = create_backup('pre-profiles')
+            _dest = create_backup('pre-profiles', schutz=True)
             log.info("Sicherungskopie vor der Profil-Migration: %s", _dest.name)
         except Exception:
             log.exception("Sicherungskopie vor der Profil-Migration fehlgeschlagen "
@@ -2565,9 +2565,23 @@ from pathlib import Path
 # (der oben ggf. an sqlcipher3 gebunden ist) überschreiben und die
 # Verschlüsselung für die gesamte App stillschweigend deaktivieren.
 
-def create_backup(label: str = "") -> Path:
+def create_backup(label: str = "", schutz: bool = False) -> Path:
+    """Legt eine Sicherung der Hauptdatenbank an.
+
+    `schutz=True` kennzeichnet eine Schutzkopie und ist ausschliesslich den
+    beiden internen Aufrufern vorbehalten (vor der Profil-Migration und vor
+    einem Restore). Befund M2: frueher entschied allein der DATEINAME darueber,
+    ob eine Sicherung als Schutzkopie zaehlt - und das Label kommt bei
+    /api/backup/create aus einer Benutzereingabe. Fuenf Sicherungen mit dem
+    Label 'pre-restore' verdraengten so genau die Schutzkopien, die nach einem
+    misslungenen Restore der einzige Rueckweg sind. Die Einstufung haengt jetzt
+    am Aufrufer; ein Benutzer-Label kann keinen Schutzkopie-Namen mehr
+    erzeugen.
+    """
     from datetime import datetime
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    if not schutz:
+        label = _entschaerfe_label(label)
     suffix = f"_{label}" if label else ""
     db_path = DB_PATH
     backup_dir = Path(os.path.dirname(db_path)) / 'backups'
@@ -2594,9 +2608,9 @@ def create_backup(label: str = "") -> Path:
     # Neustart des Workers eine neue 'pre-profiles'-Sicherung an - in einem
     # gemeinsamen Topf wuerden 30 Neustarts jede vorher vorhandene Sicherung
     # verdraengen. Ein eigener, kleiner Topf schuetzt sie davor, ohne dass sie
-    # unbegrenzt wachsen koennen: das Label kommt aus einer Benutzereingabe
-    # (api_backup_create laesst Bindestriche stehen), ein reiner Ausschluss von
-    # der Rotation waere also beliebig oft ausloesbar.
+    # unbegrenzt wachsen koennen: auch die Schutzkopien entstehen automatisch
+    # (jeder Restore legt eine an), ein reiner Ausschluss von der Rotation
+    # waere also beliebig oft ausloesbar.
     _rotiere(backup_dir, schutzkopie=True,  limit=_MAX_SCHUTZ_BACKUPS)
     _rotiere(backup_dir, schutzkopie=False, limit=_MAX_BACKUPS)
     return dest
@@ -2608,8 +2622,31 @@ _SCHUTZ_LABELS = ('pre-profiles', 'pre-restore')
 
 
 def _ist_schutzkopie(name: str) -> bool:
-    """Sicherung, die vor einem riskanten Schritt automatisch angelegt wurde."""
+    """Stuft eine BEREITS vorhandene Datei anhand ihres Namens ein.
+
+    Nur fuer die Rotation gedacht: Sicherungen, die vor diesem Fix auf der
+    Platte des Nutzers gelandet sind, tragen ihre Einstufung ausschliesslich
+    im Namen und muessen weiter geschuetzt bleiben. Welche Art eine NEUE
+    Sicherung ist, entscheidet dagegen der Aufrufer (create_backup(schutz=...)).
+    """
     return any(name.endswith(f'_{label}.db') for label in _SCHUTZ_LABELS)
+
+
+def _entschaerfe_label(label: str) -> str:
+    """Nimmt einem Benutzer-Label die Wirkung eines Schutzkopie-Namens (M2).
+
+    Zweite Verteidigungslinie hinter der Ablehnung in api_backup_create: auch
+    ein kuenftiger Aufrufer, der ein ungeprueftes Label durchreicht, darf keine
+    Datei erzeugen, die _ist_schutzkopie() spaeter als Schutzkopie zaehlt.
+    """
+    if _ist_schutzkopie(f'_{label}.db'):
+        return label.replace('-', '_')
+    return label
+
+
+def _label_ist_reserviert(label: str) -> bool:
+    """Wuerde dieses Label einen reservierten Schutzkopie-Namen ergeben?"""
+    return _ist_schutzkopie(f'_{label}.db')
 
 
 def _rotiere(backup_dir: Path, schutzkopie: bool, limit: int) -> None:
@@ -2631,6 +2668,12 @@ def api_backup_create():
     import re
     label = request.json.get('label', '')[:50]
     label = re.sub(r'[^a-zA-Z0-9_-]', '_', label)
+    # Befund M2: 'pre-restore'/'pre-profiles' sind den automatischen
+    # Schutzkopien vorbehalten. Klare Rueckmeldung statt stiller Umbenennung,
+    # damit der Admin die Sicherung unter dem Namen wiederfindet, den er
+    # vergeben hat.
+    if _label_ist_reserviert(label):
+        return jsonify(success=False, error=t('srv.reserved_backup_label', label=label)), 400
     dest = create_backup(label)
     stat = dest.stat()
     return jsonify({"success": True, "filename": dest.name, "size_kb": round(stat.st_size / 1024, 1)})
@@ -2666,6 +2709,150 @@ def api_backup_download(filename):
         return t('srv.file_not_found'), 404
     return send_file(str(path), as_attachment=True, download_name=filename, mimetype="application/x-sqlite3")
 
+
+class _SicherungAbgelehnt(Exception):
+    """Eine hochgeladene Sicherung hat die Pruefung nicht bestanden.
+
+    Traegt den Uebersetzungs-Key des konkreten Ablehnungsgrundes, damit ein
+    Admin eine Sicherung mit falschem Schluessel von einer fremden Datei
+    unterscheiden kann (Befund K2).
+    """
+
+    def __init__(self, schluessel: str, **platzhalter):
+        super().__init__(schluessel)
+        self.schluessel = schluessel
+        self.platzhalter = platzhalter
+
+
+# Tabellen, die JEDE echte Kassenstuerzle-Sicherung enthaelt, mit den Spalten,
+# ohne die sie nutzlos waere. Bewusst nur der alte Kern: Tabellen aus spaeteren
+# Phasen (push_subscriptions, activity, presence, app_meta) legt init_db() nach
+# dem Tausch additiv nach, sie hier zu fordern wuerde aeltere, voellig
+# legitime Sicherungen abweisen.
+_PFLICHT_TABELLEN = {
+    'users':              {'id', 'username', 'password_hash'},
+    'persons':            {'id', 'name'},
+    'categories':         {'id', 'name'},
+    'expenses':           {'id', 'year', 'month', 'day', 'amount'},
+    'income':             {'id', 'year', 'month', 'day', 'amount'},
+    'month_status':       {'year', 'month', 'settled'},
+    'recurring_expenses': {'id', 'description', 'amount'},
+    'category_splits':    {'category_id', 'person_id', 'share'},
+}
+
+
+def _oeffne_sicherung(pfad: str):
+    """Oeffnet eine hochgeladene Sicherung zur Pruefung.
+
+    Befund I4: frueher wurde erst mit `PRAGMA key` geoeffnet und bei JEDEM
+    Fehler auf eine schluessellose Verbindung zurueckgefallen - eine
+    Klartext-Datenbank (z.B. das eigene *.unencrypted.bak-Artefakt) wurde so
+    akzeptiert und ueber die verschluesselte Datenbank kopiert. Danach
+    scheiterte jedes spaetere `PRAGMA key` mit "file is not a database", auf
+    JEDEM Request inklusive /login und diesem Endpunkt selbst - die Instanz war
+    nur noch mit Shell-Zugriff auf das Volume zu retten. Bei gesetztem
+    Schluessel gibt es diesen Rueckfall deshalb nicht mehr.
+    """
+    con = None
+    try:
+        con = _open_db(pfad)
+        con.execute('SELECT count(*) FROM sqlite_master').fetchone()
+        return con
+    except Exception:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+        if _SQLCIPHER_AVAILABLE and _DB_KEY:
+            raise _SicherungAbgelehnt('srv.restore_wrong_key')
+    # Ohne konfigurierten Schluessel laeuft die Instanz unverschluesselt -
+    # hier ist eine schluessellose Verbindung der Normalfall, kein Rueckfall.
+    try:
+        con = sqlite3.connect(pfad)
+        con.execute('SELECT count(*) FROM sqlite_master').fetchone()
+        return con
+    except Exception:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+        raise _SicherungAbgelehnt('srv.invalid_db_upload')
+
+
+def _pruefe_sicherung(pfad: str, admin_username: str) -> None:
+    """Prueft eine hochgeladene Sicherung, bevor sie die Datenbank ersetzt.
+
+    Befund K2: geprueft wurde frueher nur die Endung '.db' und ob die Datei
+    ueberhaupt als SQLite aufgeht. Eine 3 kB grosse, handgebaute Datei mit
+    einer eigenen users-Zeile (role='admin') wurde uebernommen - danach war das
+    echte Adminkonto weg. Eine 0-Byte-Datei ist eine gueltige leere
+    SQLite-Datenbank und loeschte den kompletten Bestand.
+
+    Wirft _SicherungAbgelehnt mit dem jeweiligen Grund; kehrt nur zurueck, wenn
+    die Datei plausibel aus dieser Anwendung stammt.
+    """
+    if os.path.getsize(pfad) == 0:
+        raise _SicherungAbgelehnt('srv.restore_empty')
+
+    con = _oeffne_sicherung(pfad)
+    try:
+        objekte = con.execute(
+            'SELECT type, name FROM sqlite_master').fetchall()
+        if not objekte:
+            # Eine leere Datei ist eine gueltige leere SQLite-Datenbank -
+            # sie wuerde den gesamten Bestand loeschen.
+            raise _SicherungAbgelehnt('srv.restore_empty')
+
+        # Diese Anwendung legt weder Views noch Trigger an. Ein Trigger in der
+        # hochgeladenen Datei wuerde bei jedem spaeteren INSERT/UPDATE eigenen
+        # SQL-Code im Kontext der App ausfuehren.
+        auffaellig = sorted(name for typ, name in objekte
+                            if typ in ('view', 'trigger'))
+        if auffaellig:
+            raise _SicherungAbgelehnt('srv.restore_objects',
+                                      objekte=', '.join(auffaellig[:5]))
+
+        tabellen = {name for typ, name in objekte if typ == 'table'}
+        fehlend = []
+        for tabelle, pflichtspalten in _PFLICHT_TABELLEN.items():
+            if tabelle not in tabellen:
+                fehlend.append(tabelle)
+                continue
+            spalten = {r[1] for r in con.execute(f'PRAGMA table_info("{tabelle}")')}
+            luecken = pflichtspalten - spalten
+            if luecken:
+                fehlend.append(f'{tabelle}.{"/".join(sorted(luecken))}')
+        if fehlend:
+            raise _SicherungAbgelehnt('srv.restore_missing_tables',
+                                      fehlend=', '.join(fehlend))
+
+        ergebnis = con.execute('PRAGMA integrity_check').fetchone()
+        if not ergebnis or str(ergebnis[0]).lower() != 'ok':
+            raise _SicherungAbgelehnt('srv.restore_integrity')
+
+        anzahl = con.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+        if not anzahl:
+            raise _SicherungAbgelehnt('srv.restore_no_users')
+
+        # Herkunftsnachweis, soweit ohne Signatur moeglich: der gerade
+        # angemeldete Admin muss in der Datei vorkommen. Eine untergeschobene
+        # Sicherung, die die Instanz einem fremden Konto uebergibt, faellt
+        # damit auf - _ensure_admin() wuerde eine solche Datei sonst sogar noch
+        # zu einem funktionierenden Adminkonto "reparieren".
+        bekannt = con.execute('SELECT 1 FROM users WHERE username = ?',
+                              (admin_username,)).fetchone()
+        if bekannt is None:
+            raise _SicherungAbgelehnt('srv.restore_admin_missing',
+                                      benutzer=admin_username)
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
 @main_bp.route('/api/backup/restore', methods=['POST'])
 @admin_required
 def api_backup_restore():
@@ -2686,22 +2873,25 @@ def api_backup_restore():
     _tf.close()
     tmp = Path(_tf.name)
     f.save(str(tmp))
+    # Vollstaendige Pruefung VOR dem Tausch (K2/I4). Erst wenn die Datei
+    # plausibel aus dieser Instanz stammt, wird die Datenbank angefasst.
+    _angemeldet = getattr(g, 'current_user', None)
+    _admin_name = _angemeldet['username'] if _angemeldet is not None else ''
     try:
-        # Erst verschlüsselt prüfen, dann unverschlüsselt
-        con = _open_db(str(tmp))
-        con.row_factory = sqlite3.Row
-        con.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
-        con.close()
+        _pruefe_sicherung(str(tmp), _admin_name)
+    except _SicherungAbgelehnt as ablehnung:
+        current_app.logger.warning(
+            "Backup-Restore abgelehnt (%s) - Datei '%s' von Benutzer '%s'",
+            ablehnung.schluessel, f.filename, _admin_name)
+        tmp.unlink(missing_ok=True)
+        return jsonify(success=False,
+                       error=t(ablehnung.schluessel, **ablehnung.platzhalter)), 400
     except Exception:
-        try:
-            con = sqlite3.connect(str(tmp))
-            con.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
-            con.close()
-        except Exception as e:
-            current_app.logger.exception("Backup-Restore: hochgeladene Datei ist keine gültige SQLite-DB")
-            tmp.unlink(missing_ok=True)
-            return jsonify(success=False, error=t('srv.invalid_db_upload')), 400
-    create_backup("pre-restore")
+        current_app.logger.exception(
+            "Backup-Restore: hochgeladene Datei konnte nicht geprüft werden")
+        tmp.unlink(missing_ok=True)
+        return jsonify(success=False, error=t('srv.invalid_db_upload')), 400
+    create_backup("pre-restore", schutz=True)
     shutil.copy(str(tmp), db_path)
     # WAL-Sidecars der alten Datenbank entfernen: ein übrig gebliebenes -wal
     # würde Teile der gerade wiederhergestellten DB zurückrollen.

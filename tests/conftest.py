@@ -51,6 +51,108 @@ def csrf(auth_client):
     return auth_client.get('/api/csrf-token').get_json()['csrf_token']
 
 
+# Kernschema einer echten Kassenstuerzle-Datenbank ohne die users-Tabelle
+# (die je nach Test mit oder ohne die Phase-B-Spalten gebaut wird). Bewusst
+# wortgleich zu init_db(): die Restore-Pruefung verlangt genau diese Tabellen
+# und Spalten, ein kuenstlich reduziertes Test-Backup waere kein realistischer
+# Stellvertreter fuer eine echte Sicherung.
+_KERN_SCHEMA = (
+    """CREATE TABLE persons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+        wallet_start_date TEXT DEFAULT NULL, wallet_start_amount REAL DEFAULT 0)""",
+    """CREATE TABLE categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+        color TEXT NOT NULL DEFAULT '#6c757d', is_split INTEGER NOT NULL DEFAULT 0)""",
+    """CREATE TABLE expenses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, year INTEGER NOT NULL,
+        month INTEGER NOT NULL, day INTEGER NOT NULL, description TEXT DEFAULT '',
+        person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL,
+        category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+        amount REAL NOT NULL DEFAULT 0, is_cash INTEGER NOT NULL DEFAULT 0)""",
+    """CREATE TABLE income (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        year INTEGER NOT NULL, month INTEGER NOT NULL,
+        day INTEGER NOT NULL DEFAULT 1, description TEXT DEFAULT '',
+        person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL,
+        amount REAL NOT NULL DEFAULT 0)""",
+    """CREATE TABLE month_status (
+        year INTEGER NOT NULL, month INTEGER NOT NULL,
+        settled INTEGER NOT NULL DEFAULT 0, settled_at TEXT,
+        PRIMARY KEY (year, month))""",
+    """CREATE TABLE recurring_expenses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        day INTEGER NOT NULL DEFAULT 1, description TEXT NOT NULL DEFAULT '',
+        person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL,
+        category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+        amount REAL NOT NULL DEFAULT 0, frequency TEXT NOT NULL DEFAULT 'monthly',
+        start_month INTEGER NOT NULL DEFAULT 1, active INTEGER NOT NULL DEFAULT 1)""",
+    """CREATE TABLE category_splits (
+        category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+        person_id INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+        share REAL NOT NULL DEFAULT 1,
+        PRIMARY KEY (category_id, person_id))""",
+)
+
+_USERS_PHASE_B = """CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
+        person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        is_active INTEGER NOT NULL DEFAULT 1,
+        must_change_password INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT, last_login TEXT,
+        session_epoch INTEGER NOT NULL DEFAULT 0)"""
+
+_USERS_VOR_PHASE_B = """CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL)"""
+
+
+@pytest.fixture()
+def sicherung_bauen(tmp_path):
+    """Baut eine realistische Kassenstuerzle-Sicherung als Datei.
+
+    `benutzer` ist eine Liste (name, passwort[, rolle]); voreingestellt ist der
+    Admin, mit dem die Tests angemeldet sind - eine echte Sicherung DIESER
+    Instanz enthaelt ihn. `phase_b=False` erzeugt eine Sicherung von vor der
+    Profil-Migration (users ohne role/is_active/...), `zusatz_sql` haengt
+    weitere Anweisungen an (z.B. einen Trigger fuer die Missbrauchsfaelle).
+    """
+    import sqlite3 as _sqlite3
+    from werkzeug.security import generate_password_hash
+
+    zaehler = {'n': 0}
+
+    def _bauen(name='sicherung.db', benutzer=(('admin', 'test-password-123', 'admin'),),
+               phase_b=True, zusatz_sql=(), tabellen_weglassen=()):
+        zaehler['n'] += 1
+        pfad = tmp_path / f"{zaehler['n']}_{name}"
+        con = _sqlite3.connect(str(pfad))
+        con.execute(_USERS_PHASE_B if phase_b else _USERS_VOR_PHASE_B)
+        for sql in _KERN_SCHEMA:
+            tabelle = sql.split('CREATE TABLE ', 1)[1].split(' ', 1)[0].strip()
+            if tabelle in tabellen_weglassen:
+                continue
+            con.execute(sql)
+        for eintrag in benutzer:
+            benutzername, passwort = eintrag[0], eintrag[1]
+            rolle = eintrag[2] if len(eintrag) > 2 else 'member'
+            if phase_b:
+                con.execute('INSERT INTO users (username, password_hash, role)'
+                            ' VALUES (?,?,?)',
+                            (benutzername, generate_password_hash(passwort), rolle))
+            else:
+                con.execute('INSERT INTO users (username, password_hash) VALUES (?,?)',
+                            (benutzername, generate_password_hash(passwort)))
+        for sql in zusatz_sql:
+            con.execute(sql)
+        con.commit()
+        con.close()
+        return pfad
+
+    return _bauen
+
+
 @pytest.fixture()
 def db(app):
     """Direkte DB-Verbindung; raeumt nach jedem Test alle Nutzdaten weg."""

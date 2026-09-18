@@ -390,6 +390,23 @@ TRANSLATIONS = {
         'srv.save_transaction_error': 'Fehler beim Speichern einer Transaktion',
         'srv.only_db_allowed': 'Nur .db-Dateien erlaubt',
         'srv.invalid_db_upload': 'Die hochgeladene Datei ist keine gültige Datenbank',
+        # ── Prüfung einer hochgeladenen Sicherung (Befunde K2/I4) ─────────
+        'srv.restore_wrong_key': 'Die Sicherung ist unverschlüsselt oder mit einem anderen '
+                                 'Schlüssel verschlüsselt. Sie wurde abgelehnt, weil sie diese '
+                                 'Instanz dauerhaft unbrauchbar machen würde.',
+        'srv.restore_empty': 'Die Sicherung enthält keine Daten (leere Datenbank) und würde '
+                             'den gesamten Bestand löschen.',
+        'srv.restore_objects': 'Die Sicherung enthält unerwartete Views oder Trigger ({objekte}). '
+                               'Kassenstürzle legt so etwas nie an.',
+        'srv.restore_missing_tables': 'Die Sicherung stammt nicht aus Kassenstürzle – es fehlen: '
+                                      '{fehlend}',
+        'srv.restore_integrity': 'Die Sicherung ist beschädigt (Integritätsprüfung fehlgeschlagen).',
+        'srv.restore_no_users': 'Die Sicherung enthält kein einziges Benutzerkonto.',
+        'srv.restore_admin_missing': 'In der Sicherung fehlt das angemeldete Konto „{benutzer}". '
+                                     'Eine fremde Sicherung einzuspielen würde diese Instanz an '
+                                     'unbekannte Konten übergeben.',
+        'srv.reserved_backup_label': 'Das Label „{label}" ist für automatische Schutzkopien '
+                                     'reserviert. Bitte ein anderes wählen.',
         'srv.ocr_unreadable': 'Beleg konnte nicht gelesen werden.',
         'srv.ocr_unavailable': 'OCR ist auf diesem Server nicht verfügbar (Tesseract fehlt).',
         'srv.ocr_no_text': 'Kein Text erkannt. Bitte ein schärferes/helleres Foto versuchen.',
@@ -777,6 +794,23 @@ TRANSLATIONS = {
         'srv.save_transaction_error': 'Error saving a transaction',
         'srv.only_db_allowed': 'Only .db files are allowed',
         'srv.invalid_db_upload': 'The uploaded file is not a valid database',
+        # ── Validation of an uploaded backup (findings K2/I4) ─────────────
+        'srv.restore_wrong_key': 'The backup is unencrypted or encrypted with a different key. '
+                                 'It was rejected because it would permanently break this '
+                                 'instance.',
+        'srv.restore_empty': 'The backup contains no data (empty database) and would wipe '
+                             'everything.',
+        'srv.restore_objects': 'The backup contains unexpected views or triggers ({objekte}). '
+                               'Kassenstürzle never creates those.',
+        'srv.restore_missing_tables': 'The backup does not come from Kassenstürzle – missing: '
+                                      '{fehlend}',
+        'srv.restore_integrity': 'The backup is corrupted (integrity check failed).',
+        'srv.restore_no_users': 'The backup does not contain a single user account.',
+        'srv.restore_admin_missing': 'The backup does not contain the account you are signed in '
+                                     'as ("{benutzer}"). Restoring a foreign backup would hand '
+                                     'this instance over to unknown accounts.',
+        'srv.reserved_backup_label': 'The label "{label}" is reserved for automatic protective '
+                                     'copies. Please choose a different one.',
         'srv.ocr_unreadable': 'Receipt could not be read.',
         'srv.ocr_unavailable': 'OCR is not available on this server (Tesseract is missing).',
         'srv.ocr_no_text': 'No text recognized. Please try a sharper/brighter photo.',

@@ -11,7 +11,8 @@ def test_connection_uses_wal_and_busy_timeout(db):
     assert timeout == 5000
 
 
-def test_restore_removes_stale_wal_sidecars(app, auth_client, csrf, tmp_path, monkeypatch):
+def test_restore_removes_stale_wal_sidecars(app, auth_client, csrf, sicherung_bauen,
+                                            monkeypatch):
     """Nach dem Restore duerfen keine -wal/-shm der alten DB uebrig bleiben.
 
     Die blosse Existenzpruefung waere KEIN Regressionswaechter: SQLite verwirft
@@ -34,20 +35,15 @@ def test_restore_removes_stale_wal_sidecars(app, auth_client, csrf, tmp_path, mo
 
     monkeypatch.setattr(m.os, 'remove', tracking_remove)
 
-    # Gueltige SQLite-Datei als Upload erzeugen. Schema entspricht bewusst dem
-    # echten `persons`-Schema (inkl. UNIQUE): der Restore ersetzt die komplette
-    # DB-Datei (main.py:2085, shutil.copy), init_db() in `finally` unten repariert
-    # fehlende Tabellen/Spalten nur additiv (CREATE TABLE IF NOT EXISTS / ALTER
-    # TABLE ADD COLUMN) und kann eine fehlende UNIQUE-Constraint nicht nachtragen.
-    # Ein unrealistisch minimales Test-Backup wuerde also `persons.name` fuer den
-    # Rest der Testsession dauerhaft nicht mehr UNIQUE machen.
-    src = tmp_path / 'backup.db'
-    con = m.sqlite3.connect(str(src))
-    con.execute('CREATE TABLE persons (id INTEGER PRIMARY KEY AUTOINCREMENT,'
-                ' name TEXT NOT NULL UNIQUE,'
-                ' wallet_start_date TEXT DEFAULT NULL, wallet_start_amount REAL DEFAULT 0)')
-    con.commit()
-    con.close()
+    # Gueltige Sicherung als Upload erzeugen. Das Schema entspricht bewusst dem
+    # echten (inkl. UNIQUE): der Restore ersetzt die komplette DB-Datei
+    # (shutil.copy), init_db() in `finally` unten repariert fehlende
+    # Tabellen/Spalten nur additiv (CREATE TABLE IF NOT EXISTS / ALTER TABLE ADD
+    # COLUMN) und kann eine fehlende UNIQUE-Constraint nicht nachtragen. Ein
+    # unrealistisch minimales Test-Backup wuerde also `persons.name` fuer den
+    # Rest der Testsession dauerhaft nicht mehr UNIQUE machen - und wird seit
+    # der Herkunftspruefung (K2) ohnehin zu Recht abgelehnt.
+    src = sicherung_bauen('backup.db')
 
     try:
         with open(src, 'rb') as fh:
@@ -69,7 +65,8 @@ def test_restore_removes_stale_wal_sidecars(app, auth_client, csrf, tmp_path, mo
             m.init_db()
 
 
-def test_restore_einer_vor_phase_b_datenbank_bleibt_benutzbar(app, auth_client, csrf, tmp_path):
+def test_restore_einer_vor_phase_b_datenbank_bleibt_benutzbar(app, auth_client, csrf,
+                                                              sicherung_bauen):
     """Regression Blocker 1+2: Wiederherstellung einer Sicherung von VOR der
     Profil-Migration (nur id/username/password_hash) darf die App nicht
     unbrauchbar machen.
@@ -86,17 +83,12 @@ def test_restore_einer_vor_phase_b_datenbank_bleibt_benutzbar(app, auth_client, 
     eingespielte Datei zurueckschreiben - also genau die Korruption, gegen
     die die WAL-Sidecar-Bereinigung eigentlich schuetzen soll.
     """
-    from werkzeug.security import generate_password_hash
-    import sqlite3 as _sqlite3
-
-    alte_db = tmp_path / 'vor_phase_b.db'
-    con = _sqlite3.connect(str(alte_db))
-    con.execute('CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,'
-                ' username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL)')
-    con.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)',
-                ('oldadmin', generate_password_hash('altes-passwort-123')))
-    con.commit()
-    con.close()
+    # Realistische Altsicherung: users OHNE die Phase-B-Spalten, aber mit dem
+    # Konto, mit dem dieser Test angemeldet ist - ohne das lehnt die
+    # Herkunftspruefung (K2) die Datei zu Recht ab.
+    alte_db = sicherung_bauen('vor_phase_b.db', phase_b=False,
+                              benutzer=(('admin', 'test-password-123'),
+                                        ('oldadmin', 'altes-passwort-123')))
 
     try:
         with open(alte_db, 'rb') as fh:
@@ -226,8 +218,8 @@ def test_schutzkopien_wachsen_nicht_unbegrenzt(app):
             f.unlink()
 
 
-def test_restore_schliesst_verbindung_vor_dateitausch(app, auth_client, csrf, tmp_path,
-                                                      monkeypatch):
+def test_restore_schliesst_verbindung_vor_dateitausch(app, auth_client, csrf,
+                                                      sicherung_bauen, monkeypatch):
     """Regression Blocker 2: beim Dateitausch darf keine Verbindung zur ALTEN
     Datei mehr offen sein.
 
@@ -252,13 +244,7 @@ def test_restore_schliesst_verbindung_vor_dateitausch(app, auth_client, csrf, tm
 
     monkeypatch.setattr(m.shutil, 'copy', pruefendes_copy)
 
-    src = tmp_path / 'backup.db'
-    con = m.sqlite3.connect(str(src))
-    con.execute('CREATE TABLE persons (id INTEGER PRIMARY KEY AUTOINCREMENT,'
-                ' name TEXT NOT NULL UNIQUE,'
-                ' wallet_start_date TEXT DEFAULT NULL, wallet_start_amount REAL DEFAULT 0)')
-    con.commit()
-    con.close()
+    src = sicherung_bauen('backup.db')
 
     try:
         with open(src, 'rb') as fh:
