@@ -408,6 +408,17 @@ def init_db():
     # Admin-Kaskade weiter unten) bei jedem Neustart einen zweiten,
     # ueberfluessigen 'admin'-Account erzeugen.
     _user_count = conn.execute("SELECT COUNT(*) c FROM users").fetchone()['c']
+    # Sicherheit (Befund I8): das Bootstrap-Passwort ist ein Einmalpasswort.
+    # Ohne ADMIN_PASSWORD wird es erzeugt und im Klartext geloggt - der
+    # Betreiber braucht bei einer frischen Installation irgendeinen Weg
+    # hinein, also bleibt das Log. Damit landet es aber im Docker-Log, das
+    # Log-Treiber typischerweise aufbewahren und weiterreichen. Frueher setzte
+    # dieses INSERT `must_change_password` nicht (Spaltendefault 0), das
+    # geloggte Passwort blieb also unbegrenzt gueltig. Jetzt wird das Flag
+    # unten gesetzt, sobald die Spalte per Migration existiert - der erste
+    # Login zwingt ueber login_required nach /password/aendern, danach ist der
+    # geloggte Wert wertlos.
+    _bootstrap_admin_id = None
     if not user and _user_count == 0:
         from werkzeug.security import generate_password_hash
         import os as _os
@@ -418,11 +429,17 @@ def init_db():
             _init_pwd = _s.token_urlsafe(12)
             import logging as _lg
             _lg.getLogger(__name__).warning(
-                "ACHTUNG: Kein ADMIN_PASSWORD gesetzt. "
-                "Temporäres Passwort: %s — bitte sofort in den Einstellungen ändern!", _init_pwd
+                "ACHTUNG: Kein ADMIN_PASSWORD gesetzt. Einmal-Passwort für den "
+                "Benutzer 'admin': %s — es MUSS beim ersten Login geändert werden, "
+                "die App erzwingt das. Achtung: dieses Passwort steht jetzt im "
+                "Klartext im Log (z.B. im Docker-Log). Das Log ist damit "
+                "vertraulich zu behandeln und nach dem ersten Login zu löschen "
+                "bzw. zu rotieren.", _init_pwd
             )
         default_hash = generate_password_hash(_init_pwd)
-        conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", ('admin', default_hash))
+        _cur = conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                            ('admin', default_hash))
+        _bootstrap_admin_id = _cur.lastrowid
     else:
         # Prüfe ob noch das alte Default-Passwort 'admin' aktiv ist
         from werkzeug.security import check_password_hash as _cph
@@ -529,6 +546,18 @@ def init_db():
             log.info("Migration angewendet: %s", sql)
         except Exception as _exc:
             log.debug("Migration uebersprungen (vermutlich bereits vorhanden): %s (%s)", sql, _exc)
+
+    # Sicherheit (Befund I8): Bootstrap-Passwort ist ein Einmalpasswort.
+    # Der INSERT oben kann das Flag nicht selbst setzen - bei einer frischen
+    # Datenbank existiert die Spalte `must_change_password` zu dem Zeitpunkt
+    # noch gar nicht, sie kommt erst aus der Migration direkt darueber.
+    # Deshalb hier, direkt nach der Migration und nur fuer genau die Zeile,
+    # die dieser Lauf angelegt hat.
+    if _bootstrap_admin_id is not None:
+        conn.execute('UPDATE users SET must_change_password=1 WHERE id=?',
+                     (_bootstrap_admin_id,))
+        log.info("Bootstrap-Admin id=%s angelegt - Passwortwechsel beim ersten "
+                 "Login erzwungen.", _bootstrap_admin_id)
 
     # 1:1-Verknuepfung Benutzer <-> Person; beide Seiten bleiben optional.
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person'

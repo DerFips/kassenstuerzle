@@ -33,6 +33,37 @@ def app():
     return application
 
 
+@pytest.fixture(autouse=True)
+def _admin_ohne_erzwungenen_passwortwechsel(app):
+    """Nimmt dem Test-Admin den erzwungenen Erstwechsel des Passworts ab.
+
+    Befund I8: in der Produktion bekommt der Bootstrap-Admin bewusst
+    `must_change_password=1` - das geloggte Initialpasswort ist damit ein
+    Einmalpasswort, und login_required leitet bis zum Wechsel auf
+    /password/aendern um. Die uebrige Testsuite meldet sich als 'admin' an,
+    um ganz andere Dinge zu pruefen; ohne diesen Reset landete jede dieser
+    Anfragen auf der Wechselseite.
+
+    Bewusst NACH dem Bootstrap und pro Test, nicht einmalig: mehrere Tests
+    (Restore, Migration) leeren die users-Tabelle und lassen init_db() erneut
+    bootstrappen, wodurch das Flag mitten in der Session wieder gesetzt wird.
+
+    Die Produktionslogik bleibt unangetastet - test_bootstrap_admin.py prueft
+    sie an einer eigenen, frisch gebootstrappten Wegwerf-Datenbank.
+    """
+    conn = main_module._open_db(main_module.DB_PATH)
+    try:
+        conn.execute("UPDATE users SET must_change_password=0 WHERE username='admin'")
+        conn.commit()
+    except main_module.sqlite3.OperationalError:
+        # Vor der Profil-Migration gibt es die Spalte nicht - dann gibt es
+        # auch keinen erzwungenen Wechsel, der stoeren koennte.
+        pass
+    finally:
+        conn.close()
+    yield
+
+
 @pytest.fixture()
 def client(app):
     return app.test_client()
