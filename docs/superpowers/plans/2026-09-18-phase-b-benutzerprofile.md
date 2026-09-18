@@ -465,10 +465,12 @@ Die `SELECT`-Abfrage darüber muss die neuen Spalten mitlesen:
             (username,)).fetchone()
 ```
 
-Und der Erfolgszweig darf nur greifen, wenn das Konto aktiv ist — ein deaktivierter Benutzer bekommt **dieselbe** unspezifische Meldung wie bei falschem Passwort:
+Und der Erfolgszweig darf nur greifen, wenn das Konto aktiv ist — ein deaktivierter Benutzer bekommt **dieselbe** unspezifische Meldung wie bei falschem Passwort.
+
+**Die Reihenfolge der Bedingungen ist sicherheitsrelevant:** `and` kurzschließt, deshalb muss die Passwortprüfung **vor** `is_active` stehen. Andernfalls antwortet ein deaktiviertes Konto ohne den teuren Hash-Vergleich und damit messbar schneller als ein aktives Konto mit falschem Passwort — ein Zeitkanal, der genau das verrät, was die unspezifische Fehlermeldung verbergen soll.
 
 ```python
-        if user and user['is_active'] and check_password_hash(user['password_hash'], password):
+        if user and check_password_hash(user['password_hash'], password) and user['is_active']:
 ```
 
 - [ ] **Step 5: Passwortwechsel beendet andere Sessions**
