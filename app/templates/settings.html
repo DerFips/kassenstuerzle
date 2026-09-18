@@ -163,6 +163,42 @@
   </div>
 
   {% if current_role == 'admin' %}
+  <!-- Einrichtungsassistent -->
+  <div class="col-12" id="setup-wizard-wrap" hidden>
+    <div class="alert alert-info d-flex flex-wrap align-items-center gap-2">
+      <i class="bi bi-info-circle"></i>
+      <span class="me-auto">{{ t('settings.wizard_banner') }}</span>
+      <button class="btn btn-sm btn-primary" id="wizard-open-btn">{{ t('settings.wizard_start') }}</button>
+      <button class="btn btn-sm btn-outline-secondary" id="wizard-later-btn">{{ t('settings.wizard_later') }}</button>
+    </div>
+    <div class="card shadow-sm" id="wizard-body" hidden>
+      <div class="card-body">
+        <h6 class="fw-semibold">{{ t('settings.wizard_step1') }}</h6>
+        <p class="text-muted small mb-2">{{ t('settings.wizard_step1_hint') }}</p>
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+          <select class="form-select form-select-sm" id="wizard-me-person" style="max-width:14rem"></select>
+          <input type="text" class="form-control form-control-sm" id="wizard-me-username"
+                 style="max-width:14rem" placeholder="{{ t('settings.wizard_rename_placeholder') }}">
+          <button class="btn btn-sm btn-primary" id="wizard-me-save">{{ t('settings.wizard_step1_save') }}</button>
+        </div>
+        <div class="alert alert-warning py-2 small" id="wizard-rename-warn" hidden>
+          {{ t('settings.wizard_rename_warn') }}
+        </div>
+        <hr>
+        <h6 class="fw-semibold">{{ t('settings.wizard_step2') }}</h6>
+        <p class="text-muted small mb-2">{{ t('settings.wizard_hint') }}</p>
+        <div id="wizard-list" class="d-flex flex-column gap-2"></div>
+        <div class="mt-3 d-flex flex-wrap gap-2">
+          <button class="btn btn-success" id="wizard-create-btn">{{ t('settings.wizard_create') }}</button>
+          <button class="btn btn-outline-secondary" id="wizard-done-btn">{{ t('settings.wizard_done') }}</button>
+        </div>
+        <div class="alert alert-warning mt-3 mb-0" id="wizard-cleanup" hidden>
+          {{ t('settings.wizard_cleanup') }}
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Benutzer -->
   <div class="col-12">
     <div class="card shadow-sm border-dark">
@@ -851,6 +887,114 @@ document.getElementById('add-user-btn').addEventListener('click', async () => {
 });
 
 benutzerLaden();
+
+// ── Einrichtungsassistent ───────────────────────────────────────────────────
+let _wizardVorschlaege = [];
+let _wizardDaten = null;
+
+async function wizardLaden() {
+  const d = await (await fetch('/api/setup/profiles')).json();
+  if (!d.success || d.done) return;
+  _wizardDaten = d;
+  _wizardVorschlaege = d.suggestions || [];
+  // Der Assistent lohnt sich, solange noch Personen ohne Login existieren
+  // ODER das eigene Konto noch keiner Person zugeordnet ist.
+  if (!_wizardVorschlaege.length && d.me && d.me.person_id) return;
+  document.getElementById('setup-wizard-wrap').hidden = false;
+}
+
+/** Schritt 1: eigene Person zuordnen, optional das Bestandskonto umbenennen. */
+function wizardSchritt1Aufbauen() {
+  const sel = document.getElementById('wizard-me-person');
+  sel.innerHTML = '';
+  const leer = document.createElement('option');
+  leer.value = ''; leer.textContent = t('settings.wizard_me_none');
+  sel.appendChild(leer);
+  (_wizardDaten.persons || []).forEach(p => {
+    const o = document.createElement('option');
+    o.value = p.id; o.textContent = p.name;
+    if (_wizardDaten.me && _wizardDaten.me.person_id === p.id) o.selected = true;
+    sel.appendChild(o);
+  });
+  document.getElementById('wizard-me-username').value = '';
+}
+
+document.getElementById('wizard-me-save').addEventListener('click', async () => {
+  const personId = document.getElementById('wizard-me-person').value;
+  const neuerName = document.getElementById('wizard-me-username').value.trim();
+  if (neuerName && !confirm(t('settings.wizard_rename_confirm', {name: neuerName}))) return;
+  const d = await (await fetch('/api/setup/profiles/self', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({person_id: personId ? parseInt(personId, 10) : null,
+                          new_username: neuerName || null})
+  })).json();
+  if (!d.success) { showToast(d.error, 'danger'); return; }
+  if (d.renamed) {
+    // Die Session traegt jetzt einen veralteten Namen - bewusste Neuanmeldung.
+    document.getElementById('wizard-rename-warn').hidden = false;
+    setTimeout(() => { window.location.href = '/logout'; }, 2500);
+    return;
+  }
+  showToast(t('settings.user_saved'), 'success');
+  benutzerLaden();
+});
+
+function wizardZeile(v) {
+  const row = document.createElement('div');
+  row.className = 'd-flex flex-wrap align-items-center gap-2';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox'; cb.className = 'form-check-input wizard-pick';
+  cb.dataset.personId = v.person_id; cb.checked = true;
+  const label = document.createElement('span');
+  label.className = 'fw-semibold'; label.style.minWidth = '8rem';
+  label.textContent = v.person_name;
+  const feld = document.createElement('input');
+  feld.type = 'text'; feld.className = 'form-control form-control-sm wizard-username';
+  feld.style.maxWidth = '14rem'; feld.value = v.username;
+  row.append(cb, label, feld);
+  return row;
+}
+
+document.getElementById('wizard-open-btn').addEventListener('click', () => {
+  wizardSchritt1Aufbauen();
+  const liste = document.getElementById('wizard-list');
+  liste.innerHTML = '';
+  _wizardVorschlaege.forEach(v => liste.appendChild(wizardZeile(v)));
+  document.getElementById('wizard-body').hidden = false;
+});
+
+document.getElementById('wizard-later-btn').addEventListener('click', () => {
+  document.getElementById('setup-wizard-wrap').hidden = true;
+});
+
+document.getElementById('wizard-create-btn').addEventListener('click', async () => {
+  const zeilen = [...document.querySelectorAll('#wizard-list > div')];
+  let angelegt = 0;
+  for (const z of zeilen) {
+    const cb = z.querySelector('.wizard-pick');
+    if (!cb.checked) continue;
+    const username = z.querySelector('.wizard-username').value.trim();
+    if (!username) continue;
+    const d = await (await fetch('/api/users', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, role: 'member', person_id: parseInt(cb.dataset.personId, 10)})
+    })).json();
+    if (d.success) { zeigeInitialpasswort(username, d.password); angelegt++; }
+    else showToast(d.error, 'danger');
+  }
+  if (angelegt) {
+    document.getElementById('wizard-cleanup').hidden = false;
+    benutzerLaden();
+  }
+});
+
+document.getElementById('wizard-done-btn').addEventListener('click', async () => {
+  await fetch('/api/setup/profiles/complete', {method: 'POST'});
+  document.getElementById('setup-wizard-wrap').hidden = true;
+  showToast(t('settings.wizard_finished'), 'success');
+});
+
+wizardLaden();
 {% endif %}
 </script>
 {% endblock %}
