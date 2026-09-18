@@ -73,16 +73,29 @@ def test_admin_darf_backup_auflisten(auth_client, db):
     assert auth_client.get('/api/backup/list').status_code == 200
 
 
-def test_deaktivierter_account_erhaelt_gleiche_fehlermeldung_wie_falsches_passwort(client, db):
+def test_check_password_hash_wird_auch_fuer_deaktivierten_account_aufgerufen(client, db, monkeypatch):
     """Regression: Sicherheit gegen Timing-Kanal beim Login.
 
-    Deaktivierte Accounts durften ohne Hash-Vergleich abgewiesen werden,
-    was messbar schneller antwortete als ein aktiver Account mit falschem
-    Passwort. Das verrät den Account-Status trotz unspezifischer Meldung.
+    Die reine HTTP-Antwort (200, Formular erneut angezeigt) ist bei
+    korrekter UND bei vertauschter Reihenfolge der Pruefungen identisch -
+    der Unterschied ist nur messbar in der Antwortzeit. Der eigentliche
+    Beweis gegen den Timing-Kanal ist deshalb, dass check_password_hash()
+    fuer JEDEN existierenden Benutzernamen aufgerufen wird, unabhaengig
+    von is_active. Nur dann kostet ein deaktivierter Account denselben
+    teuren Hash-Vergleich wie ein aktiver Account mit falschem Passwort.
 
-    Fix: Hash wird VOR is_active geprueft, damit die Antwortzeit immer
-    vom teuren Hash-Vergleich dominiert wird.
+    Fix: Hash wird VOR is_active geprueft (main.py login()), sodass
+    check_password_hash in beiden Faellen ausgefuehrt wird.
     """
+    aufrufe = []
+    echter_check_password_hash = m.check_password_hash
+
+    def spionierender_check_password_hash(pwhash, password):
+        aufrufe.append((pwhash, password))
+        return echter_check_password_hash(pwhash, password)
+
+    monkeypatch.setattr(m, 'check_password_hash', spionierender_check_password_hash)
+
     # Deaktivieren des Accounts
     db.execute("UPDATE users SET is_active=0 WHERE username='admin'")
     db.commit()
@@ -92,6 +105,11 @@ def test_deaktivierter_account_erhaelt_gleiche_fehlermeldung_wie_falsches_passwo
         'username': 'admin',
         'password': 'test-password-123'
     })
+    assert res_deactivated.status_code == 200  # Formular wird erneut angezeigt
+    assert len(aufrufe) == 1, (
+        'check_password_hash muss auch fuer deaktivierte Accounts aufgerufen '
+        'werden, sonst antwortet der Login messbar schneller'
+    )
 
     # Reaktivieren für zweiten Versuch
     db.execute("UPDATE users SET is_active=1 WHERE username='admin'")
@@ -102,9 +120,8 @@ def test_deaktivierter_account_erhaelt_gleiche_fehlermeldung_wie_falsches_passwo
         'username': 'admin',
         'password': 'falsches-passwort'
     })
-
-    # Beide sollten NICHT erfolgreich sein (kein Redirect zu /overview oder /)
-    # Stattdessen sollten beide dieselbe HTTP-Antwort zeigen:
-    # Login-Formular mit Fehlermeldung
-    assert res_deactivated.status_code == 200  # Formular wird erneut angezeigt
     assert res_wrong_pwd.status_code == 200    # Formular wird erneut angezeigt
+    assert len(aufrufe) == 2, (
+        'check_password_hash muss auch beim aktiven Account mit falschem '
+        'Passwort aufgerufen werden'
+    )
