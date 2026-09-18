@@ -174,6 +174,37 @@ def _get_limiter():
     return current_app.extensions.get('limiter')
 
 
+# ── Nebenläufigkeit: Payload-Version und Änderungszähler ─────────────────────
+def _require_v2(d):
+    """Weist Payloads veralteter Browser-Tabs ab.
+
+    Nach der Umstellung auf Einzelzeilen würde ein alter Payload (Zeilen ohne
+    `id`, kein `deleted_ids`) lauter Duplikate anlegen. Deshalb Pflicht-Marke.
+    Rückgabe: None wenn gültig, sonst fertige 409-Antwort.
+    """
+    if not isinstance(d, dict) or d.get('v') != 2:
+        return jsonify(success=False, error=t('srv.stale_client')), 409
+    return None
+
+
+def _bump_activity(conn, scope: str) -> int:
+    """Erhöht den Änderungszähler für `scope` und gibt die neue Version zurück.
+
+    Committet absichtlich nicht - der Aufrufer bündelt das mit seinen Writes.
+    """
+    who = session.get('username', '')
+    now = datetime.now().isoformat(timespec='seconds')
+    conn.execute(
+        'INSERT INTO activity (scope, version, updated_at, updated_by) VALUES (?,1,?,?)'
+        ' ON CONFLICT(scope) DO UPDATE SET version = version + 1, updated_at = ?, updated_by = ?',
+        (scope, now, who, now, who))
+    return conn.execute('SELECT version FROM activity WHERE scope=?', (scope,)).fetchone()['version']
+
+
+def _month_scope(year: int, month: int) -> str:
+    return f'month:{int(year):04d}-{int(month):02d}'
+
+
 def _rate_limit(limit_string: str):
     """Prüft Rate-Limit für den aktuellen Request manuell via Flask-Limiter."""
     from flask_limiter.errors import RateLimitExceeded
@@ -194,6 +225,41 @@ def login_required(f):
             return redirect(url_for('main.login'))
         return f(*args, **kwargs)
     return decorated_function
+
+
+@main_bp.route('/api/activity', methods=['POST'])
+@login_required
+def api_activity():
+    """Liefert Änderungszähler und Anwesenheit für einen Bereich, schreibt
+    gleichzeitig den Heartbeat des aufrufenden Nutzers (daher POST)."""
+    from datetime import timedelta
+    d = request.get_json(silent=True) or {}
+    scope = str(d.get('scope') or '').strip()
+    if not scope or len(scope) > 40:
+        return jsonify(success=False, error=t('srv.missing_data')), 400
+
+    conn = get_db()
+    now = datetime.now()
+    now_s = now.isoformat(timespec='seconds')
+    uid = session.get('user_id') or -1
+    conn.execute(
+        'INSERT INTO presence (user_id, scope, last_seen) VALUES (?,?,?)'
+        ' ON CONFLICT(user_id, scope) DO UPDATE SET last_seen = ?',
+        (uid, scope, now_s, now_s))
+    conn.commit()
+
+    row = conn.execute('SELECT version, updated_at, updated_by FROM activity WHERE scope=?',
+                       (scope,)).fetchone()
+    cutoff = (now - timedelta(seconds=30)).isoformat(timespec='seconds')
+    others = [r['username'] for r in conn.execute(
+        'SELECT u.username FROM presence p JOIN users u ON u.id = p.user_id'
+        ' WHERE p.scope=? AND p.last_seen >= ? AND p.user_id <> ?', (scope, cutoff, uid))]
+    conn.close()
+    return jsonify(success=True,
+                   version=(row['version'] if row else 0),
+                   updated_at=(row['updated_at'] if row else None),
+                   updated_by=(row['updated_by'] if row else None),
+                   others=others)
 
 
 @main_bp.route('/api/csrf-token')
@@ -294,6 +360,16 @@ def init_db():
         auth TEXT NOT NULL,
         lang TEXT NOT NULL DEFAULT 'de',
         created_at TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS activity (
+        scope TEXT PRIMARY KEY,
+        version INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT,
+        updated_by TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS presence (
+        user_id INTEGER NOT NULL,
+        scope TEXT NOT NULL,
+        last_seen TEXT NOT NULL,
+        PRIMARY KEY (user_id, scope))""")
     # Migrate income table: add category_id if missing
     try:
         conn.execute('ALTER TABLE income ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL')
@@ -759,6 +835,10 @@ def month_view(year, month):
     month_names_list = [month_name(i, lang) for i in range(1, 13)]
     this_year = datetime.now().year
     year_range = sorted(set(range(this_year - 5, this_year + 3)) | {year})
+    _scope = _month_scope(year, month)
+    g.pop('db', None)  # obiger conn.close() hat g.db nicht geleert - get_db() muss neu öffnen
+    _act_row = get_db().execute('SELECT version FROM activity WHERE scope=?', (_scope,)).fetchone()
+    activity_version = _act_row['version'] if _act_row else 0
     return render_template('month.html', active='month',
         year=year, month=month, month_name=month_name(month, lang),
         month_names=month_names_list, year_range=year_range,
@@ -768,7 +848,8 @@ def month_view(year, month):
         expense_total=expense_total_mv, savings=savings_mv,
         ov_settlements=ov_settlements, wallet=wallet, savings_pp=savings_pp,
         is_settled=is_settled, settled_at=settled_at,
-        prev_year=py, prev_month=pm, next_year=ny, next_month=nm)
+        prev_year=py, prev_month=pm, next_year=ny, next_month=nm,
+        activity_scope=_scope, activity_version=activity_version)
 
 @main_bp.route('/api/expenses/save', methods=['POST'])
 @login_required

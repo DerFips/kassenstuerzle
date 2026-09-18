@@ -322,6 +322,7 @@ TRANSLATIONS = {
         # ── Server-seitige Meldungen (main.py) ────────────────────────────
         'srv.csrf_invalid': 'Ungültiger CSRF-Token',
         'srv.rate_limited': 'Zu viele Anfragen. Limit: {limit}',
+        'srv.stale_client': 'Diese Seite ist nicht mehr aktuell. Bitte neu laden.',
         'srv.old_password_wrong': 'Altes Passwort ist falsch.',
         'srv.new_password_too_short': 'Neues Passwort muss mindestens 8 Zeichen lang sein.',
         'srv.no_file': 'Keine Datei',
@@ -663,6 +664,7 @@ TRANSLATIONS = {
         # ── Server-side messages (main.py) ────────────────────────────────
         'srv.csrf_invalid': 'Invalid CSRF token',
         'srv.rate_limited': 'Too many requests. Limit: {limit}',
+        'srv.stale_client': 'This page is out of date. Please reload.',
         'srv.old_password_wrong': 'The old password is incorrect.',
         'srv.new_password_too_short': 'The new password must be at least 8 characters long.',
         'srv.no_file': 'No file',
