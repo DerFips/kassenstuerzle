@@ -1162,7 +1162,10 @@ def save_persons():
                 conn.execute(
                     'UPDATE persons SET name=?, wallet_start_date=?, wallet_start_amount=? WHERE id=?',
                     (n, wd, wa, rid))
-            except Exception:
+            except sqlite3.IntegrityError:
+                # NUR die UNIQUE-Verletzung gilt als Namenskonflikt. Ein
+                # Sperr-Timeout o.ae. muss sichtbar bleiben statt dem Nutzer
+                # faelschlich als "Name bereits vergeben" gemeldet zu werden.
                 conflicts.append(n)
         else:
             try:
@@ -1172,7 +1175,10 @@ def save_persons():
                 ck = p.get('client_key')
                 if ck:
                     id_map[str(ck)] = cur.lastrowid
-            except Exception:
+            except sqlite3.IntegrityError:
+                # NUR die UNIQUE-Verletzung gilt als Namenskonflikt. Ein
+                # Sperr-Timeout o.ae. muss sichtbar bleiben statt dem Nutzer
+                # faelschlich als "Name bereits vergeben" gemeldet zu werden.
                 conflicts.append(n)
 
     activity_version = _bump_activity(conn, 'settings')
@@ -1220,7 +1226,10 @@ def save_categories():
             try:
                 conn.execute('UPDATE categories SET name=?, color=?, is_split=? WHERE id=?',
                              (n, col, sp, cid))
-            except Exception:
+            except sqlite3.IntegrityError:
+                # NUR die UNIQUE-Verletzung gilt als Namenskonflikt. Ein
+                # Sperr-Timeout o.ae. muss sichtbar bleiben statt dem Nutzer
+                # faelschlich als "Name bereits vergeben" gemeldet zu werden.
                 conflicts.append(n)
                 cid = None   # Splits dieser Zeile nicht anfassen
         else:
@@ -1231,7 +1240,10 @@ def save_categories():
                 ck = c.get('client_key')
                 if ck:
                     id_map[str(ck)] = cid
-            except Exception:
+            except sqlite3.IntegrityError:
+                # NUR die UNIQUE-Verletzung gilt als Namenskonflikt. Ein
+                # Sperr-Timeout o.ae. muss sichtbar bleiben statt dem Nutzer
+                # faelschlich als "Name bereits vergeben" gemeldet zu werden.
                 conflicts.append(n)
                 cid = None
 
