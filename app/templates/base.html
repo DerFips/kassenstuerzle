@@ -226,6 +226,64 @@ document.getElementById('pwa-install-btn')?.addEventListener('click', () => {
   document.getElementById('pwa-install-banner').classList.add('d-none');
 });
 </script>
+<script>
+/* ── LIVE-HINWEIS AUF PARALLELE BEARBEITUNG ───────────────────────────────────
+ * Pollt alle 10 s POST /api/activity. Bewusst Polling statt SSE: der Sync-Worker
+ * hat 4 Threads, eine offene SSE-Verbindung wuerde dauerhaft einen belegen.
+ * Meldet nur Aenderungen ANDERER Nutzer; eigenes Speichern hebt die Basisversion
+ * ueber activityWatchVersion() an. */
+(function () {
+  const POLL_MS = 10000;
+  let _scope = null, _baseVersion = 0, _onRemoteChange = null, _container = null, _timer = null;
+
+  function render(info) {
+    if (!_container) return;
+    const parts = [];
+    if (info.others && info.others.length) {
+      parts.push(`<span class="badge bg-secondary-subtle text-secondary-emphasis">
+        <i class="bi bi-people me-1"></i>${t('activity.others_here', {names: info.others.join(', ')})}</span>`);
+    }
+    if (info.version > _baseVersion) {
+      parts.push(`<span class="badge bg-warning-subtle text-warning-emphasis">
+        <i class="bi bi-exclamation-triangle me-1"></i>${t('activity.changed_by', {name: info.updated_by || '?'})}
+        <button type="button" class="btn btn-sm btn-link p-0 ms-1 align-baseline"
+                onclick="location.reload()">${t('activity.reload')}</button></span>`);
+    }
+    _container.innerHTML = parts.join(' ');
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch('/api/activity', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({scope: _scope})
+      });
+      const info = await res.json();
+      if (!info.success) return;
+      render(info);
+      if (info.version > _baseVersion && typeof _onRemoteChange === 'function') {
+        _onRemoteChange(info);
+      }
+    } catch (e) { /* Netzwerkfehler still ignorieren, naechster Tick versucht es erneut */ }
+  }
+
+  window.initActivityWatch = function (opts) {
+    _scope = opts.scope;
+    _baseVersion = opts.version || 0;
+    _onRemoteChange = opts.onRemoteChange || null;
+    _container = opts.container ? document.getElementById(opts.container) : null;
+    clearInterval(_timer);
+    _timer = setInterval(poll, POLL_MS);
+    poll();
+  };
+
+  /** Nach eigenem Speichern aufrufen, damit die eigene Aenderung kein Banner ausloest. */
+  window.activityWatchVersion = function (v) {
+    if (typeof v === 'number' && v > _baseVersion) _baseVersion = v;
+  };
+})();
+</script>
 {% block extra_script %}{% endblock %}
 {% block scripts %}{% endblock %}
 </body>

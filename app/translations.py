@@ -135,6 +135,9 @@ TRANSLATIONS = {
         'month.auto_saving': 'Auto...',
         'month.no_data_short': 'Noch keine Daten.',
         'month.processing': 'Verarbeite...',
+        'activity.others_here': '{names} bearbeitet diese Seite gerade',
+        'activity.changed_by': '{name} hat Änderungen gespeichert.',
+        'activity.reload': 'Neu laden',
 
         # ── Übersicht (overview.html) ────────────────────────────────────
         'overview.title': 'Übersicht',
@@ -477,6 +480,9 @@ TRANSLATIONS = {
         'month.auto_saving': 'Auto...',
         'month.no_data_short': 'No data yet.',
         'month.processing': 'Processing...',
+        'activity.others_here': '{names} is editing this page right now',
+        'activity.changed_by': '{name} saved changes.',
+        'activity.reload': 'Reload',
 
         # ── Overview (overview.html) ──────────────────────────────────────
         'overview.title': 'Overview',
