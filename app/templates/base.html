@@ -236,16 +236,26 @@ document.getElementById('pwa-install-btn')?.addEventListener('click', () => {
   const POLL_MS = 10000;
   let _scope = null, _baseVersion = 0, _onRemoteChange = null, _container = null, _timer = null;
 
+  /** HTML-Escaping fuer Werte, die als innerHTML eingesetzt werden.
+   * t() ersetzt Platzhalter ohne jede Maskierung, und Benutzernamen sind
+   * frei waehlbar - ohne dieses Escaping waere ein Name wie
+   * <img src=x onerror=...> gespeichertes XSS bei allen Mitbenutzern. */
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   function render(info) {
     if (!_container) return;
     const parts = [];
     if (info.others && info.others.length) {
       parts.push(`<span class="badge bg-secondary-subtle text-secondary-emphasis">
-        <i class="bi bi-people me-1"></i>${t('activity.others_here', {names: info.others.join(', ')})}</span>`);
+        <i class="bi bi-people me-1"></i>${t('activity.others_here', {names: info.others.map(esc).join(', ')})}</span>`);
     }
     if (info.version > _baseVersion) {
       parts.push(`<span class="badge bg-warning-subtle text-warning-emphasis">
-        <i class="bi bi-exclamation-triangle me-1"></i>${t('activity.changed_by', {name: info.updated_by || '?'})}
+        <i class="bi bi-exclamation-triangle me-1"></i>${t('activity.changed_by', {name: esc(info.updated_by) || '?'})}
         <button type="button" class="btn btn-sm btn-link p-0 ms-1 align-baseline"
                 onclick="location.reload()">${t('activity.reload')}</button></span>`);
     }
