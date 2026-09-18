@@ -14,6 +14,8 @@ except ImportError:
     import sqlite3
     _SQLCIPHER_AVAILABLE = False
 from datetime import datetime
+import logging
+log = logging.getLogger(__name__)
 
 from ..translations import translate as _translate, SUPPORTED_LANGUAGES
 
@@ -223,8 +225,44 @@ def login_required(f):
     def decorated_function(*args, **kwargs):
         if not session.get('logged_in'):
             return redirect(url_for('main.login'))
+        row = get_db().execute(
+            'SELECT id, username, role, is_active, session_epoch, must_change_password, person_id'
+            ' FROM users WHERE id=?', (session.get('user_id'),)).fetchone()
+        # Deaktiviert, geloescht oder die Session wurde serverseitig beendet
+        # (Passwortwechsel, Rollenaenderung, Umbenennung erhoehen session_epoch).
+        if row is None or not row['is_active'] \
+                or row['session_epoch'] != session.get('session_epoch', 0):
+            lang = session.get('lang')
+            session.clear()
+            if lang:
+                session['lang'] = lang
+            return redirect(url_for('main.login'))
+        g.current_user = row
+        if row['must_change_password'] and request.endpoint not in (
+                'main.force_password_change', 'main.logout', 'static'):
+            return redirect(url_for('main.force_password_change'))
         return f(*args, **kwargs)
     return decorated_function
+
+
+def admin_required(f):
+    """Ergaenzt login_required um die Rollenpruefung. Serverseitig, nicht nur im UI."""
+    @wraps(f)
+    @login_required
+    def decorated_function(*args, **kwargs):
+        row = getattr(g, 'current_user', None)
+        if row is None or row['role'] != 'admin':
+            if request.path.startswith('/api/'):
+                return jsonify(success=False, error=t('srv.admin_only')), 403
+            flash(t('srv.admin_only'), 'danger')
+            return redirect(url_for('main.index'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def _bump_session_epoch(conn, user_id: int) -> None:
+    """Beendet alle bestehenden Sessions dieses Benutzers sofort."""
+    conn.execute('UPDATE users SET session_epoch = session_epoch + 1 WHERE id=?', (user_id,))
 
 
 @main_bp.route('/api/activity', methods=['POST'])
@@ -286,6 +324,43 @@ def close_db(exception=None):
     if db is not None:
         db.close()
 
+def _ensure_admin(conn) -> None:
+    """Garantiert mindestens einen aktiven Admin. Laeuft bei JEDEM Start.
+
+    Hintergrund: die neue Spalte `role` bekommt per ALTER den Default
+    'member'. Ohne diese Kaskade waere der einzige vorhandene Benutzer nach
+    dem Update degradiert und niemand koennte mehr Benutzer verwalten.
+    Reihenfolge: bestehender Admin -> Benutzer 'admin' -> aeltester Benutzer.
+    """
+    vorhanden = conn.execute(
+        "SELECT COUNT(*) c FROM users WHERE role='admin' AND is_active=1").fetchone()['c']
+    if vorhanden:
+        return
+    ziel = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()
+    if ziel is None:
+        ziel = conn.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+    if ziel is None:
+        return   # leere Tabelle - der Bootstrap oben legt 'admin' an
+    conn.execute("UPDATE users SET role='admin', is_active=1 WHERE id=?", (ziel['id'],))
+    log.warning("Kein aktiver Admin vorhanden - Benutzer id=%s wurde zum Admin befoerdert.",
+                ziel['id'])
+
+
+def _autolink_single_person(conn) -> None:
+    """Verknuepft Benutzer und Person nur, wenn es von beiden genau einen gibt.
+
+    In jedem anderen Fall bleibt person_id leer: eine falsche Zuordnung wuerde
+    spaeter dem falschen Menschen Buchungen und Erinnerungen zuordnen.
+    """
+    users = conn.execute('SELECT id, person_id FROM users').fetchall()
+    persons = conn.execute('SELECT id FROM persons').fetchall()
+    if len(users) == 1 and len(persons) == 1 and users[0]['person_id'] is None:
+        conn.execute('UPDATE users SET person_id=? WHERE id=?',
+                     (persons[0]['id'], users[0]['id']))
+        log.info("Automatische Verknuepfung: Benutzer id=%s <-> Person id=%s",
+                 users[0]['id'], persons[0]['id'])
+
+
 def init_db():
     conn = get_db()
     conn.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -295,7 +370,12 @@ def init_db():
     )""")
 
     user = conn.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()
-    if not user:
+    # Nur bei einer wirklich leeren Tabelle einen frischen 'admin' anlegen.
+    # Sonst wuerde das Umbenennen des einzigen Benutzers (z.B. durch die
+    # Admin-Kaskade weiter unten) bei jedem Neustart einen zweiten,
+    # ueberfluessigen 'admin'-Account erzeugen.
+    _user_count = conn.execute("SELECT COUNT(*) c FROM users").fetchone()['c']
+    if not user and _user_count == 0:
         from werkzeug.security import generate_password_hash
         import os as _os
         # Passwort aus ENV oder sicheres Zufalls-Passwort generieren
@@ -379,6 +459,18 @@ def init_db():
     except Exception:
         pass  # column already exists
 
+    # Einmalige Sicherungskopie, bevor die Profil-Spalten angelegt werden.
+    # Die Schemapruefung ist die Marke: existiert 'role' schon, lief die
+    # Migration bereits und es wird nichts erneut gesichert.
+    _user_cols = {r[1] for r in conn.execute('PRAGMA table_info(users)')}
+    if 'role' not in _user_cols:
+        try:
+            _dest = create_backup('pre-profiles')
+            log.info("Sicherungskopie vor der Profil-Migration: %s", _dest.name)
+        except Exception:
+            log.exception("Sicherungskopie vor der Profil-Migration fehlgeschlagen "
+                          "- Migration wird trotzdem fortgesetzt")
+
     for sql in [
         'ALTER TABLE categories ADD COLUMN is_split INTEGER NOT NULL DEFAULT 0',
         'ALTER TABLE expenses ADD COLUMN is_cash INTEGER NOT NULL DEFAULT 0',
@@ -386,9 +478,32 @@ def init_db():
         'ALTER TABLE persons ADD COLUMN wallet_start_amount REAL DEFAULT 0',
         'ALTER TABLE expenses ADD COLUMN paid_for_person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL',
         'ALTER TABLE expenses ADD COLUMN receipt_filename TEXT DEFAULT NULL',
+        # ── Phase B: Benutzerprofile ──────────────────────────────────────
+        'ALTER TABLE users ADD COLUMN person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL',
+        "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'",
+        'ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1',
+        'ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN created_at TEXT',
+        'ALTER TABLE users ADD COLUMN last_login TEXT',
+        'ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0',
     ]:
-        try: conn.execute(sql)
-        except: pass
+        # Bei verschluesselter Produktions-DB ist dieses Log der einzige Weg
+        # zur Nachvollziehbarkeit, was eine Migration tatsaechlich getan hat.
+        # DEBUG fuer den Normalfall (Spalte existiert schon und wird
+        # uebersprungen), INFO nur wenn tatsaechlich etwas geaendert wurde.
+        try:
+            conn.execute(sql)
+            log.info("Migration angewendet: %s", sql)
+        except Exception as _exc:
+            log.debug("Migration uebersprungen (vermutlich bereits vorhanden): %s (%s)", sql, _exc)
+
+    # 1:1-Verknuepfung Benutzer <-> Person; beide Seiten bleiben optional.
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person'
+                 ' ON users(person_id) WHERE person_id IS NOT NULL')
+    conn.execute('CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)')
+
+    _ensure_admin(conn)
+    _autolink_single_person(conn)
 
     # ── Performance: Indices für häufig gefilterte Spalten ──────────────────
     for idx_sql in [
@@ -405,6 +520,11 @@ def init_db():
             pass
 
     conn.commit(); conn.close()
+    # init_db() darf innerhalb desselben App-Context mehrfach laufen (Idempotenz-
+    # Tests, evtl. manuelle Re-Migration). get_db() cached die Verbindung in `g` -
+    # ohne diesen Pop wuerde ein erneuter Aufruf auf der bereits geschlossenen
+    # Verbindung weiterarbeiten und mit "Cannot operate on a closed database" scheitern.
+    g.pop('db', None)
 
 def build_ov(conn, year, month, is_settled=False):
     rows = conn.execute("""
@@ -712,35 +832,56 @@ def apply_settlements_to_ov(ov_p, ov_settlements, all_person_names):
     return result
 
 
-# In-Memory Brute-Force-Schutz (IP-basiert)
+# In-Memory Brute-Force-Schutz
 import time as _time
 from collections import defaultdict as _defaultdict
+# Sperre pro Benutzername. Frueher pro IP - im gemeinsamen WLAN sperrte damit
+# ein Nutzer mit Tippfehlern alle anderen Haushaltsmitglieder aus.
 _login_attempts: dict = _defaultdict(lambda: {'count': 0, 'locked_until': 0})
+# Grosszuegiges Rueckfallnetz gegen breites Durchprobieren von einer Quelle.
+_ip_attempts: dict = _defaultdict(lambda: {'count': 0, 'locked_until': 0})
 _MAX_LOGIN_ATTEMPTS = 5
+_MAX_IP_ATTEMPTS = 30
 _LOGIN_LOCKOUT_SECONDS = 60
 
 
 @main_bp.route('/login', methods=['GET', 'POST'])
 def login():
     ip = request.remote_addr or 'unknown'
-    state = _login_attempts[ip]
+    username = (request.form.get('username', '') or '').strip()
+    key = username.lower()
+    # Ohne Benutzernamen (jedes GET auf /login, oder ein leer abgeschicktes
+    # Formular) gibt es keinen sinnvollen Zaehler. Wuerde man den leeren
+    # Schluessel mitzaehlen, koennte ein einziger Besucher mit fuenf leeren
+    # Absendungen allen anderen die Sperrmeldung auf der Loginseite einblenden.
+    state = _login_attempts[key] if key else None
+    ip_state = _ip_attempts[ip]
 
     # Sperre prüfen
-    if state['locked_until'] > _time.time():
-        remaining = int(state['locked_until'] - _time.time())
+    gesperrt_bis = max(state['locked_until'] if state else 0, ip_state['locked_until'])
+    if gesperrt_bis > _time.time():
+        remaining = int(gesperrt_bis - _time.time())
         flash(t('login.locked', seconds=remaining), 'danger')
         return render_template('login.html')
 
     if request.method == 'POST':
-        username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
 
         conn = get_db()
-        user = conn.execute("SELECT id, password_hash FROM users WHERE username = ?", (username,)).fetchone()
+        user = conn.execute(
+            "SELECT id, password_hash, is_active, session_epoch FROM users WHERE username = ?",
+            (username,)).fetchone()
 
-        if user and check_password_hash(user['password_hash'], password):
+        # Reihenfolge ist sicherheitsrelevant: and kurzschliesst, deshalb muss
+        # die Passwortpruefung VOR is_active stehen. Sonst antwortet ein
+        # deaktiviertes Konto ohne den teuren Hash-Vergleich und damit messbar
+        # schneller - ein Zeitkanal, der genau das verraet, was die
+        # unspezifische Fehlermeldung verbergen soll.
+        if user and check_password_hash(user['password_hash'], password) and user['is_active']:
             # Erfolg: Zähler zurücksetzen, Session neu aufbauen
-            _login_attempts[ip] = {'count': 0, 'locked_until': 0}
+            if key:
+                _login_attempts[key] = {'count': 0, 'locked_until': 0}
+            _ip_attempts[ip] = {'count': 0, 'locked_until': 0}
             lang = session.get('lang')  # Sprachwahl übersteht session.clear()
             session.clear()
             session.permanent = True   # aktiviert PERMANENT_SESSION_LIFETIME
@@ -749,18 +890,30 @@ def login():
             session['username'] = username
             # CSRF-Token bei Login frisch erstellen
             session['csrf_token'] = _secrets.token_hex(32)
+            session['session_epoch'] = user['session_epoch'] or 0
+            conn.execute("UPDATE users SET last_login=? WHERE id=?",
+                         (datetime.now().isoformat(timespec='seconds'), user['id']))
+            conn.commit()
             if lang:
                 session['lang'] = lang
             return redirect(url_for('main.index'))
         else:
-            state['count'] += 1
-            if state['count'] >= _MAX_LOGIN_ATTEMPTS:
-                state['locked_until'] = _time.time() + _LOGIN_LOCKOUT_SECONDS
-                state['count'] = 0
-                flash(t('login.locked_now', seconds=_LOGIN_LOCKOUT_SECONDS), 'danger')
+            ip_state['count'] += 1
+            if ip_state['count'] >= _MAX_IP_ATTEMPTS:
+                ip_state['locked_until'] = _time.time() + _LOGIN_LOCKOUT_SECONDS
+                ip_state['count'] = 0
+            if state is not None:
+                state['count'] += 1
+                if state['count'] >= _MAX_LOGIN_ATTEMPTS:
+                    state['locked_until'] = _time.time() + _LOGIN_LOCKOUT_SECONDS
+                    state['count'] = 0
+                    flash(t('login.locked_now', seconds=_LOGIN_LOCKOUT_SECONDS), 'danger')
+                else:
+                    remaining_attempts = _MAX_LOGIN_ATTEMPTS - state['count']
+                    flash(t('login.invalid', remaining=remaining_attempts), 'danger')
             else:
-                remaining_attempts = _MAX_LOGIN_ATTEMPTS - state['count']
-                flash(t('login.invalid', remaining=remaining_attempts), 'danger')
+                # Leerer Benutzername: gleiche unspezifische Meldung, aber kein Zaehler.
+                flash(t('login.invalid', remaining=_MAX_LOGIN_ATTEMPTS), 'danger')
 
     return render_template('login.html')
 
@@ -792,10 +945,298 @@ def change_password():
 
     conn.execute("UPDATE users SET password_hash = ? WHERE id = ?",
                  (generate_password_hash(new_pw), session['user_id']))
+    _bump_session_epoch(conn, session['user_id'])
+    conn.execute("UPDATE users SET must_change_password=0 WHERE id=?", (session['user_id'],))
     conn.commit()
+    # Die eigene Session bleibt gueltig - Epoch in der Session nachziehen.
+    session['session_epoch'] = conn.execute(
+        'SELECT session_epoch FROM users WHERE id=?', (session['user_id'],)).fetchone()['session_epoch']
     conn.close()
 
     return jsonify({'success': True})
+
+@main_bp.route('/password/aendern', methods=['GET', 'POST'])
+@login_required
+def force_password_change():
+    """Eigenstaendige Seite fuer den erzwungenen Wechsel eines Initialpassworts.
+    login_required leitet hierher um, solange must_change_password gesetzt ist."""
+    nutzer = getattr(g, 'current_user', None)
+    if not (nutzer and nutzer['must_change_password']):
+        # Diese Seite ist ausschliesslich fuer den erzwungenen Erstwechsel da.
+        # Ein regulaerer Wechsel laeuft ueber /change_password MIT Abfrage des
+        # alten Passworts - sonst koennte eine fremde Sitzung das Konto uebernehmen.
+        return redirect(url_for('main.settings'))
+    if request.method == 'GET':
+        return render_template('force_password_change.html')
+
+    neu  = request.form.get('new_password') or ''
+    neu2 = request.form.get('new_password2') or ''
+    if neu != neu2:
+        flash(t('settings.pw_mismatch'), 'danger')
+        return render_template('force_password_change.html')
+    if len(neu) < 8:
+        flash(t('srv.new_password_too_short'), 'danger')
+        return render_template('force_password_change.html')
+
+    conn = get_db()
+    conn.execute('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?',
+                 (generate_password_hash(neu), session['user_id']))
+    _bump_session_epoch(conn, session['user_id'])
+    conn.commit()
+    session['session_epoch'] = conn.execute(
+        'SELECT session_epoch FROM users WHERE id=?',
+        (session['user_id'],)).fetchone()['session_epoch']
+    flash(t('settings.pw_changed'), 'success')
+    return redirect(url_for('main.index'))
+
+# ── Benutzerverwaltung (nur Admin) ────────────────────────────────────────────
+def _neues_initialpasswort() -> str:
+    return _secrets.token_urlsafe(9)
+
+
+def _anzahl_aktiver_admins(conn, ausser_id: int | None = None) -> int:
+    if ausser_id is None:
+        return conn.execute(
+            "SELECT COUNT(*) c FROM users WHERE role='admin' AND is_active=1").fetchone()['c']
+    return conn.execute(
+        "SELECT COUNT(*) c FROM users WHERE role='admin' AND is_active=1 AND id<>?",
+        (ausser_id,)).fetchone()['c']
+
+
+@main_bp.route('/api/users')
+@admin_required
+def api_users_list():
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT u.id, u.username, u.role, u.is_active, u.person_id, u.last_login,'
+        ' u.created_at, p.name AS person_name'
+        ' FROM users u LEFT JOIN persons p ON p.id = u.person_id ORDER BY u.id').fetchall()
+    conn.close()
+    return jsonify(success=True, users=[dict(r) for r in rows])
+
+
+@main_bp.route('/api/users', methods=['POST'])
+@admin_required
+def api_users_create():
+    d = request.get_json(silent=True) or {}
+    username = (d.get('username') or '').strip()
+    role = d.get('role') if d.get('role') in ('admin', 'member') else 'member'
+    person_id = int(d['person_id']) if d.get('person_id') else None
+    if not username:
+        return jsonify(success=False, error=t('srv.missing_data')), 400
+
+    conn_pruef = get_db()
+    if person_id is not None and conn_pruef.execute(
+            'SELECT id FROM users WHERE person_id=?', (person_id,)).fetchone():
+        # Vorab pruefen, damit die Meldung stimmt: der IntegrityError unten
+        # kann sowohl vom Benutzernamen als auch vom Personen-Index kommen.
+        return jsonify(success=False, error=t('srv.person_already_linked')), 409
+
+    passwort = _neues_initialpasswort()
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            'INSERT INTO users (username, password_hash, role, is_active,'
+            ' must_change_password, created_at, person_id, session_epoch)'
+            ' VALUES (?,?,?,1,1,?,?,0)',
+            (username, generate_password_hash(passwort), role,
+             datetime.now().isoformat(timespec='seconds'), person_id))
+    except sqlite3.IntegrityError:
+        # Benutzername oder Personen-Verknuepfung bereits vergeben
+        return jsonify(success=False, error=t('srv.username_taken')), 409
+    conn.commit()
+    # Das Initialpasswort wird genau einmal zurueckgegeben (Entscheidung P1).
+    return jsonify(success=True, id=cur.lastrowid, password=passwort)
+
+
+@main_bp.route('/api/users/<int:user_id>', methods=['POST'])
+@admin_required
+def api_users_update(user_id):
+    d = request.get_json(silent=True) or {}
+    conn = get_db()
+    row = conn.execute('SELECT id, role, is_active FROM users WHERE id=?', (user_id,)).fetchone()
+    if row is None:
+        return jsonify(success=False, error=t('srv.user_not_found')), 404
+
+    eigene = user_id == session.get('user_id')
+    neue_rolle = d.get('role') if d.get('role') in ('admin', 'member') else None
+    # Robust gegen "0"/"false" als String - ein truthy-Test wuerde daraus
+    # versehentlich eine Aktivierung machen.
+    _roh_aktiv = d.get('is_active')
+    if _roh_aktiv is None:
+        neu_aktiv = None
+    else:
+        neu_aktiv = 0 if str(_roh_aktiv).strip().lower() in ('0', 'false', 'no', '') else 1
+
+    if eigene and (neue_rolle is not None or neu_aktiv == 0):
+        return jsonify(success=False, error=t('srv.cannot_change_own_role')), 400
+
+    # Der letzte aktive Admin darf weder degradiert noch deaktiviert werden.
+    entzieht_admin = (neue_rolle == 'member' and row['role'] == 'admin') or \
+                     (neu_aktiv == 0 and row['role'] == 'admin')
+    if entzieht_admin and _anzahl_aktiver_admins(conn, ausser_id=user_id) == 0:
+        return jsonify(success=False, error=t('srv.last_admin')), 400
+
+    felder, werte = [], []
+    if neue_rolle is not None:
+        felder.append('role=?'); werte.append(neue_rolle)
+    if neu_aktiv is not None:
+        felder.append('is_active=?'); werte.append(neu_aktiv)
+    if 'person_id' in d:
+        felder.append('person_id=?')
+        werte.append(int(d['person_id']) if d['person_id'] else None)
+    if not felder:
+        return jsonify(success=True)
+
+    werte.append(user_id)
+    try:
+        conn.execute(f"UPDATE users SET {', '.join(felder)} WHERE id=?", werte)
+    except sqlite3.IntegrityError:
+        return jsonify(success=False, error=t('srv.person_already_linked')), 409
+    if neue_rolle is not None or neu_aktiv is not None:
+        # Nur Rollen- und Statuswechsel beenden bestehende Sitzungen. Eine
+        # reine Personen-Verknuepfung darf das nicht - sonst wuerde ein Admin,
+        # der auf der eigenen Zeile nur die Person auswaehlt, sich selbst
+        # aussperren (der Setup-Wizard macht das fuer einen reinen
+        # Personen-Wechsel in Schritt 1 bewusst genauso nicht).
+        _bump_session_epoch(conn, user_id)
+    conn.commit()
+    return jsonify(success=True)
+
+
+@main_bp.route('/api/users/<int:user_id>/reset-password', methods=['POST'])
+@admin_required
+def api_users_reset_password(user_id):
+    conn = get_db()
+    if conn.execute('SELECT id FROM users WHERE id=?', (user_id,)).fetchone() is None:
+        return jsonify(success=False, error=t('srv.user_not_found')), 404
+    if user_id == session.get('user_id'):
+        # Das neue Passwort wird nur einmalig in einem <div> angezeigt, das
+        # bei der naechsten Navigation verschwindet - beim eigenen Konto
+        # bumped der Reset zudem sofort die eigene Session (session_epoch),
+        # man wird also ausgeloggt, bevor man es notieren kann. Ohne diese
+        # Sperre gaebe es dann kein Break-Glass-Konto mehr.
+        return jsonify(success=False, error=t('srv.cannot_reset_own')), 400
+    passwort = _neues_initialpasswort()
+    conn.execute('UPDATE users SET password_hash=?, must_change_password=1 WHERE id=?',
+                 (generate_password_hash(passwort), user_id))
+    _bump_session_epoch(conn, user_id)
+    conn.commit()
+    return jsonify(success=True, password=passwort)
+
+
+@main_bp.route('/api/users/<int:user_id>', methods=['DELETE'])
+@admin_required
+def api_users_delete(user_id):
+    conn = get_db()
+    row = conn.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
+    if row is None:
+        return jsonify(success=False, error=t('srv.user_not_found')), 404
+    if user_id == session.get('user_id'):
+        return jsonify(success=False, error=t('srv.cannot_delete_self')), 400
+    if row['role'] == 'admin' and _anzahl_aktiver_admins(conn, ausser_id=user_id) == 0:
+        return jsonify(success=False, error=t('srv.last_admin')), 400
+    conn.execute('DELETE FROM users WHERE id=?', (user_id,))
+    conn.commit()
+    return jsonify(success=True)
+
+
+# ── Einrichtungsassistent für Benutzerprofile ─────────────────────────────────
+_UMLAUTE = {'ä': 'ae', 'ö': 'oe', 'ü': 'ue', 'ß': 'ss'}
+
+
+def _benutzername_aus_person(name: str, vergeben: set) -> str:
+    """Leitet einen Benutzernamen aus einem Personennamen ab.
+
+    Kleinschreibung, Umlaut-Transliteration, Leerzeichen zu Punkt, alles
+    ausserhalb [a-z0-9._-] entfernt. Bei Kollision wird gezaehlt. Der Vorschlag
+    ist im UI editierbar - eine Person namens "Admin" kollidiert absichtlich
+    sichtbar mit dem Bestandskonto statt still umbenannt zu werden.
+    """
+    import re as _re
+    s = (name or '').strip().lower()
+    for umlaut, ersatz in _UMLAUTE.items():
+        s = s.replace(umlaut, ersatz)
+    s = _re.sub(r'\s+', '.', s)
+    s = _re.sub(r'[^a-z0-9._-]', '', s).strip('.')
+    if not s:
+        s = 'benutzer'
+    kandidat, zaehler = s, 1
+    while kandidat in vergeben:
+        zaehler += 1
+        kandidat = f'{s}{zaehler}'
+    return kandidat
+
+
+@main_bp.route('/api/setup/profiles')
+@admin_required
+def api_setup_profiles():
+    conn = get_db()
+    flag = conn.execute("SELECT value FROM app_meta WHERE key='profiles_setup_done'").fetchone()
+    vergeben = {r['username'].lower() for r in conn.execute('SELECT username FROM users')}
+    ich = conn.execute('SELECT username, person_id FROM users WHERE id=?',
+                       (session.get('user_id'),)).fetchone()
+    alle_personen = [dict(r) for r in conn.execute('SELECT id, name FROM persons ORDER BY name')]
+    offen = conn.execute(
+        'SELECT p.id, p.name FROM persons p'
+        ' LEFT JOIN users u ON u.person_id = p.id'
+        ' WHERE u.id IS NULL ORDER BY p.name').fetchall()
+    vorschlaege = []
+    for p in offen:
+        name = _benutzername_aus_person(p['name'], vergeben)
+        vergeben.add(name)
+        vorschlaege.append({'person_id': p['id'], 'person_name': p['name'], 'username': name})
+    conn.close()
+    return jsonify(success=True, done=bool(flag and flag['value'] == '1'),
+                   me={'username': ich['username'] if ich else '',
+                       'person_id': ich['person_id'] if ich else None},
+                   persons=alle_personen, suggestions=vorschlaege)
+
+
+@main_bp.route('/api/setup/profiles/self', methods=['POST'])
+@admin_required
+def api_setup_profiles_self():
+    """Schritt 1 des Assistenten: "Wer bist du?"
+
+    Verknuepft das eigene Konto mit einer Person und erlaubt optional die
+    Umbenennung des Bestandskontos (typisch: 'admin' -> echter Vorname).
+    Eine Umbenennung macht den Namen in der Session veraltet, deshalb wird
+    session_epoch erhoeht - der Admin muss sich danach bewusst neu anmelden.
+    """
+    d = request.get_json(silent=True) or {}
+    eigene_id = session.get('user_id')
+    neuer_name = (d.get('new_username') or '').strip()
+    conn = get_db()
+
+    if 'person_id' in d:
+        person_id = int(d['person_id']) if d.get('person_id') else None
+        try:
+            conn.execute('UPDATE users SET person_id=? WHERE id=?', (person_id, eigene_id))
+        except sqlite3.IntegrityError:
+            return jsonify(success=False, error=t('srv.person_already_linked')), 409
+
+    umbenannt = False
+    if neuer_name:
+        try:
+            conn.execute('UPDATE users SET username=? WHERE id=?', (neuer_name, eigene_id))
+        except sqlite3.IntegrityError:
+            return jsonify(success=False, error=t('srv.username_taken')), 409
+        _bump_session_epoch(conn, eigene_id)
+        umbenannt = True
+
+    conn.commit()
+    return jsonify(success=True, renamed=umbenannt)
+
+
+@main_bp.route('/api/setup/profiles/complete', methods=['POST'])
+@admin_required
+def api_setup_profiles_complete():
+    conn = get_db()
+    conn.execute("INSERT INTO app_meta (key, value) VALUES ('profiles_setup_done','1')"
+                 " ON CONFLICT(key) DO UPDATE SET value='1'")
+    conn.commit()
+    return jsonify(success=True)
+
 
 @main_bp.route('/')
 @login_required
@@ -949,10 +1390,19 @@ def save_persons():
     id_map = {}
     conflicts = []
 
+    blocked = []
     for raw in (d.get('deleted_ids') or []):
         try:
             did = int(raw)
         except (TypeError, ValueError):
+            continue
+        # Eine Person, an der ein aktiver Login haengt, darf nicht verschwinden -
+        # sonst zeigt das Konto ins Leere.
+        verknuepft = conn.execute(
+            'SELECT u.username, p.name FROM users u JOIN persons p ON p.id = u.person_id'
+            ' WHERE u.person_id=? AND u.is_active=1', (did,)).fetchone()
+        if verknuepft:
+            blocked.append(verknuepft['name'])
             continue
         conn.execute('DELETE FROM persons WHERE id=?', (did,))
 
@@ -1002,7 +1452,8 @@ def save_persons():
     result = [dict(r) for r in conn.execute('SELECT * FROM persons ORDER BY name')]
     conn.close()
     return jsonify({'success': True, 'persons': result, 'id_map': id_map,
-                    'activity_version': activity_version, 'conflicts': conflicts})
+                    'activity_version': activity_version, 'conflicts': conflicts,
+                    'blocked': blocked})
 
 @main_bp.route('/api/categories/save', methods=['POST'])
 @login_required
@@ -1385,9 +1836,11 @@ def settings():
     recurring = [dict(r) for r in conn.execute('SELECT * FROM recurring_expenses ORDER BY id')]
     category_splits = get_category_splits_map(conn)
     conn.close()
+    aktuelle_rolle = getattr(g, 'current_user', None)
+    aktuelle_rolle = aktuelle_rolle['role'] if aktuelle_rolle else 'member'
     return render_template('settings.html', active='settings', persons=persons, categories=cats,
                             recurring=recurring, category_splits=category_splits,
-                            activity_version=activity_version)
+                            activity_version=activity_version, current_role=aktuelle_rolle)
 
 
 
@@ -2081,13 +2534,45 @@ def create_backup(label: str = "") -> Path:
     src.backup(bak)
     bak.close()
     src.close()
-    existing = sorted(backup_dir.glob("kassenstuerzle_*.db"))
-    for old in existing[:-30]:
-        old.unlink(missing_ok=True)
+    # Sicherungskopien vor der Profil-Migration ('pre-profiles') und vor einem
+    # Restore ('pre-restore') rotieren getrennt von den gewoehnlichen: bricht
+    # die Migration wiederholt ab (z.B. ein fehlerhaftes ALTER), legt jeder
+    # Neustart des Workers eine neue 'pre-profiles'-Sicherung an - in einem
+    # gemeinsamen Topf wuerden 30 Neustarts jede vorher vorhandene Sicherung
+    # verdraengen. Ein eigener, kleiner Topf schuetzt sie davor, ohne dass sie
+    # unbegrenzt wachsen koennen: das Label kommt aus einer Benutzereingabe
+    # (api_backup_create laesst Bindestriche stehen), ein reiner Ausschluss von
+    # der Rotation waere also beliebig oft ausloesbar.
+    _rotiere(backup_dir, schutzkopie=True,  limit=_MAX_SCHUTZ_BACKUPS)
+    _rotiere(backup_dir, schutzkopie=False, limit=_MAX_BACKUPS)
     return dest
 
+
+_MAX_BACKUPS = 30
+_MAX_SCHUTZ_BACKUPS = 5
+_SCHUTZ_LABELS = ('pre-profiles', 'pre-restore')
+
+
+def _ist_schutzkopie(name: str) -> bool:
+    """Sicherung, die vor einem riskanten Schritt automatisch angelegt wurde."""
+    return any(name.endswith(f'_{label}.db') for label in _SCHUTZ_LABELS)
+
+
+def _rotiere(backup_dir: Path, schutzkopie: bool, limit: int) -> None:
+    """Behaelt die juengsten `limit` Sicherungen der jeweiligen Art.
+
+    Sortiert nach Aenderungszeit, nicht nach Dateiname: der Zeitstempel im
+    Namen ist minutengenau, mehrere Sicherungen derselben Minute liessen sich
+    ueber den Namen nicht in eine verlaessliche Reihenfolge bringen.
+    """
+    vorhanden = [p for p in backup_dir.glob("kassenstuerzle_*.db")
+                 if _ist_schutzkopie(p.name) == schutzkopie]
+    vorhanden.sort(key=lambda p: (p.stat().st_mtime, p.name))
+    for alt in vorhanden[:-limit]:
+        alt.unlink(missing_ok=True)
+
 @main_bp.route('/api/backup/create', methods=['POST'])
-@login_required
+@admin_required
 def api_backup_create():
     import re
     label = request.json.get('label', '')[:50]
@@ -2097,7 +2582,7 @@ def api_backup_create():
     return jsonify({"success": True, "filename": dest.name, "size_kb": round(stat.st_size / 1024, 1)})
 
 @main_bp.route('/api/backup/list')
-@login_required
+@admin_required
 def api_backup_list():
     from datetime import datetime
     db_path = DB_PATH
@@ -2114,7 +2599,7 @@ def api_backup_list():
     return jsonify({"backups": backups})
 
 @main_bp.route('/api/backup/download/<filename>')
-@login_required
+@admin_required
 def api_backup_download(filename):
     import re
     from flask import send_file
@@ -2128,8 +2613,14 @@ def api_backup_download(filename):
     return send_file(str(path), as_attachment=True, download_name=filename, mimetype="application/x-sqlite3")
 
 @main_bp.route('/api/backup/restore', methods=['POST'])
-@login_required
+@admin_required
 def api_backup_restore():
+    # Die Request-Verbindung zeigt noch auf die ALTE Datei. Sie muss zu sein,
+    # bevor die Datei ausgetauscht wird - sonst schreibt der Checkpoint beim
+    # Schliessen alte WAL-Frames in die frisch eingespielte Datenbank.
+    _alte_verbindung = g.pop('db', None)
+    if _alte_verbindung is not None:
+        _alte_verbindung.close()
     if 'file' not in request.files:
         return jsonify(success=False, error=t('srv.no_file')), 400
     f = request.files['file']
@@ -2166,10 +2657,17 @@ def api_backup_restore():
         except FileNotFoundError:
             pass
     tmp.unlink(missing_ok=True)
+    # Eine wiederhergestellte Datenbank kann aelter als die Profil-Migration
+    # sein (z.B. eine vor Phase B geschriebene Sicherung). Seit dieser Phase
+    # setzt JEDE Anfrage (login_required, login()) auf role/is_active/
+    # session_epoch/must_change_password/person_id - ohne erneute Migration
+    # waere die App bis zum naechsten Container-Neustart komplett unbenutzbar.
+    g.pop('db', None)
+    init_db()
     return jsonify(success=True)
 
 @main_bp.route('/api/backup/delete/<filename>', methods=['DELETE'])
-@login_required
+@admin_required
 def api_backup_delete(filename):
     import re
     if not re.match(r'^kassenstuerzle_.*\.db$', filename):

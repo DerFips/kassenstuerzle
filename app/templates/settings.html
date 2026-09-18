@@ -162,6 +162,73 @@
     </div>
   </div>
 
+  {% if current_role == 'admin' %}
+  <!-- Einrichtungsassistent -->
+  <div class="col-12" id="setup-wizard-wrap" hidden>
+    <div class="alert alert-info d-flex flex-wrap align-items-center gap-2">
+      <i class="bi bi-info-circle"></i>
+      <span class="me-auto">{{ t('settings.wizard_banner') }}</span>
+      <button class="btn btn-sm btn-primary" id="wizard-open-btn">{{ t('settings.wizard_start') }}</button>
+      <button class="btn btn-sm btn-outline-secondary" id="wizard-later-btn">{{ t('settings.wizard_later') }}</button>
+    </div>
+    <div class="card shadow-sm" id="wizard-body" hidden>
+      <div class="card-body">
+        <h6 class="fw-semibold">{{ t('settings.wizard_step1') }}</h6>
+        <p class="text-muted small mb-2">{{ t('settings.wizard_step1_hint') }}</p>
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+          <select class="form-select form-select-sm" id="wizard-me-person" style="max-width:14rem"></select>
+          <input type="text" class="form-control form-control-sm" id="wizard-me-username"
+                 style="max-width:14rem" placeholder="{{ t('settings.wizard_rename_placeholder') }}">
+          <button class="btn btn-sm btn-primary" id="wizard-me-save">{{ t('settings.wizard_step1_save') }}</button>
+        </div>
+        <div class="alert alert-warning py-2 small" id="wizard-rename-warn" hidden>
+          {{ t('settings.wizard_rename_warn') }}
+        </div>
+        <hr>
+        <h6 class="fw-semibold">{{ t('settings.wizard_step2') }}</h6>
+        <p class="text-muted small mb-2">{{ t('settings.wizard_hint') }}</p>
+        <div id="wizard-list" class="d-flex flex-column gap-2"></div>
+        <div class="mt-3 d-flex flex-wrap gap-2">
+          <button class="btn btn-success" id="wizard-create-btn">{{ t('settings.wizard_create') }}</button>
+          <button class="btn btn-outline-secondary" id="wizard-done-btn">{{ t('settings.wizard_done') }}</button>
+        </div>
+        <div class="alert alert-warning mt-3 mb-0" id="wizard-cleanup" hidden>
+          {{ t('settings.wizard_cleanup') }}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Benutzer -->
+  <div class="col-12">
+    <div class="card shadow-sm border-dark">
+      <div class="card-header bg-dark text-white fw-semibold d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <span><i class="bi bi-person-badge me-1"></i>{{ t('settings.users') }}</span>
+        <button class="btn btn-sm btn-light" id="add-user-btn">
+          <i class="bi bi-plus-circle me-1"></i>{{ t('settings.user_add') }}
+        </button>
+      </div>
+      <div class="card-body">
+        <div class="table-responsive">
+          <table class="table table-sm align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>{{ t('settings.user_name') }}</th>
+                <th>{{ t('settings.user_person') }}</th>
+                <th>{{ t('settings.user_role') }}</th>
+                <th>{{ t('settings.user_active') }}</th>
+                <th>{{ t('settings.user_last_login') }}</th>
+                <th class="text-end">{{ t('settings.backup_action') }}</th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Backup -->
   <div class="col-12 col-md-6">
     <div class="card shadow-sm border-info">
@@ -546,7 +613,9 @@ document.getElementById('save-persons-btn').addEventListener('click', async () =
     applyIdMap(d.id_map, '.person-row');
     _pendingPersonDeletes = _pendingPersonDeletes.filter(id => !sentDeletes.includes(id));
     if (typeof activityWatchVersion === 'function') activityWatchVersion(d.activity_version);
-    if (d.conflicts && d.conflicts.length) {
+    if (d.blocked && d.blocked.length) {
+      showToast(t('settings.person_blocked', {names: d.blocked.join(', ')}), 'warning');
+    } else if (d.conflicts && d.conflicts.length) {
       showToast(t('settings.name_conflict', {names: d.conflicts.join(', ')}), 'warning');
     } else {
       showToast(t('settings.toast_persons_saved'), 'success');
@@ -692,5 +761,242 @@ document.getElementById('csv-import-btn').addEventListener('click', async () => 
 });
 
 initActivityWatch({ scope: 'settings', version: ACTIVITY_VERSION, container: 'settingsActivityBar' });
+
+{% if current_role == 'admin' %}
+const PERSONEN_FUER_USER = {{ persons | tojson }};
+
+function zelle(text) {
+  const td = document.createElement('td');
+  td.textContent = text == null ? '—' : String(text);
+  return td;
+}
+
+function benutzerZeile(u) {
+  const tr = document.createElement('tr');
+  tr.appendChild(zelle(u.username));
+
+  // Personen-Zuordnung ist der Kern von Modell A: ohne Auswahlfeld liesse
+  // sich ein spaeter angelegtes Konto nie mit einer Person verknuepfen.
+  const tdPerson = document.createElement('td');
+  const pSel = document.createElement('select');
+  pSel.className = 'form-select form-select-sm';
+  const keine = document.createElement('option');
+  keine.value = ''; keine.textContent = t('settings.wizard_me_none');
+  pSel.appendChild(keine);
+  PERSONEN_FUER_USER.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p.id; o.textContent = p.name;
+    if (u.person_id === p.id) o.selected = true;
+    pSel.appendChild(o);
+  });
+  pSel.addEventListener('change', () => benutzerAendern(u.id,
+    {person_id: pSel.value ? parseInt(pSel.value, 10) : null}));
+  tdPerson.appendChild(pSel);
+  tr.appendChild(tdPerson);
+
+  const tdRolle = document.createElement('td');
+  const sel = document.createElement('select');
+  sel.className = 'form-select form-select-sm';
+  [['member', t('settings.role_member')], ['admin', t('settings.role_admin')]].forEach(([wert, label]) => {
+    const o = document.createElement('option');
+    o.value = wert; o.textContent = label;
+    if (u.role === wert) o.selected = true;
+    sel.appendChild(o);
+  });
+  sel.addEventListener('change', () => benutzerAendern(u.id, {role: sel.value}));
+  tdRolle.appendChild(sel);
+  tr.appendChild(tdRolle);
+
+  const tdAktiv = document.createElement('td');
+  const cb = document.createElement('input');
+  cb.type = 'checkbox'; cb.className = 'form-check-input'; cb.checked = !!u.is_active;
+  cb.addEventListener('change', () => benutzerAendern(u.id, {is_active: cb.checked ? 1 : 0}));
+  tdAktiv.appendChild(cb);
+  tr.appendChild(tdAktiv);
+
+  tr.appendChild(zelle(u.last_login));
+
+  const tdAktion = document.createElement('td');
+  tdAktion.className = 'text-end text-nowrap';
+  const reset = document.createElement('button');
+  reset.className = 'btn btn-sm btn-outline-secondary me-1';
+  reset.textContent = t('settings.user_reset_pw');
+  reset.addEventListener('click', () => passwortZuruecksetzen(u.id, u.username));
+  const del = document.createElement('button');
+  del.className = 'btn btn-sm btn-outline-danger';
+  del.innerHTML = '<i class="bi bi-trash"></i>';
+  del.addEventListener('click', () => benutzerLoeschen(u.id, u.username));
+  tdAktion.appendChild(reset); tdAktion.appendChild(del);
+  tr.appendChild(tdAktion);
+  return tr;
+}
+
+async function benutzerLaden() {
+  const d = await (await fetch('/api/users')).json();
+  const tb = document.getElementById('users-tbody');
+  tb.innerHTML = '';
+  (d.users || []).forEach(u => tb.appendChild(benutzerZeile(u)));
+}
+
+async function benutzerAendern(id, felder) {
+  const d = await (await fetch(`/api/users/${id}`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(felder)
+  })).json();
+  showToast(d.success ? t('settings.user_saved') : d.error, d.success ? 'success' : 'danger');
+  benutzerLaden();
+}
+
+async function passwortZuruecksetzen(id, name) {
+  if (!confirm(t('settings.user_reset_confirm', {name}))) return;
+  const d = await (await fetch(`/api/users/${id}/reset-password`, {method: 'POST'})).json();
+  if (d.success) zeigeInitialpasswort(name, d.password);
+  else showToast(d.error, 'danger');
+}
+
+async function benutzerLoeschen(id, name) {
+  if (!confirm(t('settings.user_delete_confirm', {name}))) return;
+  const d = await (await fetch(`/api/users/${id}`, {method: 'DELETE'})).json();
+  showToast(d.success ? t('settings.user_deleted') : d.error, d.success ? 'success' : 'danger');
+  benutzerLaden();
+}
+
+/** Zeigt das Initialpasswort genau einmal an (Entscheidung P1). */
+function zeigeInitialpasswort(name, passwort) {
+  const box = document.createElement('div');
+  box.className = 'alert alert-warning mt-3';
+  const titel = document.createElement('div');
+  titel.className = 'fw-semibold';
+  titel.textContent = t('settings.user_password_once', {name});
+  const code = document.createElement('code');
+  code.className = 'fs-5 d-block my-2';
+  code.textContent = passwort;
+  box.appendChild(titel); box.appendChild(code);
+  document.getElementById('users-tbody').closest('.card-body').appendChild(box);
+}
+
+document.getElementById('add-user-btn').addEventListener('click', async () => {
+  const name = prompt(t('settings.user_name_prompt'));
+  if (!name) return;
+  const d = await (await fetch('/api/users', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username: name.trim(), role: 'member', person_id: null})
+  })).json();
+  if (d.success) { zeigeInitialpasswort(name.trim(), d.password); benutzerLaden(); }
+  else showToast(d.error, 'danger');
+});
+
+benutzerLaden();
+
+// ── Einrichtungsassistent ───────────────────────────────────────────────────
+let _wizardVorschlaege = [];
+let _wizardDaten = null;
+
+async function wizardLaden() {
+  const d = await (await fetch('/api/setup/profiles')).json();
+  if (!d.success || d.done) return;
+  _wizardDaten = d;
+  _wizardVorschlaege = d.suggestions || [];
+  // Der Assistent lohnt sich, solange noch Personen ohne Login existieren
+  // ODER das eigene Konto noch keiner Person zugeordnet ist.
+  if (!_wizardVorschlaege.length && d.me && d.me.person_id) return;
+  document.getElementById('setup-wizard-wrap').hidden = false;
+}
+
+/** Schritt 1: eigene Person zuordnen, optional das Bestandskonto umbenennen. */
+function wizardSchritt1Aufbauen() {
+  const sel = document.getElementById('wizard-me-person');
+  sel.innerHTML = '';
+  const leer = document.createElement('option');
+  leer.value = ''; leer.textContent = t('settings.wizard_me_none');
+  sel.appendChild(leer);
+  (_wizardDaten.persons || []).forEach(p => {
+    const o = document.createElement('option');
+    o.value = p.id; o.textContent = p.name;
+    if (_wizardDaten.me && _wizardDaten.me.person_id === p.id) o.selected = true;
+    sel.appendChild(o);
+  });
+  document.getElementById('wizard-me-username').value = '';
+}
+
+document.getElementById('wizard-me-save').addEventListener('click', async () => {
+  const personId = document.getElementById('wizard-me-person').value;
+  const neuerName = document.getElementById('wizard-me-username').value.trim();
+  if (neuerName && !confirm(t('settings.wizard_rename_confirm', {name: neuerName}))) return;
+  const d = await (await fetch('/api/setup/profiles/self', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({person_id: personId ? parseInt(personId, 10) : null,
+                          new_username: neuerName || null})
+  })).json();
+  if (!d.success) { showToast(d.error, 'danger'); return; }
+  if (d.renamed) {
+    // Die Session traegt jetzt einen veralteten Namen - bewusste Neuanmeldung.
+    document.getElementById('wizard-rename-warn').hidden = false;
+    setTimeout(() => { window.location.href = '/logout'; }, 2500);
+    return;
+  }
+  showToast(t('settings.user_saved'), 'success');
+  benutzerLaden();
+});
+
+function wizardZeile(v) {
+  const row = document.createElement('div');
+  row.className = 'd-flex flex-wrap align-items-center gap-2';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox'; cb.className = 'form-check-input wizard-pick';
+  // Bewusst NICHT vorangehakt: Konten entstehen nur durch aktive Auswahl,
+  // sonst legt ein unbedachter Klick Logins fuer alle Personen an.
+  cb.dataset.personId = v.person_id;
+  const label = document.createElement('span');
+  label.className = 'fw-semibold'; label.style.minWidth = '8rem';
+  label.textContent = v.person_name;
+  const feld = document.createElement('input');
+  feld.type = 'text'; feld.className = 'form-control form-control-sm wizard-username';
+  feld.style.maxWidth = '14rem'; feld.value = v.username;
+  row.append(cb, label, feld);
+  return row;
+}
+
+document.getElementById('wizard-open-btn').addEventListener('click', () => {
+  wizardSchritt1Aufbauen();
+  const liste = document.getElementById('wizard-list');
+  liste.innerHTML = '';
+  _wizardVorschlaege.forEach(v => liste.appendChild(wizardZeile(v)));
+  document.getElementById('wizard-body').hidden = false;
+});
+
+document.getElementById('wizard-later-btn').addEventListener('click', () => {
+  document.getElementById('setup-wizard-wrap').hidden = true;
+});
+
+document.getElementById('wizard-create-btn').addEventListener('click', async () => {
+  const zeilen = [...document.querySelectorAll('#wizard-list > div')];
+  let angelegt = 0;
+  for (const z of zeilen) {
+    const cb = z.querySelector('.wizard-pick');
+    if (!cb.checked) continue;
+    const username = z.querySelector('.wizard-username').value.trim();
+    if (!username) continue;
+    const d = await (await fetch('/api/users', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, role: 'member', person_id: parseInt(cb.dataset.personId, 10)})
+    })).json();
+    if (d.success) { zeigeInitialpasswort(username, d.password); angelegt++; }
+    else showToast(d.error, 'danger');
+  }
+  if (angelegt) {
+    document.getElementById('wizard-cleanup').hidden = false;
+    benutzerLaden();
+  }
+});
+
+document.getElementById('wizard-done-btn').addEventListener('click', async () => {
+  await fetch('/api/setup/profiles/complete', {method: 'POST'});
+  document.getElementById('setup-wizard-wrap').hidden = true;
+  showToast(t('settings.wizard_finished'), 'success');
+});
+
+wizardLaden();
+{% endif %}
 </script>
 {% endblock %}
