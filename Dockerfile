@@ -24,6 +24,15 @@ COPY . .
 # Datenverzeichnis anlegen
 RUN mkdir -p /app/data
 
+# Sicherheit (Befund I2): nicht als root laufen. Eigener, unprivilegierter
+# Benutzer, dem das Arbeits- und Datenverzeichnis gehört (nötig, damit er
+# Datenbank/Backups/Belege/Secret-Key im Bind-Mount ./data:/app/data anlegen
+# und lesen kann).
+RUN groupadd -r kassenstuerzle && \
+    useradd -r -g kassenstuerzle -d /app -s /usr/sbin/nologin kassenstuerzle && \
+    chown -R kassenstuerzle:kassenstuerzle /app
+USER kassenstuerzle
+
 # Umgebungsvariablen (Defaults; per -e oder .env überschreibbar)
 ENV DATABASE_PATH=/app/data/kassenstuerzle.db
 ENV HTTPS=0

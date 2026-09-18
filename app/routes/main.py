@@ -109,6 +109,31 @@ def _migrate_to_encrypted(path: str, key: str) -> None:
         src.close()
         _shutil.move(tmp_path, path)
         log.info("Migration erfolgreich abgeschlossen.")
+
+        # Sicherheit (Befund I1): die Klartext-Sicherung ist nur die
+        # Rückfallebene für den Fall, dass die Migration fehlschlägt. Sobald
+        # feststeht, dass sich die neue verschlüsselte Datenbank tatsächlich
+        # öffnen lässt, hat sie keinen Zweck mehr und hebt die Verschlüsselung
+        # der gesamten Finanzhistorie auf, solange sie im selben Verzeichnis
+        # liegt (z.B. über den Bind-Mount ./data:/app/data im Container).
+        try:
+            verify_conn = sqlite3.connect(path)
+            try:
+                verify_conn.execute(_pragma_key_sql(key))
+                verify_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            finally:
+                verify_conn.close()
+        except Exception as verify_exc:
+            log.error(
+                "Verifikation der verschlüsselten Datenbank fehlgeschlagen – "
+                f"Klartext-Sicherung wird zur Sicherheit NICHT gelöscht: {verify_exc}"
+            )
+        else:
+            try:
+                os.remove(backup_path)
+                log.info(f"Klartext-Sicherung nach erfolgreicher Verifikation entfernt: {backup_path}")
+            except OSError as remove_exc:
+                log.warning(f"Klartext-Sicherung konnte nicht entfernt werden: {remove_exc}")
     except Exception as e:
         log.error(f"Migration fehlgeschlagen: {e}")
         if os.path.exists(tmp_path):
@@ -2556,6 +2581,13 @@ def create_backup(label: str = "") -> Path:
     src.backup(bak)
     bak.close()
     src.close()
+    # Sicherheit (Befund I2): eine Sicherung enthält dieselben Finanzdaten wie
+    # die Hauptdatenbank - ohne dies wäre sie mit dem Standard-umask 644
+    # abgelegt und für jeden mit Lesezugriff auf den Datenträger einsehbar.
+    try:
+        os.chmod(dest, 0o600)
+    except OSError as exc:
+        log.warning(f"Konnte Rechte der Sicherung nicht auf 0600 setzen: {exc}")
     # Sicherungskopien vor der Profil-Migration ('pre-profiles') und vor einem
     # Restore ('pre-restore') rotieren getrennt von den gewoehnlichen: bricht
     # die Migration wiederholt ab (z.B. ein fehlerhaftes ALTER), legt jeder
@@ -2890,7 +2922,15 @@ def _get_vapid():
     """Lädt den VAPID-Schlüssel aus data/.vapid_private_key.pem und generiert ihn
     beim allerersten Aufruf automatisch (py_vapid.Vapid.from_file macht das selbst)."""
     from py_vapid import Vapid
-    return Vapid.from_file(_VAPID_KEY_PATH)
+    vapid = Vapid.from_file(_VAPID_KEY_PATH)
+    # Sicherheit (Befund I2): Vapid.from_file schreibt die Datei selbst (mit
+    # dem Standard-umask 644) - wir kontrollieren den Schreibvorgang nicht,
+    # deshalb erst NACH dem Aufruf nachträglich auf 0600 verengen.
+    try:
+        os.chmod(_VAPID_KEY_PATH, 0o600)
+    except OSError as exc:
+        log.warning(f"Konnte Rechte des VAPID-Schlüssels nicht auf 0600 setzen: {exc}")
+    return vapid
 
 
 def get_vapid_public_key_b64() -> str:
@@ -3041,6 +3081,13 @@ def api_receipt_upload():
     dest = os.path.join(RECEIPTS_DIR, filename)
     with open(dest, 'wb') as out:
         out.write(data)
+    # Sicherheit (Befund I2): ein Beleg enthält personenbezogene Finanzdaten -
+    # ohne dies wäre er mit dem Standard-umask 644 für jeden mit Lesezugriff
+    # auf den Datenträger einsehbar.
+    try:
+        os.chmod(dest, 0o600)
+    except OSError as exc:
+        log.warning(f"Konnte Rechte des Belegs nicht auf 0600 setzen: {exc}")
 
     return jsonify(success=True, filename=filename)
 

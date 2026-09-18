@@ -2,12 +2,32 @@ from flask import Flask
 import os
 import logging
 
-def create_app():
-    app = Flask(__name__)
-    
-    # Security: Use a consistent secret key across all workers.
-    secret_file = os.path.join(os.path.dirname(__file__), '..', 'data', '.secret_key')
-    os.makedirs(os.path.dirname(secret_file), exist_ok=True)
+
+def _ensure_data_dir_and_secret(data_dir):
+    """Legt das Datenverzeichnis und den Signierschlüssel an (falls nötig) und
+    liest ihn sonst ein. In eine eigene Funktion ausgelagert, damit sie
+    unabhängig von create_app() gegen ein Wegwerf-Verzeichnis testbar ist.
+
+    Sicherheit (Befund I2): das Datenverzeichnis darf nur vom eigenen
+    Benutzer lesbar sein - es enthält u.a. diesen Signierschlüssel. Ohne die
+    chmod-Aufrufe läge beides mit dem Standard-umask 644/755, jeder
+    Lesezugriff auf den Datenträger würde den Flask-Signierschlüssel
+    preisgeben und eine Admin-Sitzung fälschbar machen, ganz ohne Passwort.
+    Nur chmod'en wenn WIR das Verzeichnis/die Datei gerade neu anlegen: ein
+    bereits bestehendes Verzeichnis (z.B. mit absichtlich anderen Rechten
+    fürs Bind-Mount) bzw. eine bereits bestehende Datei bleibt unangetastet.
+    """
+    _log = logging.getLogger(__name__)
+    secret_file = os.path.join(data_dir, '.secret_key')
+
+    _data_dir_existed = os.path.isdir(data_dir)
+    os.makedirs(data_dir, exist_ok=True)
+    if not _data_dir_existed:
+        try:
+            os.chmod(data_dir, 0o700)
+        except OSError as exc:
+            _log.warning(f"Konnte Rechte des Datenverzeichnisses nicht auf 0700 setzen: {exc}")
+
     if os.path.exists(secret_file):
         with open(secret_file, 'rb') as f:
             secret = f.read()
@@ -15,6 +35,19 @@ def create_app():
         secret = os.urandom(32)
         with open(secret_file, 'wb') as f:
             f.write(secret)
+        try:
+            os.chmod(secret_file, 0o600)
+        except OSError as exc:
+            _log.warning(f"Konnte Rechte des Secret-Key nicht auf 0600 setzen: {exc}")
+    return secret
+
+
+def create_app():
+    app = Flask(__name__)
+
+    # Security: Use a consistent secret key across all workers.
+    data_dir = os.path.join(os.path.dirname(__file__), '..', 'data')
+    secret = _ensure_data_dir_and_secret(data_dir)
     app.secret_key = os.environ.get('SECRET_KEY', secret)
 
     app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
