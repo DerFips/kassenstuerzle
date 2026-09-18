@@ -1363,9 +1363,12 @@ def settings():
     cats      = [dict(r) for r in conn.execute('SELECT * FROM categories ORDER BY name')]
     recurring = [dict(r) for r in conn.execute('SELECT * FROM recurring_expenses ORDER BY id')]
     category_splits = get_category_splits_map(conn)
+    _act_row = conn.execute("SELECT version FROM activity WHERE scope='settings'").fetchone()
+    activity_version = _act_row['version'] if _act_row else 0
     conn.close()
     return render_template('settings.html', active='settings', persons=persons, categories=cats,
-                            recurring=recurring, category_splits=category_splits)
+                            recurring=recurring, category_splits=category_splits,
+                            activity_version=activity_version)
 
 
 

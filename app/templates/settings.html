@@ -5,6 +5,7 @@
 <div class="row g-3">
   <div class="col-12">
     <h4 class="mb-3"><i class="bi bi-gear me-2"></i>{{ t('settings.title') }}</h4>
+    <div id="settingsActivityBar" class="mb-3 d-flex flex-wrap gap-2"></div>
   </div>
 
   <!-- Personen -->
@@ -492,6 +493,24 @@ function urlBase64ToUint8Array(base64String) {
 {% block extra_script %}
 <script>
 const PERSONS_FOR_SPLITS = {{ persons | tojson }};
+const ACTIVITY_VERSION = {{ activity_version | tojson }};
+let _pendingPersonDeletes = [];
+let _pendingCatDeletes = [];
+let _pendingRecurDeletes = [];
+let _ckSeq = 0;
+function nextClientKey(el) {
+  if (!el.dataset.clientKey) el.dataset.clientKey = 'c' + (++_ckSeq);
+  return el.dataset.clientKey;
+}
+function rowIdentity(el) {
+  return el.dataset.id ? { id: parseInt(el.dataset.id, 10) } : { client_key: nextClientKey(el) };
+}
+function applyIdMap(idMap, selector) {
+  Object.entries(idMap || {}).forEach(([ck, id]) => {
+    const el = document.querySelector(`${selector}[data-client-key="${ck}"]`);
+    if (el) { el.dataset.id = id; delete el.dataset.clientKey; }
+  });
+}
 
 // Personen
 document.getElementById('add-person-btn').addEventListener('click', () => {
@@ -504,18 +523,37 @@ document.getElementById('add-person-btn').addEventListener('click', () => {
   document.getElementById('persons-list').appendChild(div);
 });
 document.getElementById('persons-list').addEventListener('click', e => {
-  if (e.target.closest('.remove-person-btn')) e.target.closest('.person-row').remove();
+  if (e.target.closest('.remove-person-btn')) {
+    const row = e.target.closest('.person-row');
+    if (row.dataset.id) _pendingPersonDeletes.push(parseInt(row.dataset.id, 10));
+    row.remove();
+  }
 });
 document.getElementById('save-persons-btn').addEventListener('click', async () => {
   const rows = [...document.querySelectorAll('.person-row')].map(r => ({
-    id: r.dataset.id || null,
+    ...rowIdentity(r),
     name: r.querySelector('.person-name').value.trim(),
     wallet_start_date: r.querySelector('.person-wallet-date').value || null,
     wallet_start_amount: parseFloat(r.querySelector('.person-wallet-amount').value) || 0
   })).filter(p => p.name);
-  const res = await fetch('/api/persons/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(rows)});
+  const sentDeletes = _pendingPersonDeletes.slice();
+  const res = await fetch('/api/persons/save', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ v: 2, rows, deleted_ids: sentDeletes })
+  });
   const d = await res.json();
-  showToast(d.success ? t('settings.toast_persons_saved') : t('settings.toast_error', {error: d.error||''}), d.success ? 'success' : 'danger');
+  if (d.success) {
+    applyIdMap(d.id_map, '.person-row');
+    _pendingPersonDeletes = _pendingPersonDeletes.filter(id => !sentDeletes.includes(id));
+    if (typeof activityWatchVersion === 'function') activityWatchVersion(d.activity_version);
+    if (d.conflicts && d.conflicts.length) {
+      showToast(t('settings.name_conflict', {names: d.conflicts.join(', ')}), 'warning');
+    } else {
+      showToast(t('settings.toast_persons_saved'), 'success');
+    }
+  } else {
+    showToast(t('settings.toast_error', {error: d.error||''}), 'danger');
+  }
 });
 
 // Kategorien
@@ -546,7 +584,11 @@ document.getElementById('add-cat-btn').addEventListener('click', () => {
   document.getElementById('categories-list').appendChild(div);
 });
 document.getElementById('categories-list').addEventListener('click', e => {
-  if (e.target.closest('.remove-cat-btn')) e.target.closest('.cat-row-wrap').remove();
+  if (e.target.closest('.remove-cat-btn')) {
+    const wrap = e.target.closest('.cat-row-wrap');
+    if (wrap.dataset.id) _pendingCatDeletes.push(parseInt(wrap.dataset.id, 10));
+    wrap.remove();
+  }
 });
 document.getElementById('save-cats-btn').addEventListener('click', async () => {
   const rows = [...document.querySelectorAll('.cat-row-wrap')].map(r => {
@@ -556,16 +598,31 @@ document.getElementById('save-cats-btn').addEventListener('click', async () => {
       if (v > 0) splits[inp.dataset.personId] = v;
     });
     return {
-      id: r.dataset.id || null,
+      ...rowIdentity(r),
       name: r.querySelector('.cat-name').value.trim(),
       color: r.querySelector('.cat-color').value.replace('#',''),
       is_split: r.querySelector('.cat-split').checked ? 1 : 0,
       splits,
     };
   }).filter(c => c.name);
-  const res = await fetch('/api/categories/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(rows)});
+  const sentDeletes = _pendingCatDeletes.slice();
+  const res = await fetch('/api/categories/save', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ v: 2, rows, deleted_ids: sentDeletes })
+  });
   const d = await res.json();
-  showToast(d.success ? t('settings.toast_categories_saved') : t('settings.toast_error', {error: d.error||''}), d.success ? 'success' : 'danger');
+  if (d.success) {
+    applyIdMap(d.id_map, '.cat-row-wrap');
+    _pendingCatDeletes = _pendingCatDeletes.filter(id => !sentDeletes.includes(id));
+    if (typeof activityWatchVersion === 'function') activityWatchVersion(d.activity_version);
+    if (d.conflicts && d.conflicts.length) {
+      showToast(t('settings.name_conflict', {names: d.conflicts.join(', ')}), 'warning');
+    } else {
+      showToast(t('settings.toast_categories_saved'), 'success');
+    }
+  } else {
+    showToast(t('settings.toast_error', {error: d.error||''}), 'danger');
+  }
 });
 
 // Wiederkehrende
@@ -588,11 +645,15 @@ document.getElementById('add-rec-btn').addEventListener('click', () => {
   document.getElementById('recurring-list').appendChild(div);
 });
 document.getElementById('recurring-list').addEventListener('click', e => {
-  if (e.target.closest('.remove-rec-btn')) e.target.closest('.recurring-row').remove();
+  if (e.target.closest('.remove-rec-btn')) {
+    const row = e.target.closest('.recurring-row');
+    if (row.dataset.id) _pendingRecurDeletes.push(parseInt(row.dataset.id, 10));
+    row.remove();
+  }
 });
 document.getElementById('save-recurring-btn').addEventListener('click', async () => {
   const rows = [...document.querySelectorAll('.recurring-row')].map(r => ({
-    id: r.dataset.id || null,
+    ...rowIdentity(r),
     day: parseInt(r.querySelector('.rec-day').value) || 1,
     description: r.querySelector('.rec-desc').value.trim(),
     person_id: r.querySelector('.rec-person').value || null,
@@ -601,9 +662,19 @@ document.getElementById('save-recurring-btn').addEventListener('click', async ()
     frequency: r.querySelector('.rec-freq').value,
     start_month: 1
   })).filter(r => r.description || r.amount > 0);
-  const res = await fetch('/api/recurring/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(rows)});
+  const sentDeletes = _pendingRecurDeletes.slice();
+  const res = await fetch('/api/recurring/save', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ v: 2, rows, deleted_ids: sentDeletes })
+  });
   const d = await res.json();
-  showToast(d.success ? t('settings.toast_recurring_saved') : t('settings.toast_error', {error: d.error||''}), d.success ? 'success' : 'danger');
+  if (d.success) {
+    applyIdMap(d.id_map, '.recurring-row');
+    _pendingRecurDeletes = _pendingRecurDeletes.filter(id => !sentDeletes.includes(id));
+    if (typeof activityWatchVersion === 'function') activityWatchVersion(d.activity_version);
+  }
+  showToast(d.success ? t('settings.toast_recurring_saved') : t('settings.toast_error', {error: d.error||''}),
+            d.success ? 'success' : 'danger');
 });
 
 // CSV Import
@@ -619,5 +690,7 @@ document.getElementById('csv-import-btn').addEventListener('click', async () => 
     ? `<div class="alert alert-success py-2">${t('settings.csv_result_success', {imported: d.imported, months: d.months})}</div>`
     : `<div class="alert alert-danger py-2">${t('settings.csv_result_error', {error: d.error})}</div>`;
 });
+
+initActivityWatch({ scope: 'settings', version: ACTIVITY_VERSION, container: 'settingsActivityBar' });
 </script>
 {% endblock %}
