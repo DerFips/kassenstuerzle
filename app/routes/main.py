@@ -49,6 +49,12 @@ def _open_db(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     if _SQLCIPHER_AVAILABLE and _DB_KEY:
         conn.execute(_pragma_key_sql(_DB_KEY))
+    # Nebenläufigkeit: WAL erlaubt parallele Leser während ein Writer schreibt,
+    # busy_timeout verhindert sofortige "database is locked"-Fehler bei den
+    # 4 Gunicorn-Threads. journal_mode ist in der DB-Datei persistent,
+    # busy_timeout gilt pro Verbindung.
+    conn.execute('PRAGMA journal_mode = WAL')
+    conn.execute('PRAGMA busy_timeout = 5000')
     conn.execute('PRAGMA foreign_keys = ON')
     return conn
 
@@ -1867,6 +1873,13 @@ def api_backup_restore():
             return jsonify(success=False, error=t('srv.invalid_db_upload')), 400
     create_backup("pre-restore")
     shutil.copy(str(tmp), db_path)
+    # WAL-Sidecars der alten Datenbank entfernen: ein übrig gebliebenes -wal
+    # würde Teile der gerade wiederhergestellten DB zurückrollen.
+    for _sidecar in (db_path + '-wal', db_path + '-shm'):
+        try:
+            os.remove(_sidecar)
+        except FileNotFoundError:
+            pass
     tmp.unlink(missing_ok=True)
     return jsonify(success=True)
 
