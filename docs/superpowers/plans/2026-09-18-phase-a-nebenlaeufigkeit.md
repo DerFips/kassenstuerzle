@@ -129,8 +129,12 @@ def db(app):
     for table in _CLEANUP_TABLES:
         try:
             conn.execute(f'DELETE FROM {table}')
-        except Exception:
-            pass
+        except main_module.sqlite3.OperationalError as exc:
+            # 'activity' und 'presence' entstehen erst in Task 3 - bis dahin
+            # duerfen sie fehlen. Jeder ANDERE Fehler muss sichtbar bleiben,
+            # sonst bricht die Testisolation still zusammen.
+            if 'no such table' not in str(exc).lower():
+                raise
     conn.commit()
     conn.close()
 ```
@@ -199,14 +203,28 @@ def test_connection_uses_wal_and_busy_timeout(db):
     assert timeout == 5000
 
 
-def test_restore_removes_stale_wal_sidecars(app, auth_client, csrf, tmp_path):
-    """Ein uebrig gebliebenes -wal darf die wiederhergestellte DB nicht zurueckrollen."""
+def test_restore_removes_stale_wal_sidecars(app, auth_client, csrf, tmp_path, monkeypatch):
+    """Nach dem Restore duerfen keine -wal/-shm der alten DB uebrig bleiben.
+
+    Die blosse Existenzpruefung waere KEIN Regressionswaechter: SQLite verwirft
+    ein Sidecar mit ungueltigem Header bereits beim Oeffnen der Datenbank, der
+    Test waere also auch ohne den Fix gruen. Deshalb wird zusaetzlich geprueft,
+    dass der Restore-Code beide Pfade aktiv zu entfernen versucht.
+    """
     wal = m.DB_PATH + '-wal'
     shm = m.DB_PATH + '-shm'
-    with open(wal, 'wb') as fh:
-        fh.write(b'stale')
-    with open(shm, 'wb') as fh:
-        fh.write(b'stale')
+    for path in (wal, shm):
+        with open(path, 'wb') as fh:
+            fh.write(b'stale')
+
+    removed = []
+    real_remove = os.remove
+
+    def tracking_remove(path, *args, **kwargs):
+        removed.append(str(path))
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(m.os, 'remove', tracking_remove)
 
     # Gueltige SQLite-Datei als Upload erzeugen
     src = tmp_path / 'backup.db'
@@ -223,8 +241,10 @@ def test_restore_removes_stale_wal_sidecars(app, auth_client, csrf, tmp_path):
                                    content_type='multipart/form-data')
         assert res.status_code == 200
         assert res.get_json()['success'] is True
-        assert not os.path.exists(wal), '-wal wurde nicht entfernt'
-        assert not os.path.exists(shm), '-shm wurde nicht entfernt'
+        assert wal in removed, 'Restore hat das -wal nicht aktiv entfernt'
+        assert shm in removed, 'Restore hat das -shm nicht aktiv entfernt'
+        assert not os.path.exists(wal)
+        assert not os.path.exists(shm)
     finally:
         # Der Restore hat die Test-Datenbank durch die minimale Upload-Datei
         # ersetzt. Ohne Wiederherstellung des Schemas scheitern alle folgenden
