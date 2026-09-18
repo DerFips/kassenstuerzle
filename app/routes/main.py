@@ -1114,6 +1114,103 @@ def api_users_delete(user_id):
     return jsonify(success=True)
 
 
+# ── Einrichtungsassistent für Benutzerprofile ─────────────────────────────────
+_UMLAUTE = {'ä': 'ae', 'ö': 'oe', 'ü': 'ue', 'ß': 'ss'}
+
+
+def _benutzername_aus_person(name: str, vergeben: set) -> str:
+    """Leitet einen Benutzernamen aus einem Personennamen ab.
+
+    Kleinschreibung, Umlaut-Transliteration, Leerzeichen zu Punkt, alles
+    ausserhalb [a-z0-9._-] entfernt. Bei Kollision wird gezaehlt. Der Vorschlag
+    ist im UI editierbar - eine Person namens "Admin" kollidiert absichtlich
+    sichtbar mit dem Bestandskonto statt still umbenannt zu werden.
+    """
+    import re as _re
+    s = (name or '').strip().lower()
+    for umlaut, ersatz in _UMLAUTE.items():
+        s = s.replace(umlaut, ersatz)
+    s = _re.sub(r'\s+', '.', s)
+    s = _re.sub(r'[^a-z0-9._-]', '', s).strip('.')
+    if not s:
+        s = 'benutzer'
+    kandidat, zaehler = s, 1
+    while kandidat in vergeben:
+        zaehler += 1
+        kandidat = f'{s}{zaehler}'
+    return kandidat
+
+
+@main_bp.route('/api/setup/profiles')
+@admin_required
+def api_setup_profiles():
+    conn = get_db()
+    flag = conn.execute("SELECT value FROM app_meta WHERE key='profiles_setup_done'").fetchone()
+    vergeben = {r['username'].lower() for r in conn.execute('SELECT username FROM users')}
+    ich = conn.execute('SELECT username, person_id FROM users WHERE id=?',
+                       (session.get('user_id'),)).fetchone()
+    alle_personen = [dict(r) for r in conn.execute('SELECT id, name FROM persons ORDER BY name')]
+    offen = conn.execute(
+        'SELECT p.id, p.name FROM persons p'
+        ' LEFT JOIN users u ON u.person_id = p.id'
+        ' WHERE u.id IS NULL ORDER BY p.name').fetchall()
+    vorschlaege = []
+    for p in offen:
+        name = _benutzername_aus_person(p['name'], vergeben)
+        vergeben.add(name)
+        vorschlaege.append({'person_id': p['id'], 'person_name': p['name'], 'username': name})
+    conn.close()
+    return jsonify(success=True, done=bool(flag and flag['value'] == '1'),
+                   me={'username': ich['username'] if ich else '',
+                       'person_id': ich['person_id'] if ich else None},
+                   persons=alle_personen, suggestions=vorschlaege)
+
+
+@main_bp.route('/api/setup/profiles/self', methods=['POST'])
+@admin_required
+def api_setup_profiles_self():
+    """Schritt 1 des Assistenten: "Wer bist du?"
+
+    Verknuepft das eigene Konto mit einer Person und erlaubt optional die
+    Umbenennung des Bestandskontos (typisch: 'admin' -> echter Vorname).
+    Eine Umbenennung macht den Namen in der Session veraltet, deshalb wird
+    session_epoch erhoeht - der Admin muss sich danach bewusst neu anmelden.
+    """
+    d = request.get_json(silent=True) or {}
+    eigene_id = session.get('user_id')
+    neuer_name = (d.get('new_username') or '').strip()
+    conn = get_db()
+
+    if 'person_id' in d:
+        person_id = int(d['person_id']) if d.get('person_id') else None
+        try:
+            conn.execute('UPDATE users SET person_id=? WHERE id=?', (person_id, eigene_id))
+        except sqlite3.IntegrityError:
+            return jsonify(success=False, error=t('srv.person_already_linked')), 409
+
+    umbenannt = False
+    if neuer_name:
+        try:
+            conn.execute('UPDATE users SET username=? WHERE id=?', (neuer_name, eigene_id))
+        except sqlite3.IntegrityError:
+            return jsonify(success=False, error=t('srv.username_taken')), 409
+        _bump_session_epoch(conn, eigene_id)
+        umbenannt = True
+
+    conn.commit()
+    return jsonify(success=True, renamed=umbenannt)
+
+
+@main_bp.route('/api/setup/profiles/complete', methods=['POST'])
+@admin_required
+def api_setup_profiles_complete():
+    conn = get_db()
+    conn.execute("INSERT INTO app_meta (key, value) VALUES ('profiles_setup_done','1')"
+                 " ON CONFLICT(key) DO UPDATE SET value='1'")
+    conn.commit()
+    return jsonify(success=True)
+
+
 @main_bp.route('/')
 @login_required
 def index():
