@@ -1,3 +1,13 @@
+{# ── ACHTUNG: toter Code (Befund M13) ─────────────────────────────────────────
+ # Keine View rendert dieses Template, und die hier angesprochenen Endpunkte
+ # existieren nicht. Es wurde deshalb bei der CSP-Umstellung NICHT mitkonvertiert.
+ #
+ # Diese Datei enthaelt noch 11 Inline-Ereignisattribute (on...=). Sobald
+ # script-src eine 'nonce-...'-Quelle traegt, ignoriert der Browser
+ # 'unsafe-inline' und fuehrt KEIN einziges dieser Attribute mehr aus - die
+ # Seite waere dann komplett ohne Funktion. Wer dieses Template wiederbelebt,
+ # muss alle on...=-Attribute vorher auf addEventListener umstellen.
+ #}
 {% extends 'base.html' %}
 {% block title %}Beleg scannen – Kassenstürzle{% endblock %}
 {% block content %}
@@ -166,7 +176,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce() }}">
 const _NOW_Y = {{ now.year }};
 const _NOW_M = {{ now.month }};
 let _selectedFile = null;

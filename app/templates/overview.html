@@ -624,13 +624,13 @@
 
 {% endif %}
 
-<script id="overviewChartData" type="application/json">{{ overview_chart_json | tojson }}</script>
+<script nonce="{{ csp_nonce() }}" id="overviewChartData" type="application/json">{{ overview_chart_json | tojson }}</script>
 {% endblock %}
 
 {% block extra_script %}
 {% if persons_list %}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"></script>
-<script>
+<script nonce="{{ csp_nonce() }}">
 (function () {
   const DATA = JSON.parse(document.getElementById('overviewChartData').textContent);
   const yearFilter = document.getElementById('chartYearFilter');

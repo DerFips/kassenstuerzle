@@ -241,6 +241,22 @@ def create_app():
             session['csrf_token'] = _sec.token_hex(32)
         return {'csrf_token': session.get('csrf_token', '')}
 
+    # ── CSP-Nonce pro Request ─────────────────────────────────────────────
+    # Jeder Request bekommt einen frischen Zufallswert. Templates schreiben ihn
+    # per <script nonce="{{ csp_nonce() }}"> in ihre Inline-Bloecke. Der Wert
+    # landet auf g, damit Header und Template garantiert denselben benutzen.
+    @app.context_processor
+    def inject_csp_nonce():
+        from flask import g
+        import secrets as _sec
+
+        def csp_nonce():
+            if not hasattr(g, 'csp_nonce'):
+                g.csp_nonce = _sec.token_urlsafe(16)
+            return g.csp_nonce
+
+        return {'csp_nonce': csp_nonce}
+
     @app.context_processor
     def inject_i18n():
         from flask import session
@@ -294,6 +310,21 @@ def create_app():
         # Deaktiviert Browser-Features die die App nicht braucht
         response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
         # Content Security Policy: nur eigene Ressourcen + CDNs die die App nutzt
+        #
+        # script-src traegt hier BEWUSST noch KEINE 'nonce-...'-Quelle, obwohl die
+        # Infrastruktur dafuer steht (context processor csp_nonce() + nonce-Attribute
+        # an allen Inline-<script>-Bloecken). Grund: sobald eine Nonce (oder ein Hash)
+        # in der Quellenliste steht, ignoriert der Browser 'unsafe-inline' vollstaendig.
+        # Das ist im Browser nachgemessen: Chrome meldet dann
+        # "Note that 'unsafe-inline' is ignored if either a hash or nonce value is
+        # present in the source list" und blockt sowohl Inline-Bloecke ohne Nonce als
+        # auch JEDES on...=-Attribut - Nonces gelten fuer Ereignis-Attribute gar nicht.
+        # month.html enthaelt noch ~35 solcher Attribute; eine Nonce an dieser Stelle
+        # wuerde die Seite also sofort funktionsunfaehig machen.
+        #
+        # Die Nonce-Quelle kommt deshalb erst im Abschlussschritt dazu - zusammen mit
+        # dem Entfernen von 'unsafe-inline', nachdem alle Handler auf addEventListener
+        # umgestellt und im Browser geprueft sind (Befund I6).
         csp = (
             "default-src 'self'; "
             "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://cdn.simpleicons.org; "

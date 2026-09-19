@@ -357,7 +357,7 @@
 
 {% endblock %}
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce() }}">
 /* ══════════════════════════════════════════════════════════════
    KASSENSTÜRZLE – month.html JavaScript
    Alle Funktionen in EINEM einzigen <script>-Block.

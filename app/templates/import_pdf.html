@@ -81,7 +81,7 @@
 {% endblock %}
 
 {% block extra_script %}
-<script>
+<script nonce="{{ csp_nonce() }}">
 let parsedTransactions = [];
 
 document.getElementById('pdf-check-all').addEventListener('change', function() {
