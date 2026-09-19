@@ -85,7 +85,8 @@ def _markup_ohne_kommentare(name):
     return text
 
 
-@pytest.mark.parametrize('name', ['base.html', 'offline.html', 'settings.html'])
+@pytest.mark.parametrize('name', ['base.html', 'offline.html', 'settings.html',
+                                  'month.html'])
 def test_umgestellte_templates_ohne_inline_handler(name):
     treffer = _ON_ATTR.findall(_markup_ohne_kommentare(name))
     assert not treffer, f'{name}: Inline-Handler uebrig: {treffer}'
@@ -120,12 +121,125 @@ def test_ersatzverdrahtung_vorhanden():
     assert "getElementById('offline-retry-btn')" in offline
 
 
+# ── 3b. month.html: die 34 Handler aus Schritt 2 ─────────────────────────────
+
+# Genau das Muster aus der Aufgabenstellung. Strenger als _ON_ATTR: es trifft
+# auch eine Erwaehnung im Kommentar. Wer einen Handler "nur im Kommentar"
+# stehen laesst, faellt hier auf - und beim Lesen des Diffs ist nicht mehr
+# unterscheidbar, ob er wirklich weg ist.
+_ON_ATTR_ROH = re.compile(r' on[a-z]*=')
+
+
+def test_month_html_hat_kein_einziges_ereignisattribut_mehr():
+    text = (TEMPLATES / 'month.html').read_text(encoding='utf-8')
+    treffer = _ON_ATTR_ROH.findall(text)
+    assert not treffer, f'month.html: {len(treffer)} Ereignisattribute uebrig'
+
+
+def test_month_html_entfernte_handler_sind_namentlich_weg():
+    """Namentlich, damit ein Rueckfall auf eine einzelne Stelle nicht durch
+    eine andere Zaehlung verdeckt wird. Die Zeilenvorlagen (addRow /
+    addIncomeRow) stehen hier zuerst: sie sind der heikle Teil, weil ihre
+    Elemente erst zur Laufzeit entstehen."""
+    text = (TEMPLATES / 'month.html').read_text(encoding='utf-8')
+    for schnipsel in (
+            # dynamisch gebaute Ausgaben-Zeile
+            'onchange="scheduleAutoSaveExpense()"',
+            'onchange="updatePaidForStyle(this); scheduleAutoSaveExpense()"',
+            'onchange="updateRowColor(this); scheduleAutoSaveExpense()"',
+            'onchange="updateFooter(); scheduleAutoSaveExpense()"',
+            'onfocus="formulaFocus(this)"',
+            'onblur="formulaBlur(this); updateFooter()"',
+            'oninput="updateFooter()"',
+            'onkeydown="handleAmountTab(event, this)"',
+            'onclick="receiptClick(this)"',
+            'onclick="removeExpenseRow(this)"',
+            # dynamisch gebaute Einnahmen-Zeile
+            'onchange="scheduleAutoSaveIncome()"',
+            'oninput="updateIncomeFooter()"',
+            'onclick="removeIncomeRow(this)"',
+            # servergerendertes Markup
+            'onclick="scanReceipt()"',
+            'onclick="applyReceiptScan()"',
+            "onclick=\"clearTable('expenseBody', true)\"",
+            "onclick=\"clearTable('incomeBody', false)\"",
+            'onclick="insertRecurring()"',
+            'onclick="addRow()"',
+            'onclick="addIncomeRow()"',
+            'onclick="saveExpenses()"',
+            'onclick="saveIncome()"',
+            'onchange="applyExpenseFilter()"',
+            'onchange="applyIncomeFilter()"',
+            'onclick="resetExpenseFilter()"',
+            'onclick="resetIncomeFilter()"',
+            'onchange="toggleSettle(this.checked)"',
+            # zur Laufzeit erzeugte Knoepfe ausserhalb der Tabellen
+            'onclick="deleteReceipt(this)"',
+            "onclick=\"this.closest('.toast').remove()\"",
+    ):
+        assert schnipsel not in text, f'month.html: {schnipsel} noch da'
+
+
+def test_month_html_ersatzverdrahtung_vorhanden():
+    """Attribut entfernt UND nicht ersetzt waere eine stille Regression, die
+    der reine Abwesenheitstest durchwinkt."""
+    text = (TEMPLATES / 'month.html').read_text(encoding='utf-8')
+
+    # Delegation an den beiden stabilen <tbody>, je Ereignisart einmal.
+    assert "function verdrahteAusgabenTabelle()" in text
+    assert "function verdrahteEinnahmenTabelle()" in text
+    for ereignis in ("'change'", "'input'", "'keydown'", "'click'"):
+        assert f"body.addEventListener({ereignis}" in text, (
+            f'kein delegierter Listener fuer {ereignis}')
+
+    # focus/blur steigen nicht auf: pro Element, beim Anlegen der Zeile.
+    assert "function verdrahteBetragsfeld(input)" in text
+    assert "input.addEventListener('focus'" in text
+    assert "input.addEventListener('blur'" in text
+    # ... und in BEIDEN Zeilenvorlagen aufgerufen (Ausgaben und Einnahmen).
+    assert text.count('verdrahteBetragsfeld(amtInput);') == 2
+
+    # Servergerenderte Schalter.
+    assert "function verdrahteStatischeBedienelemente()" in text
+    for id_ in ('receiptScanBtn', 'receiptApplyBtn', 'clearExpensesBtn',
+                'recurBtn', 'addExpenseRowBtn', 'saveBtn', 'filterPerson',
+                'filterCat', 'resetExpenseFilterBtn', 'clearIncomeBtn',
+                'addIncomeRowBtn', 'saveIncomeBtn', 'incFilterPerson',
+                'resetIncomeFilterBtn'):
+        assert f"an('{id_}'," in text, f'{id_} nicht verdrahtet'
+    assert "toggleSettle(abrechnung.checked)" in text
+
+    # Die Haken, an denen die Delegation die Knoepfe wiedererkennt. Ohne sie
+    # trifft closest() den falschen Knopf: die Zeilen-Mülltonne und der
+    # Löschen-Knopf der Belegvorschau teilen sich btn-outline-danger.
+    assert 'js-row-remove' in text
+    assert 'js-receipt-delete' in text
+
+    # Verdrahtet wird VOR dem Erzeugen der Zeilen und vor dem focusout-
+    # Autosave, damit die Reihenfolge der Listener am <tbody> der alten
+    # Reihenfolge (Attribut-Handler zuerst) entspricht.
+    init = text[text.index("document.addEventListener('DOMContentLoaded'"):]
+    assert init.index('verdrahteAusgabenTabelle();') < init.index('EXISTING.forEach')
+    assert init.index('verdrahteEinnahmenTabelle();') < init.index("'focusout'")
+
+
+def test_gerenderte_monatsseite_ohne_ereignisattribute(auth_client):
+    """Das Template ist das eine, die ausgelieferte Seite das andere: hier
+    haengt auch drin, was base.html beisteuert."""
+    html = auth_client.get('/month/2026/9').get_data(as_text=True)
+    treffer = _ON_ATTR.findall(html)
+    assert not treffer, f'/month/2026/9: Ereignisattribute im HTML: {treffer}'
+
+
 # ── 4. Der Header bleibt in diesem Schritt bewusst unveraendert ──────────────
 
 def test_script_src_traegt_noch_keine_nonce_quelle(auth_client):
     """Sobald eine Nonce in script-src steht, ignoriert der Browser
-    'unsafe-inline' - month.html haette dann keinen funktionierenden Handler
-    mehr. Die Nonce-Quelle kommt erst im Abschlussschritt dazu."""
+    'unsafe-inline'. Seit Schritt 2 hat zwar kein Template mehr ein
+    on...=-Attribut, aber das Scharfschalten bleibt ein eigener Schritt:
+    'unsafe-inline' raus und 'nonce-...' rein gehoeren in EINEN Zug, nach
+    einem Browser-Durchgang ueber alle Seiten. Dieser Test haelt fest, dass
+    er noch aussteht."""
     csp = auth_client.get('/overview').headers['Content-Security-Policy']
     script_src = [d for d in csp.split(';') if d.strip().startswith('script-src')][0]
     assert "'unsafe-inline'" in script_src
