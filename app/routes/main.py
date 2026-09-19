@@ -59,6 +59,11 @@ def _open_db(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     if _SQLCIPHER_AVAILABLE and _DB_KEY:
         conn.execute(_pragma_key_sql(_DB_KEY))
+    # Befund I9: Fehlt der Treiber, waehrend _DB_KEY gesetzt ist, wird hier
+    # kommentarlos KEIN PRAGMA key gesetzt - die DB liefe im Klartext. Dieser
+    # Zustand kann den Start nicht mehr ueberleben: create_app() bricht dann
+    # in _pruefe_db_verschluesselung() ab (app/__init__.py), ausser der
+    # Betreiber hat ALLOW_UNENCRYPTED=1 ausdruecklich gesetzt.
     # Nebenläufigkeit: WAL erlaubt parallele Leser während ein Writer schreibt,
     # busy_timeout verhindert sofortige "database is locked"-Fehler bei den
     # 4 Gunicorn-Threads. journal_mode ist in der DB-Datei persistent,
@@ -77,6 +82,11 @@ def _migrate_to_encrypted(path: str, key: str) -> None:
     log = logging.getLogger(__name__)
 
     if not _SQLCIPHER_AVAILABLE:
+        # Befund I9: Diese Warnung war toter Code - der einzige Aufrufer
+        # (create_app) betrat die Funktion nur, wenn _SQLCIPHER_AVAILABLE
+        # bereits wahr war. Die verbindliche Pruefung sitzt jetzt in
+        # _pruefe_db_verschluesselung() (app/__init__.py) und verweigert den
+        # Start. Der Zweig bleibt als Absicherung fuer andere Aufrufer stehen.
         log.warning("DB_ENCRYPTION_KEY gesetzt, aber sqlcipher3 nicht installiert – DB bleibt unverschlüsselt!")
         return
 

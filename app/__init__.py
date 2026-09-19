@@ -109,7 +109,66 @@ def _secure_cookie_aktiv() -> bool:
     return _laeuft_im_container()
 
 
+def _pruefe_db_verschluesselung() -> None:
+    """Bricht den Start ab, wenn Verschluesselung verlangt, aber unmoeglich ist.
+
+    Befund I9: `create_app()` rief `_migrate_to_encrypted()` nur auf, wenn
+    `_SQLCIPHER_AVAILABLE` bereits wahr war. Die einzige Warnung fuer den
+    Gegenfall steht aber INNERHALB dieser Funktion
+    (`app/routes/main.py`, "DB_ENCRYPTION_KEY gesetzt, aber sqlcipher3 nicht
+    installiert") - von dieser Aufrufstelle aus konnte sie also nie feuern.
+    `_open_db()` ueberspringt `PRAGMA key` ebenfalls kommentarlos. Scheiterte
+    bei einem Rebuild die Installation von `sqlcipher3`, lief die App damit
+    vollstaendig im Klartext weiter, waehrend der Betreiber die Finanzdaten
+    fuer verschluesselt hielt - und nichts an irgendeiner Stelle sagte das.
+
+    Deshalb wird der Fall hier ausdruecklich und AUSSERHALB der Migration
+    geprueft, bevor irgendetwas die Datenbank anfasst. Ein fehlgeschlagener
+    Start ist lauter und damit harmloser als ein stiller Klartextbetrieb.
+
+    Die Werte werden bewusst ueber das Modul gelesen (`_main._DB_KEY`) statt
+    per `from ... import`: nur so sieht die Pruefung den aktuellen Stand, und
+    nur so ist sie im Test ueberhaupt nachstellbar.
+
+    Absichtlich eng: nur die Kombination "Schluessel gesetzt, Treiber fehlt"
+    ist toedlich. Kein Schluessel und kein Treiber ist ein gueltiger,
+    unverschluesselter Aufbau (so laeuft auch die Testsuite) und bleibt still.
+    """
+    _log = logging.getLogger(__name__)
+
+    from .routes import main as _main
+    if not _main._DB_KEY or _main._SQLCIPHER_AVAILABLE:
+        return
+
+    meldung = (
+        "DB_ENCRYPTION_KEY ist gesetzt, aber der SQLCipher-Treiber (sqlcipher3) "
+        "fehlt. Die Datenbank wuerde im KLARTEXT angelegt und beschrieben, "
+        "obwohl die Konfiguration Verschluesselung verlangt."
+    )
+
+    if os.environ.get('ALLOW_UNENCRYPTED', '').strip() == '1':
+        _log.error(
+            "%s ALLOW_UNENCRYPTED=1 ist gesetzt - der Start wird auf "
+            "ausdruecklichen Wunsch fortgesetzt. Die Finanzdaten liegen ab "
+            "jetzt UNVERSCHLUESSELT auf dem Datentraeger.", meldung)
+        return
+
+    _log.error(
+        "%s Der Start wird abgebrochen. Behebung: Image neu bauen, damit "
+        "sqlcipher3 installiert wird (siehe Dockerfile), oder "
+        "DB_ENCRYPTION_KEY entfernen. Wer die Daten wirklich im Klartext "
+        "halten will, setzt ALLOW_UNENCRYPTED=1.", meldung)
+    raise RuntimeError(
+        meldung + " Der Start wird abgebrochen. Behebung: sqlcipher3 "
+        "installieren oder DB_ENCRYPTION_KEY entfernen. Bewusster "
+        "Klartextbetrieb: ALLOW_UNENCRYPTED=1 setzen."
+    )
+
+
 def create_app():
+    # Befund I9: ganz am Anfang, bevor irgendetwas die Datenbank oeffnet.
+    _pruefe_db_verschluesselung()
+
     app = Flask(__name__)
 
     # Security: Use a consistent secret key across all workers.
