@@ -404,6 +404,68 @@ def _autolink_single_person(conn) -> None:
                  users[0]['id'], persons[0]['id'])
 
 
+# ── Herkunftsnachweis fuer Sicherungen (Blocker 1) ───────────────────────────
+# Der Schluessel, unter dem die Instanzkennung in app_meta liegt. Sie wird
+# genau einmal erzeugt und NIE rotiert: sie ist das einzige Merkmal, an dem
+# eine Sicherung dieser Installation von einer untergeschobenen Datei zu
+# unterscheiden ist. Weil sie in der Datenbank steht, traegt jede Sicherung
+# (ein blosser Dateikopie-Vorgang) sie automatisch mit.
+_INSTANZ_ID_SCHLUESSEL = 'instance_id'
+
+
+def _ensure_instanz_id(conn) -> str:
+    """Legt die Instanzkennung beim Start an, falls sie noch fehlt.
+
+    Rueckgabe ist die (ggf. frisch erzeugte) Kennung. Kein Rotieren, kein
+    Ueberschreiben: eine neue Kennung wuerde alle bisherigen Sicherungen
+    dieser Installation entwerten.
+    """
+    row = conn.execute('SELECT value FROM app_meta WHERE key=?',
+                       (_INSTANZ_ID_SCHLUESSEL,)).fetchone()
+    if row is not None and row[0]:
+        return row[0]
+    import secrets as _sec
+    neue = _sec.token_hex(16)
+    conn.execute('INSERT OR REPLACE INTO app_meta (key, value) VALUES (?,?)',
+                 (_INSTANZ_ID_SCHLUESSEL, neue))
+    log.info("Instanzkennung fuer den Herkunftsnachweis von Sicherungen angelegt.")
+    return neue
+
+
+def _lies_instanz_id(conn):
+    """Liest die Instanzkennung aus einer beliebigen Verbindung.
+
+    Gibt None zurueck, wenn app_meta fehlt (Sicherung aus einer frueheren
+    Version) oder kein Eintrag vorhanden ist. Fehlend und "anders" sind
+    bewusst unterscheidbar - nur der erste Fall ist per Bestaetigung
+    ueberstimmbar.
+    """
+    try:
+        row = conn.execute('SELECT value FROM app_meta WHERE key=?',
+                           (_INSTANZ_ID_SCHLUESSEL,)).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    return row[0] or None
+
+
+def _eigene_instanz_id():
+    """Instanzkennung der LAUFENDEN Datenbank.
+
+    Bewusst ueber eine eigene Verbindung statt ueber get_db(): der
+    Restore-Endpunkt schliesst die Request-Verbindung, bevor er prueft.
+    """
+    con = _open_db(DB_PATH)
+    try:
+        return _lies_instanz_id(con)
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
 def init_db():
     conn = get_db()
     conn.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -573,6 +635,7 @@ def init_db():
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person'
                  ' ON users(person_id) WHERE person_id IS NOT NULL')
     conn.execute('CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)')
+    _ensure_instanz_id(conn)
 
     _ensure_admin(conn)
     _autolink_single_person(conn)
@@ -2894,7 +2957,8 @@ def _oeffne_sicherung(pfad: str):
         raise _SicherungAbgelehnt('srv.invalid_db_upload')
 
 
-def _pruefe_sicherung(pfad: str, admin_username: str) -> None:
+def _pruefe_sicherung(pfad: str, admin_username: str,
+                      fremde_instanz_bestaetigt: bool = False) -> None:
     """Prueft eine hochgeladene Sicherung, bevor sie die Datenbank ersetzt.
 
     Befund K2: geprueft wurde frueher nur die Endung '.db' und ob die Datei
@@ -2902,6 +2966,15 @@ def _pruefe_sicherung(pfad: str, admin_username: str) -> None:
     einer eigenen users-Zeile (role='admin') wurde uebernommen - danach war das
     echte Adminkonto weg. Eine 0-Byte-Datei ist eine gueltige leere
     SQLite-Datenbank und loeschte den kompletten Bestand.
+
+    Blocker 1: der Benutzername des angemeldeten Admins taugt NICHT als
+    Herkunftsnachweis - er heisst nach dem Bootstrap 'admin', und den kann
+    ein Angreifer in seine gebastelte Datei genauso hineinschreiben. Der
+    Nachweis laeuft deshalb ueber die Instanzkennung aus app_meta: ein
+    Zufallswert, den nur eine echte Sicherung DIESER Installation kennt.
+    Der Namensabgleich bleibt als zweites, nachgelagertes Signal bestehen -
+    er faengt die echte, aber fremde Sicherung einer anderen Installation
+    zusaetzlich ab.
 
     Wirft _SicherungAbgelehnt mit dem jeweiligen Grund; kehrt nur zurueck, wenn
     die Datei plausibel aus dieser Anwendung stammt.
@@ -2949,11 +3022,36 @@ def _pruefe_sicherung(pfad: str, admin_username: str) -> None:
         if not anzahl:
             raise _SicherungAbgelehnt('srv.restore_no_users')
 
-        # Herkunftsnachweis, soweit ohne Signatur moeglich: der gerade
-        # angemeldete Admin muss in der Datei vorkommen. Eine untergeschobene
-        # Sicherung, die die Instanz einem fremden Konto uebergibt, faellt
-        # damit auf - _ensure_admin() wuerde eine solche Datei sonst sogar noch
-        # zu einem funktionierenden Adminkonto "reparieren".
+        # ── Herkunftsnachweis (Blocker 1) ────────────────────────────────
+        # Die Instanzkennung steht in der Datenbank, also auch in jeder
+        # Sicherung dieser Installation. Ein Angreifer kann sie nicht raten;
+        # er muesste die laufende Datenbank bereits lesen koennen.
+        fremde = _lies_instanz_id(con)
+        eigene = _eigene_instanz_id()
+        if fremde is None:
+            # Sicherungen von VOR dieser Aenderung tragen die Kennung noch
+            # nicht. Sie pauschal abzulehnen wuerde dem Betreiber jeden
+            # bestehenden Rueckweg nehmen - also nur mit ausdruecklicher
+            # Bestaetigung aus der Oberflaeche.
+            if not fremde_instanz_bestaetigt:
+                raise _SicherungAbgelehnt('srv.restore_keine_instanz_id')
+            current_app.logger.warning(
+                "Restore OHNE Herkunftsnachweis freigegeben: Benutzer '%s' hat "
+                "ausdruecklich bestaetigt, dass die Sicherung ohne Instanzkennung "
+                "eingespielt werden soll. Die Datei kann aus einer fremden "
+                "Installation stammen und ersetzt alle Benutzerkonten.",
+                admin_username)
+        elif eigene is not None and fremde != eigene:
+            # Eindeutig eine fremde Installation - hier hilft keine
+            # Bestaetigung, das ist nie ein gewolltes Wiederherstellen.
+            raise _SicherungAbgelehnt('srv.restore_fremde_instanz')
+
+        # Zweites Signal, bewusst beibehalten: der gerade angemeldete Admin
+        # muss in der Datei vorkommen. Allein beweist das nichts (der Name ist
+        # nach dem Bootstrap 'admin'), aber es faengt eine mit Bestaetigung
+        # eingespielte, alte Sicherung ab, die die Instanz an unbekannte
+        # Konten uebergeben wuerde - _ensure_admin() wuerde eine solche Datei
+        # sonst sogar noch zu einem funktionierenden Adminkonto "reparieren".
         bekannt = con.execute('SELECT 1 FROM users WHERE username = ?',
                               (admin_username,)).fetchone()
         if bekannt is None:
@@ -2990,14 +3088,22 @@ def api_backup_restore():
     # plausibel aus dieser Instanz stammt, wird die Datenbank angefasst.
     _angemeldet = getattr(g, 'current_user', None)
     _admin_name = _angemeldet['username'] if _angemeldet is not None else ''
+    # Ausdrueckliche Uebersteuerung fuer Sicherungen ohne Instanzkennung
+    # (Blocker 1). Kommt als Formularfeld, weil der Upload multipart ist.
+    _bestaetigt = str(request.form.get('fremde_instanz_bestaetigt', '')).lower() \
+        in ('1', 'true', 'on', 'yes', 'ja')
     try:
-        _pruefe_sicherung(str(tmp), _admin_name)
+        _pruefe_sicherung(str(tmp), _admin_name, fremde_instanz_bestaetigt=_bestaetigt)
     except _SicherungAbgelehnt as ablehnung:
         current_app.logger.warning(
             "Backup-Restore abgelehnt (%s) - Datei '%s' von Benutzer '%s'",
             ablehnung.schluessel, f.filename, _admin_name)
         tmp.unlink(missing_ok=True)
-        return jsonify(success=False,
+        # `grund` ist der maschinenlesbare Gegenpart zum uebersetzten Text:
+        # die Oberflaeche muss den Fall "keine Instanzkennung" erkennen
+        # koennen, ohne Fehlertexte zu vergleichen (die je nach Sprache
+        # anders lauten).
+        return jsonify(success=False, grund=ablehnung.schluessel,
                        error=t(ablehnung.schluessel, **ablehnung.platzhalter)), 400
     except Exception:
         current_app.logger.exception(

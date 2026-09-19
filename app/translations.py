@@ -303,6 +303,18 @@ TRANSLATIONS = {
         'settings.backup_restore_success': 'Backup erfolgreich wiederhergestellt! Die Seite wird neu geladen.',
         'settings.backup_restore_error': 'Fehler: {error}',
         'settings.backup_restore_generic_error': 'Ein Fehler ist aufgetreten',
+        # Blocker 1: die Datei trägt keine Instanzkennung. Das ist der Moment,
+        # in dem der Admin bewusst entscheiden muss - deshalb bewusst lang und
+        # ohne Beschönigung.
+        'settings.backup_restore_fremde_instanz_confirm':
+            'Diese Datei lässt sich NICHT als Sicherung dieser Installation nachweisen.\n\n'
+            'Sie enthält keine Instanzkennung. Entweder wurde sie vor dem letzten Update '
+            'erstellt – oder sie stammt gar nicht von dieser Installation.\n\n'
+            'Wenn du fortfährst, werden ALLE Daten UND ALLE Benutzerkonten dieser '
+            'Installation durch den Inhalt der Datei ersetzt. Stammt die Datei von '
+            'jemand anderem, verlierst du damit den Zugang zu deiner eigenen Installation.\n\n'
+            'Nur fortfahren, wenn du diese Sicherung selbst erstellt hast. Trotzdem '
+            'einspielen?',
         'settings.day': 'Tag',
         'settings.description': 'Beschreibung',
         'settings.person_placeholder': '– Person –',
@@ -408,6 +420,15 @@ TRANSLATIONS = {
         'srv.restore_admin_missing': 'In der Sicherung fehlt das angemeldete Konto „{benutzer}". '
                                      'Eine fremde Sicherung einzuspielen würde diese Instanz an '
                                      'unbekannte Konten übergeben.',
+        # ── Herkunftsnachweis über die Instanzkennung (Blocker 1) ─────────
+        'srv.restore_fremde_instanz': 'Diese Sicherung gehört zu einer anderen Kassenstürzle-'
+                                      'Installation. Sie wurde abgelehnt, weil sie alle Benutzer '
+                                      'dieser Installation ersetzen würde.',
+        'srv.restore_keine_instanz_id': 'Bei dieser Datei lässt sich nicht nachweisen, dass sie '
+                                        'aus dieser Installation stammt (keine Instanzkennung). '
+                                        'Sicherungen, die vor diesem Update erstellt wurden, '
+                                        'lassen sich nur nach ausdrücklicher Bestätigung '
+                                        'einspielen.',
         'srv.reserved_backup_label': 'Das Label „{label}" ist für automatische Schutzkopien '
                                      'reserviert. Bitte ein anderes wählen.',
         'srv.ocr_unreadable': 'Beleg konnte nicht gelesen werden.',
@@ -710,6 +731,15 @@ TRANSLATIONS = {
         'settings.backup_restore_success': 'Backup restored successfully! The page will reload.',
         'settings.backup_restore_error': 'Error: {error}',
         'settings.backup_restore_generic_error': 'An error occurred',
+        # Blocker 1: the file carries no instance id.
+        'settings.backup_restore_fremde_instanz_confirm':
+            'This file CANNOT be proven to be a backup of this installation.\n\n'
+            'It carries no instance id. It was either created before the last update – '
+            'or it does not come from this installation at all.\n\n'
+            'If you continue, ALL data AND ALL user accounts of this installation will be '
+            'replaced by the contents of the file. If the file came from somebody else, you '
+            'will lose access to your own installation.\n\n'
+            'Only continue if you created this backup yourself. Restore anyway?',
         'settings.day': 'Day',
         'settings.description': 'Description',
         'settings.person_placeholder': '– Person –',
@@ -815,6 +845,14 @@ TRANSLATIONS = {
         'srv.restore_admin_missing': 'The backup does not contain the account you are signed in '
                                      'as ("{benutzer}"). Restoring a foreign backup would hand '
                                      'this instance over to unknown accounts.',
+        # ── Origin proof via the instance id (blocker 1) ──────────────────
+        'srv.restore_fremde_instanz': 'This backup belongs to a different Kassenstürzle '
+                                      'installation. It was rejected because it would replace '
+                                      'every user of this installation.',
+        'srv.restore_keine_instanz_id': 'This file cannot be proven to come from this '
+                                        'installation (no instance id). Backups created before '
+                                        'this update can only be restored after an explicit '
+                                        'confirmation.',
         'srv.reserved_backup_label': 'The label "{label}" is reserved for automatic protective '
                                      'copies. Please choose a different one.',
         'srv.ocr_unreadable': 'Receipt could not be read.',

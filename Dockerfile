@@ -35,13 +35,25 @@ COPY . .
 RUN mkdir -p /app/data
 
 # Sicherheit (Befund I2): nicht als root laufen. Eigener, unprivilegierter
-# Benutzer, dem das Arbeits- und Datenverzeichnis gehört (nötig, damit er
-# Datenbank/Backups/Belege/Secret-Key im Bind-Mount ./data:/app/data anlegen
-# und lesen kann).
-RUN groupadd -r kassenstuerzle && \
-    useradd -r -g kassenstuerzle -d /app -s /usr/sbin/nologin kassenstuerzle && \
+# Benutzer, dem das Arbeitsverzeichnis gehört.
+#
+# ACHTUNG, wichtige Einschränkung: dieses `chown -R /app` läuft zur BUILD-Zeit.
+# docker-compose.yml hängt zur LAUFZEIT `./data:/app/data` darüber - der
+# Bind-Mount verdeckt das mitgebaute /app/data samt seiner Rechte vollständig.
+# Für das Datenverzeichnis zählt deshalb ausschließlich, wem das Host-
+# Verzeichnis ./data gehört. Auf einem Linux-Host gehört ein bestehendes
+# ./data der uid 0 (vom früheren root-Container geschrieben); der Start stirbt
+# dann in _open_db beim `PRAGMA journal_mode=WAL`, weil sich -wal/-shm nicht
+# anlegen lassen - und `restart: unless-stopped` dreht das in eine Endlosschleife.
+#
+# Deshalb sind uid/gid fest auf 1000 gepinnt (`useradd -r` vergäbe sonst eine
+# beliebige System-uid, die sich zwischen Builds ändern kann). Erst dadurch ist
+# das `user: "1000:1000"` in docker-compose.yml und das dort dokumentierte
+# einmalige `sudo chown -R 1000:1000 ./data` überhaupt verlässlich.
+RUN groupadd -r -g 1000 kassenstuerzle && \
+    useradd -r -u 1000 -g kassenstuerzle -d /app -s /usr/sbin/nologin kassenstuerzle && \
     chown -R kassenstuerzle:kassenstuerzle /app
-USER kassenstuerzle
+USER 1000:1000
 
 # Umgebungsvariablen (Defaults; per -e oder .env überschreibbar)
 ENV DATABASE_PATH=/app/data/kassenstuerzle.db

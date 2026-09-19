@@ -37,10 +37,13 @@ def kein_dateitausch(monkeypatch):
     return aufrufe
 
 
-def _hochladen(auth_client, csrf, pfad, name=None):
+def _hochladen(auth_client, csrf, pfad, name=None, bestaetigt=False):
     with open(pfad, 'rb') as fh:
+        daten = {'file': (fh, name or Path(pfad).name)}
+        if bestaetigt:
+            daten['fremde_instanz_bestaetigt'] = 'true'
         return auth_client.post('/api/backup/restore',
-                                data={'file': (fh, name or Path(pfad).name)},
+                                data=daten,
                                 headers={'X-CSRF-Token': csrf},
                                 content_type='multipart/form-data')
 
@@ -163,6 +166,140 @@ def test_restore_lehnt_trigger_und_views_ab(auth_client, csrf, sicherung_bauen,
     assert res.get_json()['error'] == translate('de', 'srv.restore_objects',
                                                 objekte=bezeichnung)
     assert kein_dateitausch == []
+
+
+# ── Blocker 1: Herkunftsnachweis ueber die Instanzkennung ────────────────────
+
+def test_instanzkennung_wird_angelegt_und_landet_in_jeder_sicherung(app):
+    """Grundlage des Nachweises: die Kennung existiert nach dem Start, und
+    eine mit den Bordmitteln erzeugte Sicherung traegt sie mit."""
+    conn = m._open_db(m.DB_PATH)
+    try:
+        eigene = m._lies_instanz_id(conn)
+    finally:
+        conn.close()
+    assert eigene, 'Die Instanzkennung fehlt - der Herkunftsnachweis ist wirkungslos'
+    assert len(eigene) >= 32, f'Zu kurze/ratbare Instanzkennung: {eigene!r}'
+
+    backup_dir = Path(os.path.dirname(m.DB_PATH)) / 'backups'
+    backup_dir.mkdir(exist_ok=True)
+    with app.app_context():
+        sicherung = m.create_backup('instanzprobe')
+    try:
+        con = _sqlite3.connect(str(sicherung))
+        try:
+            in_sicherung = m._lies_instanz_id(con)
+        finally:
+            con.close()
+        assert in_sicherung == eigene, (
+            'Die Sicherung traegt die Instanzkennung nicht mit - damit liesse '
+            'sich keine einzige echte Sicherung mehr einspielen')
+    finally:
+        sicherung.unlink(missing_ok=True)
+
+
+def test_restore_lehnt_vollstaendige_bastel_db_mit_adminnamen_ab(
+        auth_client, csrf, sicherung_bauen, kein_dateitausch):
+    """DER Angriff aus dem Bericht, in seiner wirksamen Form.
+
+    Der Angreifer baut keine 3-kB-Stummeldatei, sondern eine vollstaendige
+    Kassenstuerzle-Datenbank - alle Pflichttabellen, Integritaet in Ordnung,
+    keine Views/Trigger - und nennt sein Konto 'admin', genau wie der
+    gebootstrappte Admin dieser Installation heisst. Die alte Herkunfts-
+    pruefung (Benutzername des Angemeldeten kommt in der Datei vor) bestand
+    er damit muehelos: 200, danach war die Instanz seine.
+
+    Was ihn jetzt aufhaelt, ist einzig die fehlende Instanzkennung.
+    """
+    boese = sicherung_bauen(
+        'uebernahme_komplett.db',
+        benutzer=(('admin', 'passwort-des-angreifers', 'admin'),),
+        instanz_id=None)
+
+    res = _hochladen(auth_client, csrf, boese)
+
+    assert res.status_code == 400, (
+        'Eine vollstaendig gebaute Fremddatenbank mit dem Konto "admin" wurde '
+        'uebernommen - der Angreifer ist jetzt Admin dieser Installation')
+    daten = res.get_json()
+    assert daten['success'] is False
+    assert daten['grund'] == 'srv.restore_keine_instanz_id'
+    assert daten['error'] == translate('de', 'srv.restore_keine_instanz_id')
+    assert kein_dateitausch == [], 'Die Datenbank wurde trotz Ablehnung ersetzt'
+
+    # Und das echte Adminkonto ist noch da - mit dem echten Passwort.
+    assert 'admin' in _benutzernamen_der_laufenden_instanz()
+    nachher = auth_client.get('/settings')
+    assert nachher.status_code == 200
+
+
+def test_restore_lehnt_sicherung_einer_fremden_installation_ab(
+        auth_client, csrf, sicherung_bauen, kein_dateitausch):
+    """Eine echte, vollwertige Sicherung - nur eben aus einer anderen
+    Installation. Hier hilft auch keine Bestaetigung: das ist nie ein
+    gewolltes Wiederherstellen, sondern immer eine Verwechslung oder ein
+    untergeschobenes Backup."""
+    fremd = sicherung_bauen('fremde_installation.db',
+                            instanz_id='ff' * 16)
+
+    for bestaetigt in (False, True):
+        res = _hochladen(auth_client, csrf, fremd, bestaetigt=bestaetigt)
+        assert res.status_code == 400, (
+            f'Fremde Installation angenommen (bestaetigt={bestaetigt})')
+        assert res.get_json()['error'] == translate('de', 'srv.restore_fremde_instanz')
+        assert res.get_json()['grund'] == 'srv.restore_fremde_instanz'
+    assert kein_dateitausch == []
+
+
+def test_alte_sicherung_ohne_kennung_nur_mit_ausdruecklicher_bestaetigung(
+        app, auth_client, csrf, sicherung_bauen, caplog):
+    """Sicherungen von VOR dieser Aenderung tragen keine Kennung. Sie
+    pauschal abzulehnen wuerde dem Betreiber jeden Rueckweg nehmen - also
+    Ablehnung im ersten Anlauf, Annahme erst nach dem ausdruecklichen
+    Kennzeichen, das die Oberflaeche nur nach einer Rueckfrage setzt."""
+    alt = sicherung_bauen('alte_sicherung.db', instanz_id=None)
+    con = _sqlite3.connect(str(alt))
+    con.execute("INSERT INTO persons (name) VALUES ('Altbestand')")
+    con.commit()
+    con.close()
+
+    backup_dir = Path(os.path.dirname(m.DB_PATH)) / 'backups'
+    backup_dir.mkdir(exist_ok=True)
+    for f in backup_dir.glob('kassenstuerzle_*.db'):
+        f.unlink()
+    try:
+        ohne = _hochladen(auth_client, csrf, alt)
+        assert ohne.status_code == 400
+        assert ohne.get_json()['grund'] == 'srv.restore_keine_instanz_id'
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            mit = _hochladen(auth_client, csrf, alt, bestaetigt=True)
+        assert mit.status_code == 200, (
+            'Mit ausdruecklicher Bestaetigung muss die Altsicherung durchgehen - '
+            'sonst ist jede bestehende Sicherung des Betreibers wertlos')
+        assert mit.get_json() == {'success': True}
+
+        # Die Uebersteuerung MUSS nachvollziehbar sein.
+        assert any('OHNE Herkunftsnachweis' in r.getMessage()
+                   for r in caplog.records if r.levelname == 'WARNING'), (
+            'Die Freigabe ohne Herkunftsnachweis wurde nicht protokolliert')
+
+        conn = m._open_db(m.DB_PATH)
+        try:
+            namen = {r[0] for r in conn.execute('SELECT name FROM persons')}
+        finally:
+            conn.close()
+        assert 'Altbestand' in namen
+    finally:
+        conn = m._open_db(m.DB_PATH)
+        conn.execute("DELETE FROM persons WHERE name='Altbestand'")
+        conn.commit()
+        conn.close()
+        with app.app_context():
+            m.init_db()
+        for f in backup_dir.glob('kassenstuerzle_*.db'):
+            f.unlink()
 
 
 # ── I4 ───────────────────────────────────────────────────────────────────────

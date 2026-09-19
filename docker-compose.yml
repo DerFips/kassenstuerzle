@@ -11,10 +11,33 @@ services:
       # Sitzungscookies gehen dann im Klartext ueber das Netz. Der Proxy laeuft
       # auf demselben Host und erreicht 127.0.0.1:5000 weiterhin.
       - "127.0.0.1:5000:5000"
+    # Sicherheit (Blocker 2): fest gepinnte uid/gid, passend zum Benutzer im
+    # Dockerfile (groupadd -r -g 1000 / useradd -r -u 1000). Ohne diese Zeile
+    # entscheidet allein die uid, die `useradd -r` beim Build zufaellig vergeben
+    # hat, ob der Container in das Bind-Mount ./data schreiben darf.
+    user: "1000:1000"
     volumes:
+      # ACHTUNG beim Aktualisieren einer BESTEHENDEN Installation:
+      # Dieses Bind-Mount verdeckt das im Image angelegte /app/data samt dem
+      # `chown` aus dem Dockerfile. Massgeblich ist der Eigentuemer des
+      # Host-Verzeichnisses ./data. Wurde es frueher von einem als root
+      # laufenden Container beschrieben, gehoert es der uid 0 und der
+      # Container kann weder die WAL-Sidecars (-wal/-shm) noch Sicherungen
+      # oder Belege anlegen - der Start bricht ab und `restart:
+      # unless-stopped` startet ihn endlos neu.
+      #
+      # Einmalig auf dem Host ausfuehren (nur unter Linux noetig; Docker
+      # Desktop unter macOS/Windows bildet die Rechte ohnehin um):
+      #
+      #     sudo chown -R 1000:1000 ./data
+      #
       - ./data:/app/data
     restart: unless-stopped
     env_file:
+      # ACHTUNG (Befund M8): env_file ueberschreibt die ENV-Defaults aus dem
+      # Dockerfile. Ein altes HTTPS=0 in dieser .env schaltet das Secure-Flag
+      # des Sitzungscookies wieder ab. Die App warnt deshalb beim Start, wenn
+      # sie im Container mit HTTPS=0 laeuft.
       - .env
     environment:
       - FLASK_ENV=production

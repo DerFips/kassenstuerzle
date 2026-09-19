@@ -152,17 +152,39 @@ def sicherung_bauen(tmp_path):
     Instanz enthaelt ihn. `phase_b=False` erzeugt eine Sicherung von vor der
     Profil-Migration (users ohne role/is_active/...), `zusatz_sql` haengt
     weitere Anweisungen an (z.B. einen Trigger fuer die Missbrauchsfaelle).
+
+    `instanz_id` steuert den Herkunftsnachweis (Blocker 1):
+      * 'eigen'  - die Kennung der laufenden Testinstanz, also eine echte
+                   Sicherung DIESER Installation (Voreinstellung),
+      * None     - gar keine app_meta-Tabelle, wie jede Sicherung, die vor
+                   dieser Aenderung erstellt wurde,
+      * ein Text - eine fremde Kennung, also eine andere Installation.
     """
     import sqlite3 as _sqlite3
     from werkzeug.security import generate_password_hash
 
     zaehler = {'n': 0}
 
+    def _eigene_instanz_id():
+        con = main_module._open_db(main_module.DB_PATH)
+        try:
+            return main_module._lies_instanz_id(con)
+        finally:
+            con.close()
+
     def _bauen(name='sicherung.db', benutzer=(('admin', 'test-password-123', 'admin'),),
-               phase_b=True, zusatz_sql=(), tabellen_weglassen=()):
+               phase_b=True, zusatz_sql=(), tabellen_weglassen=(),
+               instanz_id='eigen'):
         zaehler['n'] += 1
         pfad = tmp_path / f"{zaehler['n']}_{name}"
         con = _sqlite3.connect(str(pfad))
+        if instanz_id is not None:
+            # Eine echte Sicherung ist eine Dateikopie der Datenbank und
+            # traegt app_meta deshalb immer mit.
+            wert = _eigene_instanz_id() if instanz_id == 'eigen' else instanz_id
+            con.execute('CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT)')
+            con.execute("INSERT INTO app_meta (key, value) VALUES ('instance_id', ?)",
+                        (wert,))
         con.execute(_USERS_PHASE_B if phase_b else _USERS_VOR_PHASE_B)
         for sql in _KERN_SCHEMA:
             tabelle = sql.split('CREATE TABLE ', 1)[1].split(' ', 1)[0].strip()

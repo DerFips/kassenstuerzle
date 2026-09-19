@@ -461,21 +461,35 @@ async function deleteBackup(filename) {
     } catch (e) {}
 }
 
+// Blocker 1: Der Server weist eine Datei ohne Instanzkennung zuerst ab. Erst
+// wenn der Admin die zweite, deutliche Rueckfrage bejaht, geht derselbe Upload
+// mit dem Uebersteuerungs-Kennzeichen erneut raus. Genau diese Rueckfrage ist
+// der Schutz: sie zwingt zum Nachdenken, bevor alle Konten ersetzt werden.
+async function _restoreSenden(file, bestaetigt) {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (bestaetigt) formData.append('fremde_instanz_bestaetigt', 'true');
+    const res = await fetch('/api/backup/restore', {
+        method: 'POST',
+        body: formData
+    });
+    return await res.json();
+}
+
 async function restoreBackup() {
     const file = document.getElementById('restoreFile').files[0];
     if (!file) return;
 
     if (!confirm(t('settings.backup_restore_confirm'))) return;
 
-    const formData = new FormData();
-    formData.append('file', file);
-
     try {
-        const res = await fetch('/api/backup/restore', {
-            method: 'POST',
-            body: formData
-        });
-        const data = await res.json();
+        let data = await _restoreSenden(file, false);
+        // Der Grund kommt als stabiler Schluessel, nicht als Fehlertext -
+        // ein Textvergleich waere je nach Sprache falsch.
+        if (!data.success && data.grund === 'srv.restore_keine_instanz_id') {
+            if (!confirm(t('settings.backup_restore_fremde_instanz_confirm'))) return;
+            data = await _restoreSenden(file, true);
+        }
         if (data.success) {
             alert(t('settings.backup_restore_success'));
             window.location.href = '/';
