@@ -33,6 +33,31 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 RECEIPTS_DIR = os.path.join(os.path.dirname(DB_PATH), 'receipts')
 os.makedirs(RECEIPTS_DIR, exist_ok=True)
 ALLOWED_RECEIPT_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf'}
+# Befund K1: genau die Form, die api_receipt_upload erzeugt - MD5 des Inhalts
+# plus erlaubte Endung. Alles andere kann kein Beleg dieser Anwendung sein.
+# Ohne diese Pruefung nahm /api/expenses/save jeden Text an, und er kam in
+# `const EXISTING` woertlich in die Seite zurueck (z.B.
+# 'a.jpg" onerror="..." x="' - ein Ausbruch aus dem Attribut).
+_BELEGNAME_MUSTER = _re_modul.compile(r'^[0-9a-f]{32}\.(jpg|jpeg|png|gif|webp|pdf)$')
+
+
+def _pruefe_belegname(wert):
+    """Laesst nur Belegnamen durch, die api_receipt_upload so erzeugt haben kann.
+
+    Bewusst verwerfen statt den ganzen Speichervorgang mit 400 abzubrechen:
+    die Oberflaeche schickt bei jedem Autosave ALLE Zeilen des Monats mit.
+    Ein einzelner, vor dieser Pruefung gespeicherter Altwert wuerde sonst das
+    Speichern des ganzen Monats dauerhaft blockieren. So wird er beim
+    naechsten Speichern still bereinigt - der Wert erreicht die Datenbank
+    (und damit `const EXISTING` in der Seite) in keinem Fall.
+    """
+    if not wert:
+        return None
+    if _BELEGNAME_MUSTER.match(str(wert)):
+        return str(wert)
+    log.warning("Ungueltiger Belegname verworfen (%r) - Benutzer '%s'",
+                str(wert)[:80], session.get('username', ''))
+    return None
 # Sicherheit (Befund I5): Obergrenze fuer das gesamte Beleg-Verzeichnis.
 # Ohne sie kann jedes eingeloggte Mitglied - nicht nur ein Admin - den
 # Upload in einer Schleife aufrufen und den Datentraeger fuellen; danach
@@ -214,9 +239,13 @@ def csrf_protect():
     if result is not None:
         return result
 
-# ── Rate-Limiter Zugriff aus Blueprint ────────────────────────────────────────
-def _get_limiter():
-    return current_app.extensions.get('limiter')
+# Befund I4 (Aufraeumen): hier standen `_get_limiter()` und `_rate_limit()`.
+# Beide wurden von nichts aufgerufen - und sie waren obendrein falsch: der
+# Limit-String ging an `callable_name` von flask-limiter, nicht an die
+# Limit-Definition, sie haetten also auch als Aufruf nichts durchgesetzt.
+# Dieses Paar ist sehr wahrscheinlich der Grund, warum vier Pruefdurchgaenge
+# die Rate-Limits fuer wirksam hielten. Die Durchsetzung passiert
+# ausschliesslich in create_app() ueber die Tabelle RATE_LIMITS.
 
 
 # ── Nebenläufigkeit: Payload-Version und Änderungszähler ─────────────────────
@@ -248,19 +277,6 @@ def _bump_activity(conn, scope: str) -> int:
 
 def _month_scope(year: int, month: int) -> str:
     return f'month:{int(year):04d}-{int(month):02d}'
-
-
-def _rate_limit(limit_string: str):
-    """Prüft Rate-Limit für den aktuellen Request manuell via Flask-Limiter."""
-    from flask_limiter.errors import RateLimitExceeded
-    limiter = _get_limiter()
-    if limiter is None:
-        return None  # Limiter nicht initialisiert - kein Fehler
-    try:
-        limiter._check_request_limit(limit_string)
-    except RateLimitExceeded:
-        return jsonify(success=False, error=t('srv.rate_limited', limit=limit_string)), 429
-    return None
 
 
 def login_required(f):
@@ -1520,7 +1536,7 @@ def save_expenses():
         cid     = int(e['category_id'])        if e.get('category_id')        else None
         pfpid   = int(e['paid_for_person_id']) if e.get('paid_for_person_id') else None
         is_cash = 1 if e.get('is_cash') else 0
-        rfn     = e.get('receipt_filename') or None
+        rfn     = _pruefe_belegname(e.get('receipt_filename'))
         day     = int(e.get('day') or 1)
         desc    = e.get('description', '')
 

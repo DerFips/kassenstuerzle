@@ -27,6 +27,7 @@ jeder Stelle steht, an der roher Server-Text in innerHTML eingesetzt wird,
 UND escHtml() nachweislich maskiert (siehe test_xss_namen.py, Senke 1-4),
 bleibt kein bekannter Pfad für den Payload mehr offen.
 """
+import pathlib
 import re
 import sys
 import types
@@ -35,7 +36,11 @@ import pytest
 
 MARKUP_PAYLOAD = '<img src=x onerror=alert(1)>'
 
-TEMPLATE_PFAD = 'app/templates/import_pdf.html'
+# Absolut vom Testverzeichnis aus, wie in jedem anderen Testmodul: ein
+# relativer Pfad haengt am Arbeitsverzeichnis des pytest-Aufrufs und liess den
+# Test aus einem anderen Verzeichnis heraus mit FileNotFoundError abbrechen.
+TEMPLATE_PFAD = (pathlib.Path(__file__).resolve().parents[1]
+                 / 'app' / 'templates' / 'import_pdf.html')
 
 
 # ── Hilfsfunktionen für die Parser-Tests ─────────────────────────────────────
@@ -143,15 +148,32 @@ def _template_html():
         return fh.read()
 
 
-def test_zeile_counterpart_nicht_mehr_unmaskiert_interpoliert():
-    """Die urspruengliche Senke aus dem Bericht (K3, import_pdf.html:115-121):
-    `title="${txn.counterpart||txn.description||''}"` und der Zelleninhalt
-    direkt danach - beides ohne jede Maskierung."""
-    html = _template_html()
-    assert 'title="${txn.counterpart' not in html, \
-        'counterpart/description landen weiterhin unmaskiert im title-Attribut'
-    assert '>${txn.counterpart||txn.description' not in html, \
-        'counterpart/description landen weiterhin unmaskiert im Zelleninhalt'
+def test_importseite_ohne_ungeschuetzte_interpolation(auth_client):
+    """Die urspruengliche Senke aus dem Bericht (K3): counterpart/description
+    gingen roh in das title-Attribut und in den Zelleninhalt.
+
+    Die Vorgaengerfassung suchte woertlich nach `title="${txn.counterpart`.
+    Die Variable heisst inzwischen counterpartOrDescription - nur noch ein
+    byte-genaues Zurueckdrehen haette den Test also rot gemacht, jede andere
+    Wiedereinfuehrung derselben Luecke waere durchgerutscht. Geprueft wird
+    deshalb strukturell: JEDE Einsetzung in ein HTML-bauendes Literal der
+    ausgelieferten Seite muss durch eine Maskierung laufen.
+    """
+    from test_xss_namen import (_template_literale_mit_einsetzungen,
+                                _ungeschuetzte_einsetzungen)
+
+    res = auth_client.get('/import/pdf')
+    assert res.status_code == 200
+    html = res.get_data(as_text=True)
+
+    literale = [inhalt for inhalt, _ in _template_literale_mit_einsetzungen(html)
+                if '<' in inhalt]
+    assert literale, 'Kein HTML-bauendes Literal gefunden - Test prueft nichts'
+
+    funde = _ungeschuetzte_einsetzungen(html)
+    assert not funde, (
+        'Ungeschuetzte Einsetzungen im HTML der PDF-Importseite: '
+        + '; '.join(f'{kette!r} in ${{{ausdruck}}}' for ausdruck, kette in funde))
 
 
 def test_zeile_baut_werte_nur_noch_ueber_eschtml():

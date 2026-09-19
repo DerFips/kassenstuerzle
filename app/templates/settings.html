@@ -407,11 +407,11 @@ async function loadBackups() {
         data.backups.forEach(b => {
             tbody.innerHTML += `
                 <tr>
-                    <td>${b.created_at}</td>
-                    <td class="text-break"><small>${b.filename}</small></td>
-                    <td class="text-end">${b.size_kb} KB</td>
+                    <td>${escHtml(b.created_at)}</td>
+                    <td class="text-break"><small>${escHtml(b.filename)}</small></td>
+                    <td class="text-end">${escHtml(b.size_kb)} KB</td>
                     <td class="text-end">
-                        <a href="/api/backup/download/${b.filename}" class="btn btn-sm btn-outline-success" title="Download"><i class="bi bi-download"></i></a>
+                        <a href="/api/backup/download/${encodeURIComponent(b.filename)}" class="btn btn-sm btn-outline-success" title="Download"><i class="bi bi-download"></i></a>
                         <button class="btn btn-sm btn-outline-danger ms-1 js-backup-delete" title="${t('month.receipt_delete')}"><i class="bi bi-trash"></i></button>
                     </td>
                 </tr>
@@ -530,7 +530,7 @@ document.getElementById('changePasswordForm').addEventListener('submit', async f
             document.getElementById('changePasswordForm').reset();
             setTimeout(() => fb.innerHTML = '', 4000);
         } else {
-            fb.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>${data.error}</span>`;
+            fb.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>${escHtml(data.error)}</span>`;
         }
     } catch(err) {
         fb.innerHTML = `<span class="text-danger">${t('settings.pw_save_error')}</span>`;
@@ -670,11 +670,18 @@ document.getElementById('categories-list').addEventListener('change', e => {
   const cb = e.target.closest('.cat-split');
   if (cb) toggleCatSplitPanel(cb);
 });
+// Befund K1: der Personenname ging hier roh in innerHTML. Die
+// servergerenderte Zwillingsstelle weiter oben (die Jinja-Schleife ueber
+// `persons` im Markup) escaped ihn - die beiden Pfade widersprachen sich
+// also, und der ungesicherte feuerte bei jedem Klick auf
+// "Kategorie hinzufuegen". escHtml kommt aus base.html.
+// ACHTUNG: in diesem Kommentar keine doppelten geschweiften Klammern
+// verwenden - Jinja wertet sie auch innerhalb eines Skriptblocks aus.
 function buildSplitPanelHtml() {
   const inputs = PERSONS_FOR_SPLITS.map(p => `
     <div class="input-group input-group-sm" style="max-width:150px">
-      <span class="input-group-text">${p.name}</span>
-      <input type="number" min="0" step="0.1" class="form-control cat-split-share" data-person-id="${p.id}" value="1">
+      <span class="input-group-text">${escHtml(p.name)}</span>
+      <input type="number" min="0" step="0.1" class="form-control cat-split-share" data-person-id="${escHtml(String(p.id))}" value="1">
     </div>`).join('');
   return `<small class="text-muted d-block mb-1">${t('settings.split_ratio_hint')}</small>
     <div class="d-flex flex-wrap gap-2">${inputs}</div>`;

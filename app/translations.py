@@ -377,6 +377,11 @@ TRANSLATIONS = {
         'srv.csrf_invalid': 'Ungültiger CSRF-Token',
         'srv.admin_only': 'Nur Administratoren dürfen das.',
         'srv.rate_limited': 'Zu viele Anfragen. Limit: {limit}',
+        # Befund I4: eigene 429-Seite statt der nackten Werkzeug-Standardseite.
+        'error.rate_limited_title': 'Zu viele Anfragen',
+        'error.rate_limited_text': 'Du hast diese Funktion in kurzer Zeit zu oft aufgerufen. '
+                                   'Bitte warte eine Minute und versuche es dann erneut.',
+        'error.rate_limited_back': 'Zurück zur Anmeldung',
         'srv.stale_client': 'Diese Seite ist nicht mehr aktuell. Bitte neu laden.',
         'srv.old_password_wrong': 'Altes Passwort ist falsch.',
         'srv.new_password_too_short': 'Neues Passwort muss mindestens 8 Zeichen lang sein.',
@@ -802,6 +807,11 @@ TRANSLATIONS = {
         'srv.csrf_invalid': 'Invalid CSRF token',
         'srv.admin_only': 'Administrators only.',
         'srv.rate_limited': 'Too many requests. Limit: {limit}',
+        # Finding I4: our own 429 page instead of Werkzeug's bare default.
+        'error.rate_limited_title': 'Too many requests',
+        'error.rate_limited_text': 'You called this feature too often in a short time. '
+                                   'Please wait a minute and try again.',
+        'error.rate_limited_back': 'Back to sign-in',
         'srv.stale_client': 'This page is out of date. Please reload.',
         'srv.old_password_wrong': 'The old password is incorrect.',
         'srv.new_password_too_short': 'The new password must be at least 8 characters long.',

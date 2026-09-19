@@ -65,6 +65,155 @@ def _template_literale(html):
     return re.findall(r'`[^`]*`', html, re.S)
 
 
+# ── Struktureller Waechter fuer die JS-Senken ────────────────────────────────
+# Die Senken in month/overview/settings laufen erst im Browser: die Daten
+# kommen per JSON, der Payload taucht im ausgelieferten HTML also ohnehin auf,
+# egal ob escHtml davor steht. Ein Vergleich "Payload nicht im HTML" kann hier
+# nichts pruefen, und die frueheren Tests suchten stattdessen nach woertlichen
+# Codestellen ('${escHtml(pn)}') - die ging beim ersten Umbenennen verloren,
+# ohne rot zu werden.
+#
+# Stattdessen wird das ausgelieferte Skript strukturell geprueft: JEDE
+# Einsetzung ${...} in einem Template-Literal, das HTML baut, muss entweder
+# durch eine bekannte Maskierungsfunktion laufen oder in der unten
+# ausgeschriebenen Liste unbedenklicher Ausdruecke stehen. Damit wird nicht
+# nur die Ruecknahme eines einzelnen Fixes rot, sondern auch jede NEU
+# hinzugefuegte ungeschuetzte Senke - und die Liste zwingt zu einer bewussten
+# Entscheidung statt zu einem stillen Durchwinken.
+
+_SICHERE_HUELLEN = ('escHtml', 'safeColor', 'encodeURIComponent', 'fmt', 'fmtEur', 't')
+
+# Schluesselwoerter und Globale, die keine Daten transportieren.
+_KEINE_DATEN = {'true', 'false', 'null', 'undefined', 'new', 'this',
+                'Math', 'Object', 'String', 'Number', 'JSON', 'Array',
+                'document', 'window'}
+
+# Ausdruecke, die bewusst roh eingesetzt werden duerfen. Jeder Eintrag ist eine
+# Entscheidung, keine Bequemlichkeit - wer hier etwas hinzufuegt, muss belegen
+# koennen, dass an dieser Stelle kein frei waehlbarer Text ankommt.
+_UNBEDENKLICHE_KETTEN = {
+    # Im Skript selbst zusammengebaute HTML-Bruchstuecke. Ihr Inhalt stammt
+    # aus denselben Literalen und wird von diesem Test mitgeprueft.
+    'body', 'cells', 'rows', 'thead', 'legend', 'footCells', 'subCells',
+    'label', 'inputs', 'buildSplitPanelHtml',
+    # Reine Meldungstexte aus t(), von den Aufrufern uebersetzt.
+    'msg',
+    # In JS berechnet, nie aus Benutzereingaben: CSS-Klasse bzw. eine ueber
+    # encodeURIComponent gebaute URL.
+    'rowClass', 'url',
+    # Zahlen und Flags aus dem Server-JSON; sie steuern nur Ternaries und
+    # erreichen das Dokument nie als Text.
+    'isCash', 'isSplitCat', 'settled', 'i',
+    'r.savings', 'w.end_balance', 'w.cash_expenses', 'txn.is_income',
+}
+
+
+def _template_literale_mit_einsetzungen(text):
+    """Zerlegt JS-Quelltext in Template-Literale samt ihren ${...}-Ausdruecken.
+
+    Bewusst ein echter Scanner statt eines regulaeren Ausdrucks: in
+    import_pdf.html stecken Literale INNERHALB einer Einsetzung, und eine
+    Paarung ueber `[^`]*` wuerde dort die falschen Backticks zusammenlegen
+    und die Haelfte der Senken uebersehen.
+    """
+    ergebnis = []
+
+    def literal(i):
+        inhalt, ausdruecke = [], []
+        while i < len(text):
+            c = text[i]
+            if c == '\\':
+                i += 2
+                continue
+            if c == '`':
+                ergebnis.append((''.join(inhalt), ausdruecke))
+                return i + 1
+            if text[i:i + 2] == '${':
+                i, ausdruck = einsetzung(i + 2)
+                ausdruecke.append(ausdruck)
+                continue
+            inhalt.append(c)
+            i += 1
+        ergebnis.append((''.join(inhalt), ausdruecke))
+        return i
+
+    def einsetzung(i):
+        start, tiefe = i, 1
+        while i < len(text):
+            c = text[i]
+            if c == '\\':
+                i += 2
+                continue
+            if c in '"\'':
+                q = c
+                i += 1
+                while i < len(text) and text[i] != q:
+                    i += 2 if text[i] == '\\' else 1
+                i += 1
+                continue
+            if c == '`':
+                i = literal(i + 1)
+                continue
+            if c == '{':
+                tiefe += 1
+            elif c == '}':
+                tiefe -= 1
+                if tiefe == 0:
+                    return i + 1, text[start:i]
+            i += 1
+        return i, text[start:i]
+
+    i = 0
+    while i < len(text):
+        i = literal(i + 1) if text[i] == '`' else i + 1
+    return ergebnis
+
+
+def _ohne_stringliterale(code):
+    return re.sub(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`", ' ', code)
+
+
+def _ohne_sichere_aufrufe(code):
+    """Entfernt Aufrufe der Maskierungsfunktionen samt ihrer Argumente."""
+    muster = re.compile(r'\b(?:' + '|'.join(_SICHERE_HUELLEN) + r')\s*\(')
+    while True:
+        treffer = muster.search(code)
+        if not treffer:
+            return code
+        auf = code.index('(', treffer.end() - 1)
+        tiefe, ende = 0, None
+        for j in range(auf, len(code)):
+            if code[j] == '(':
+                tiefe += 1
+            elif code[j] == ')':
+                tiefe -= 1
+                if tiefe == 0:
+                    ende = j
+                    break
+        if ende is None:
+            return code
+        code = code[:treffer.start()] + ' ' + code[ende + 1:]
+
+
+def _ungeschuetzte_einsetzungen(html):
+    """Liefert (Ausdruck, Kette) fuer jede ungeschuetzte HTML-Einsetzung."""
+    funde = []
+    for inhalt, ausdruecke in _template_literale_mit_einsetzungen(html):
+        if '<' not in inhalt:
+            continue          # baut kein Markup - hier gibt es keine Senke
+        for ausdruck in ausdruecke:
+            rest = _ohne_sichere_aufrufe(_ohne_stringliterale(ausdruck))
+            rest = re.sub(r'/[^/\n]*/[gimsuy]*', ' ', rest)   # Regex-Literale
+            for kette in re.findall(
+                    r'[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*', rest):
+                if kette.split('.')[0] in _KEINE_DATEN:
+                    continue
+                if kette in _UNBEDENKLICHE_KETTEN:
+                    continue
+                funde.append((ausdruck.strip(), kette))
+    return funde
+
+
 # ── Senke 1: |safe auf dem übersetzten Abrechnungssatz ───────────────────────
 
 def test_abrechnung_maskiert_personennamen(auth_client, csrf, db):
@@ -127,55 +276,108 @@ def test_einstellungen_baut_optionen_per_dom(auth_client, csrf, db):
 
 # ── Senke 3: innerHTML in month.html ────────────────────────────────────────
 
-@pytest.mark.parametrize('verbotenes_muster', [
-    # buildPersonOpts / buildCatOpts
-    '${x.name}',
-    'buildPersonOpts',
-    'buildCatOpts',
-    # renderSavings / renderWallet
-    '${r.name}',
-    '${w.name}',
-    # renderSettlement (JS-Zwilling von Senke 1)
-    "'<strong>' + txn.from",
-    "'<strong>' + txn.to",
-    # renderOverview: Personen-, Kategoriename und Farbe
-    '<th class="text-end">${pn}</th>',
-    '${cn}${isSplitCat',
-    'style="background:${col}"',
-])
-def test_monatsseite_js_ohne_ungeschuetzte_interpolation(auth_client, verbotenes_muster):
-    """Diese Senken laufen erst im Browser (die Daten kommen als JSON), lassen
-    sich also nur am ausgelieferten Skript pruefen."""
+def test_monatsseite_js_ohne_ungeschuetzte_interpolation(auth_client, csrf, db):
+    """Jede HTML-bauende Einsetzung im Skript der Monatsseite muss maskiert sein.
+
+    Die Vorgaengerfassung suchte nach woertlichen Codestellen ('${r.name}',
+    'buildPersonOpts', ...). Sie blieb gruen, wenn man '${escHtml(pn)}' durch
+    '${ pn }' ersetzte - also bei der woertlichen Wiedereinfuehrung genau des
+    Befunds, den sie bewachen sollte. Geprueft wird deshalb die Struktur des
+    ausgelieferten Skripts, nicht sein Wortlaut.
+    """
+    # Mit echten Daten rendern, damit auch die datenabhaengigen Bloecke
+    # (Abrechnung, Uebersicht) im Dokument stehen.
+    pid = _person(auth_client, csrf, LITERAL_PAYLOAD_PERSON)
+    _person(auth_client, csrf, 'Bob')
+    cid = _kategorie(auth_client, csrf, LITERAL_PAYLOAD_KATEGORIE)
+    _ausgabe(auth_client, csrf, pid, cid)
+
     html = _text(auth_client, f'/month/{JAHR}/{MONAT}')
-    assert verbotenes_muster not in html, \
-        f'ungeschuetzte Interpolation weiterhin vorhanden: {verbotenes_muster}'
+    literale = [inhalt for inhalt, _ in _template_literale_mit_einsetzungen(html)
+                if '<' in inhalt]
+    assert len(literale) > 10, 'Skriptblock fehlt - der Test prueft nichts'
+
+    funde = _ungeschuetzte_einsetzungen(html)
+    assert not funde, (
+        'Ungeschuetzte Einsetzungen im HTML der Monatsseite: '
+        + '; '.join(f'{kette!r} in ${{{ausdruck}}}' for ausdruck, kette in funde))
 
 
-def test_monatsseite_nutzt_gemeinsamen_escape_helfer(auth_client):
+def test_einstellungsseite_js_ohne_ungeschuetzte_interpolation(auth_client, csrf, db):
+    """Dieselbe Pruefung fuer settings.html - dort baute buildSplitPanelHtml()
+    den Personennamen roh in innerHTML, waehrend die servergerenderte
+    Zwillingsstelle im Markup maskiert war. Der Fehler feuerte bei jedem Klick
+    auf 'Kategorie hinzufuegen'."""
+    _person(auth_client, csrf, MARKUP_PAYLOAD)
+    _kategorie(auth_client, csrf, LITERAL_PAYLOAD_KATEGORIE)
+
+    html = _text(auth_client, '/settings')
+    assert 'buildSplitPanelHtml' in html, 'Split-Panel-Code fehlt - Test prueft nichts'
+
+    funde = _ungeschuetzte_einsetzungen(html)
+    assert not funde, (
+        'Ungeschuetzte Einsetzungen im HTML der Einstellungsseite: '
+        + '; '.join(f'{kette!r} in ${{{ausdruck}}}' for ausdruck, kette in funde))
+
+
+def test_escape_helfer_maskiert_alle_gefaehrlichen_zeichen(auth_client):
+    """Der gemeinsame Helfer selbst ist die Grundlage aller anderen Tests hier.
+
+    Die Vorgaengerfassung pruefte nur, DASS 'window.escHtml = esc;' im
+    Dokument steht. Faellt aus esc() eine einzelne Ersetzung heraus - etwa die
+    des Anfuehrungszeichens, mit der jeder Attribut-Ausbruch steht und faellt -
+    blieb sie gruen. Geprueft wird deshalb der Rumpf der Funktion.
+    """
     html = _text(auth_client, f'/month/{JAHR}/{MONAT}')
     assert 'window.escHtml = esc;' in html, 'esc() wird nicht exportiert'
-    assert 'escHtml(' in html
-    assert 'safeColor(' in html
+
+    rumpf = re.search(r'function esc\s*\([^)]*\)\s*\{(.*?)\n  \}', html, re.S)
+    assert rumpf, 'esc() nicht im ausgelieferten Dokument gefunden'
+    koerper = rumpf.group(1)
+    for zeichen, ersatz in (('&', '&amp;'), ('<', '&lt;'), ('>', '&gt;'),
+                            ('"', '&quot;'), ("'", '&#39;')):
+        assert ersatz in koerper, (
+            f'esc() maskiert {zeichen!r} nicht mehr (Ersatz {ersatz!r} fehlt) - '
+            'damit ist jede darauf aufbauende Senke wieder offen')
+    # '&' muss zuerst ersetzt werden, sonst maskiert der Helfer seine eigene
+    # Ausgabe nach ('&lt;' wuerde zu '&amp;lt;').
+    assert koerper.index('&amp;') < koerper.index('&lt;'), \
+        'esc() ersetzt & nicht zuerst - die Maskierung frisst sich selbst'
 
 
 # ── Senke 4: Chart-Legende in overview.html ─────────────────────────────────
 
-@pytest.mark.parametrize('verbotenes_muster', [
-    'legendEl.innerHTML = entries.map',
-    'style="background:${colorMap',
-    '${cn} <span class="text-muted">',
-])
-def test_uebersicht_legende_ohne_innerhtml(auth_client, csrf, db, verbotenes_muster):
+def test_uebersicht_legende_ohne_innerhtml(auth_client, csrf, db):
+    """Die Legende der Kategorie-Auswertung baut Name und Farbe ueber den DOM.
+
+    Vorher suchte dieser Test nach drei woertlichen Codestellen
+    ('legendEl.innerHTML = entries.map', ...). Jede Umbenennung haette ihn
+    entwertet. Geprueft wird jetzt zweierlei: das ausgelieferte Skript
+    enthaelt keine ungeschuetzte HTML-Einsetzung, und die Legende entsteht
+    nachweislich ueber createElement/textContent statt ueber innerHTML.
+    """
     # Der Chart-Block steht in `{% if persons_list %}` - ohne Person wird das
     # Skript gar nicht ausgeliefert und der Test wuerde nichts pruefen.
-    pid = _person(auth_client, csrf, 'Alice')
-    cid = _kategorie(auth_client, csrf, 'Miete')
+    pid = _person(auth_client, csrf, MARKUP_PAYLOAD)
+    cid = _kategorie(auth_client, csrf, MARKUP_PAYLOAD + ' Kat', color=FARB_PAYLOAD)
     _ausgabe(auth_client, csrf, pid, cid)
 
     html = _text(auth_client, '/overview')
     assert 'categoryChart' in html, 'Chart-Skript fehlt - Test prueft nichts'
-    assert verbotenes_muster not in html, \
-        f'Legende baut weiterhin per innerHTML: {verbotenes_muster}'
+
+    funde = _ungeschuetzte_einsetzungen(html)
+    assert not funde, (
+        'Ungeschuetzte Einsetzungen im HTML der Uebersicht: '
+        + '; '.join(f'{kette!r} in ${{{ausdruck}}}' for ausdruck, kette in funde))
+
+    # Der Legendenaufbau selbst: Text als Textknoten, Farbe ueber safeColor.
+    legende = re.search(r"legendEl\.textContent = '';(.*?)\n  \}", html, re.S)
+    assert legende, 'Legendenaufbau nicht gefunden - Test prueft nichts'
+    block = legende.group(1)
+    assert 'innerHTML' not in block, 'Die Legende baut wieder per innerHTML'
+    assert 'createTextNode' in block or 'textContent' in block, \
+        'Der Kategoriename landet nicht mehr als Text im DOM'
+    assert 'safeColor(' in block, 'Die Kategoriefarbe laeuft nicht mehr durch safeColor'
 
 
 # ── Farbprüfung serverseitig ────────────────────────────────────────────────

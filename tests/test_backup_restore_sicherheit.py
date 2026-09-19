@@ -368,8 +368,23 @@ def test_benutzerlabel_kann_schutzkopien_nicht_verdraengen(auth_client, csrf):
             assert res.get_json()['error'] == translate(
                 'de', 'srv.reserved_backup_label', label='pre-restore')
 
+        # Der frueher hier stehende `assert all(p.exists() ...)` war wertlos:
+        # die Zeile darueber hat gerade festgestellt, dass JEDER dieser
+        # Aufrufe mit 400 endete - dann kann er auch nichts verdraengt haben.
+        # Was wirklich zu beweisen ist: gewoehnliche Sicherungen rotieren
+        # getrennt von den Schutzkopien. Ohne diese Trennung schiebt schon der
+        # normale Betrieb den Rueckweg aus dem Topf.
+        for i in range(m._MAX_SCHUTZ_BACKUPS + 2):
+            res = auth_client.post('/api/backup/create', json={'label': f'alltag{i}'},
+                                   headers={'X-CSRF-Token': csrf})
+            assert res.status_code == 200, res.get_data(as_text=True)
+
         assert all(p.exists() for p in echte), (
-            'Ein selbst vergebenes Label hat die echten Schutzkopien verdraengt')
+            'Gewoehnliche Sicherungen haben die Schutzkopien verdraengt - '
+            'nach einem misslungenen Restore gaebe es keinen Rueckweg mehr')
+        gewoehnliche = [f for f in backup_dir.glob('kassenstuerzle_*.db')
+                        if not m._ist_schutzkopie(f.name)]
+        assert gewoehnliche, 'Testannahme kaputt: keine gewoehnliche Sicherung angelegt'
     finally:
         for f in backup_dir.glob('kassenstuerzle_*.db'):
             f.unlink()

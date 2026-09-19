@@ -45,6 +45,13 @@ def _ensure_data_dir_and_secret(data_dir):
 # Rate-Limits fuer sensible Endpunkte. Bewusst auf Modulebene statt lokal in
 # create_app(), damit Tests nachweisen koennen, dass ein Endpunkt hier gelistet
 # ist - ein fehlender Eintrag faellt sonst erst im Betrieb auf.
+#
+# WICHTIG (Befund M1, noch offen): gezaehlt wird nach der Adresse aus
+# get_remote_address(). Ohne ProxyFix ist das die Adresse des Reverse-Proxys,
+# und alle Haushaltsmitglieder teilen sich damit EINEN Zaehler - wer als
+# zweiter dran ist, erbt die Aufrufe des ersten. Solange M1 offen ist, sind
+# alle Werte hier also haushaltsweit zu lesen und entsprechend grosszuegig
+# bemessen.
 RATE_LIMITS = {
     'main.login':              '10 per minute',
     'main.api_parse_pdf':      '5 per minute',
@@ -54,9 +61,14 @@ RATE_LIMITS = {
     # Inhalt (MD5) gebildet wird, ergibt jeder neue Inhalt auch eine neue
     # Datei. Ein eingeloggtes Mitglied konnte damit in einer Schleife die
     # Platte fuellen, bis SQLite-Schreibzugriffe und Sicherungen scheitern.
-    # Dasselbe Limit wie beim Beleg-Scan nebenan - beide verarbeiten Fotos
-    # aus derselben Oberflaeche.
-    'main.api_receipt_upload': '10 per minute',
+    # Bewusst hoeher als der Beleg-Scan nebenan (Befund I5, nachgebessert):
+    # bei einem gemeinsamen Haushalts-Zaehler (siehe M1 oben) sind 10/Minute
+    # im Alltag zu wenig - wer die Belege einer Woche nachtraegt, haengt ein
+    # gutes Dutzend Fotos in einem Zug an und wird mitten im Vorgang gebremst.
+    # Die eigentliche Schranke gegen ein Vollschreiben der Platte ist die
+    # Groessengrenze des Beleg-Verzeichnisses (RECEIPTS_MAX_TOTAL_MB), nicht
+    # dieses Limit; es verzoegert nur.
+    'main.api_receipt_upload': '30 per minute',
     'main.api_backup_create':  '5 per minute',
     'main.api_backup_restore': '3 per minute',
     'main.import_csv':         '20 per minute',
@@ -105,7 +117,22 @@ def _secure_cookie_aktiv() -> bool:
     """
     wert = os.environ.get('HTTPS')
     if wert is not None and wert.strip() != '':
-        return wert.strip() == '1'
+        aktiv = wert.strip() == '1'
+        if not aktiv and _laeuft_im_container():
+            # Befund M8: docker-compose.yml laedt `env_file: .env`, und was
+            # dort steht ueberschreibt das `ENV HTTPS=1` aus dem Dockerfile.
+            # Ein stehengebliebenes HTTPS=0 in einer alten .env schaltet das
+            # Secure-Flag also wieder ab - lautlos. Deshalb hier laut.
+            logging.getLogger(__name__).warning(
+                "SICHERHEITSWARNUNG: HTTPS=0 im Container. Das Sitzungscookie "
+                "geht damit OHNE Secure-Flag hinaus und ist auf jedem "
+                "Klartext-Weg zum Container mitlesbar. Das Dockerfile setzt "
+                "HTTPS=1 - dieser Wert kommt also aus der .env (env_file in "
+                "docker-compose.yml ueberschreibt das Dockerfile). Entfernen "
+                "oder auf HTTPS=1 setzen, sofern nicht bewusst Klartext "
+                "gefahren wird."
+            )
+        return aktiv
     return _laeuft_im_container()
 
 
@@ -179,9 +206,13 @@ def create_app():
     # DATABASE_PATH umsetzt, bekam Schluessel und Datenbank an getrennten
     # Orten. Im Container aendert sich nichts - dort ist dirname(DATABASE_PATH)
     # genau das /app/data von vorher.
+    # `or '.'` (Befund M8): steht in DATABASE_PATH ein blosser Dateiname
+    # ('kassenstuerzle.db'), liefert dirname() den leeren String - und
+    # os.makedirs('') wirft FileNotFoundError, der Start bricht ab, bevor
+    # irgendetwas laeuft. Gemeint ist in dem Fall das Arbeitsverzeichnis.
     data_dir = os.path.dirname(os.environ.get(
         'DATABASE_PATH',
-        os.path.join(os.path.dirname(__file__), '..', 'data', 'kassenstuerzle.db')))
+        os.path.join(os.path.dirname(__file__), '..', 'data', 'kassenstuerzle.db'))) or '.'
     secret = _ensure_data_dir_and_secret(data_dir)
     app.secret_key = os.environ.get('SECRET_KEY', secret)
 
@@ -227,6 +258,25 @@ def create_app():
             # die gesamte Rate-Limit-Schicht ist wirkungslos - nachgewiesen mit
             # 15 Login-Versuchen ohne einen einzigen 429.
             app.view_functions[endpoint] = limiter.limit(limit_str)(view_fn)
+
+    # ── Antwort auf ein erreichtes Limit (Befund I4) ──────────────────────
+    # Ohne diesen Handler beantwortet Werkzeug den 429 mit seiner nackten
+    # HTML-Standardseite. Fuer einen API-Aufruf heisst das: das `res.json()`
+    # im Frontend wirft, der Fehler kommt nie bei der Benutzerin an und der
+    # Klick bleibt einfach stumm. Fuer einen normalen Seitenabruf - etwa
+    # nach ein paar vertippten Passwoertern - landet sie auf einer
+    # unmarkierten englischen Fehlerseite mitten in einer deutschen App.
+    @app.errorhandler(429)
+    def _zu_viele_anfragen(fehler):
+        from flask import request, render_template, jsonify, session
+        from .translations import translate
+        lang = session.get('lang', 'de')
+        # flask-limiter legt den verletzten Limit-Text in `description` ab.
+        limit = getattr(fehler, 'description', '') or ''
+        if request.path.startswith('/api/'):
+            return jsonify(success=False,
+                           error=translate(lang, 'srv.rate_limited', limit=limit)), 429
+        return render_template('fehler_429.html', limit=limit), 429
 
     @app.context_processor
     def inject_now():
@@ -343,12 +393,25 @@ def create_app():
         #    zurueckkommen - diesen Test nicht abschwaechen.
         csp = (
             "default-src 'self'; "
-            f"script-src 'self' 'nonce-{getattr(g, 'csp_nonce', '')}' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://cdn.simpleicons.org; "
+            # cdn.simpleicons.org stand hier ohne Grund: ein Bild-Host, auf den
+            # kein einziges Skript verweist (Befund M8). Eine Quelle in
+            # script-src, die niemand braucht, ist nur Angriffsflaeche.
+            f"script-src 'self' 'nonce-{getattr(g, 'csp_nonce', '')}' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
             "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://api.fontshare.com; "
             "img-src 'self' data: blob:; "
             "connect-src 'self'; "
-            "frame-ancestors 'none';"
+            "frame-ancestors 'none'; "
+            # Befund I6 (nachgebessert): diese drei fallen NICHT auf
+            # default-src zurueck, fehlten sie, waren sie schlicht
+            # unbeschraenkt. form-action verhindert, dass eingeschleustes
+            # Markup ein Formular zu einem fremden Ziel abschickt (z.B. das
+            # Anmeldeformular), base-uri, dass ein eingefuegtes <base> alle
+            # relativen Pfade der Seite umlenkt, und object-src schliesst
+            # <object>/<embed> als Ausfuehrungsweg aus.
+            "form-action 'self'; "
+            "base-uri 'self'; "
+            "object-src 'none';"
         )
         response.headers['Content-Security-Policy'] = csp
         return response

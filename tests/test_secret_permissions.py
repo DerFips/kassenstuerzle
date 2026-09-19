@@ -151,9 +151,20 @@ def test_migration_removes_unencrypted_backup(tmp_path, monkeypatch):
         'Klartext-Sicherung wurde nach erfolgreicher Migration nicht entfernt')
 
 
-def test_migration_keeps_backup_if_verification_fails(tmp_path, monkeypatch):
-    """Gegenprobe: schlaegt die Verifikation der neuen Datenbank fehl, MUSS
-    die Klartext-Sicherung als Rueckfallebene erhalten bleiben."""
+def test_migration_keeps_backup_if_verification_fails(tmp_path, monkeypatch, caplog):
+    """GEGENPROBE, kein Regressionswaechter - bitte auch so lesen.
+
+    Dass die Klartext-Sicherung hier liegen bleibt, gilt auch dann, wenn die
+    Behebung zu Befund I1 komplett fehlt: ohne sie wird die Sicherung
+    ueberhaupt nie geloescht. Dieser Test kann also nur die Gegenrichtung
+    absichern - naemlich dass die Behebung nicht ueber das Ziel hinausschiesst
+    und die Rueckfallebene auch im Fehlerfall wegraeumt. Den eigentlichen
+    Befund bewacht test_migration_removes_plaintext_backup weiter oben.
+
+    Was hier zusaetzlich geprueft wird und ohne die Behebung NICHT gilt: der
+    Fehlschlag muss im Log stehen. Bleibt die Klartext-Kopie kommentarlos
+    liegen, merkt es niemand - und genau das war der Zustand vor I1.
+    """
     db_path = tmp_path / 'wegwerf_kassenstuerzle2.db'
     db_path.write_bytes(b'unverschluesselter platzhalter-inhalt')
     key = 'wegwerf-schluessel'
@@ -178,11 +189,19 @@ def test_migration_keeps_backup_if_verification_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(m, '_SQLCIPHER_AVAILABLE', True)
     monkeypatch.setattr(m.sqlite3, 'connect', lambda path: FakeConn())
 
-    m._migrate_to_encrypted(str(db_path), key)
+    import logging
+    with caplog.at_level(logging.ERROR):
+        m._migrate_to_encrypted(str(db_path), key)
 
     backup_path = str(db_path) + '.unencrypted.bak'
     assert os.path.exists(backup_path), (
         'Klartext-Sicherung wurde entfernt, obwohl die Verifikation fehlschlug')
+
+    assert any('Verifikation' in r.getMessage() and r.levelname == 'ERROR'
+               for r in caplog.records), (
+        'Die fehlgeschlagene Verifikation wurde nicht protokolliert - eine '
+        'liegengebliebene Klartextkopie der Finanzhistorie faellt dann '
+        'niemandem auf')
 
 
 def test_secret_key_folgt_der_datenbank_nicht_dem_quellcode(tmp_path, monkeypatch):

@@ -123,3 +123,59 @@ def test_compose_veroeffentlicht_port_nur_auf_localhost():
     assert not unsicher, (
         f'Portzuordnung(en) nicht an localhost gebunden: {unsicher} - '
         'die App ist damit am TLS-terminierenden Reverse-Proxy vorbei erreichbar')
+
+
+# ── Befund M8: HTTPS=0 aus der .env darf nicht lautlos durchgehen ───────────
+
+def test_https_null_im_container_wird_laut_gewarnt(monkeypatch, caplog):
+    """`env_file: .env` in docker-compose.yml ueberschreibt das `ENV HTTPS=1`
+    aus dem Dockerfile. Ein stehengebliebenes HTTPS=0 in einer alten .env
+    schaltet damit das Secure-Flag wieder ab - vorher vollkommen lautlos."""
+    import logging
+
+    monkeypatch.setenv('KASSENSTUERZLE_IM_CONTAINER', '1')
+    monkeypatch.setenv('HTTPS', '0')
+
+    with caplog.at_level(logging.WARNING):
+        aktiv = app_paket._secure_cookie_aktiv()
+
+    assert aktiv is False, 'HTTPS=0 bleibt der ausdrueckliche Ausstieg'
+    meldungen = [r.getMessage() for r in caplog.records if r.levelname == 'WARNING']
+    assert any('HTTPS=0' in m and 'Secure' in m for m in meldungen), (
+        'Kein Warnhinweis beim Start - ein vergessenes HTTPS=0 in der .env '
+        f'faellt damit niemandem auf. Meldungen: {meldungen}')
+
+
+def test_kein_warnhinweis_beim_bewussten_klartextlauf_ausserhalb(monkeypatch, caplog):
+    """Gegenprobe: lokal (kein Container) ist HTTPS=0 der Normalfall - dort
+    waere die Warnung nur Rauschen und wuerde mit der Zeit ignoriert."""
+    import logging
+
+    monkeypatch.delenv('KASSENSTUERZLE_IM_CONTAINER', raising=False)
+    monkeypatch.setattr(app_paket.os.path, 'exists', lambda p: False)
+    monkeypatch.setenv('HTTPS', '0')
+
+    with caplog.at_level(logging.WARNING):
+        assert app_paket._secure_cookie_aktiv() is False
+    assert not [r for r in caplog.records
+                if r.levelname == 'WARNING' and 'HTTPS=0' in r.getMessage()]
+
+
+# ── Befund M8: DATABASE_PATH ohne Verzeichnisanteil ────────────────────────
+
+def test_blosser_dateiname_in_database_path_bricht_den_start_nicht(monkeypatch, tmp_path):
+    """`os.path.dirname('kassenstuerzle.db')` ist der leere String, und
+    `os.makedirs('')` wirft FileNotFoundError - der Start scheiterte also,
+    bevor irgendetwas lief. Gemeint ist in dem Fall das Arbeitsverzeichnis."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('DATABASE_PATH', 'kassenstuerzle.db')
+    monkeypatch.setenv('DISABLE_RATE_LIMIT', '1')
+
+    # Bewusst ueber create_app(): dort steht die Ableitung des
+    # Datenverzeichnisses, um die es geht. Die Datenbank selbst liegt weiter
+    # am Pfad, den main.py beim Import ermittelt hat - dieser Test fasst also
+    # weder data/ noch data_/ an.
+    create_app()
+
+    assert (tmp_path / '.secret_key').exists(), (
+        'Der Signierschluessel landete nicht im Arbeitsverzeichnis')

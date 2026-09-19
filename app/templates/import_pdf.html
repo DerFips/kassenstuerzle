@@ -131,7 +131,7 @@ document.getElementById('pdf-parse-btn').addEventListener('click', async () => {
         <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
             title="${escHtml(counterpartOrDescription)}">${escHtml(counterpartOrDescription || '–')}</td>
         <td class="text-end fw-semibold ${txn.is_income?'text-success':'text-danger'}">
-          ${txn.is_income?'+':'-'}${txn.amount.toFixed(2).replace('.',',')} €</td>
+          ${txn.is_income?'+':'-'}${escHtml(txn.amount.toFixed(2).replace('.',','))} €</td>
         <td><small>${txn.is_income?`<span class="badge bg-success">${t('pdf.income_badge')}</span>`:`<span class="badge bg-secondary">${t('pdf.expense_badge')}</span>`}</small></td>`;
       tbody.appendChild(row);
     });

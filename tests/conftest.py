@@ -59,10 +59,16 @@ def _admin_ohne_erzwungenen_passwortwechsel(app):
     try:
         conn.execute("UPDATE users SET must_change_password=0 WHERE username='admin'")
         conn.commit()
-    except main_module.sqlite3.OperationalError:
+    except main_module.sqlite3.OperationalError as exc:
         # Vor der Profil-Migration gibt es die Spalte nicht - dann gibt es
         # auch keinen erzwungenen Wechsel, der stoeren koennte.
-        pass
+        #
+        # Bewusst eng: ein pauschales `except OperationalError` verschluckte
+        # auch 'no such table: users', 'database is locked' oder eine kaputte
+        # Datei. Die Fixture laeuft vor JEDEM Test - ein verschluckter Fehler
+        # hier macht die ganze Suite blind.
+        if 'no such column' not in str(exc).lower():
+            raise
     finally:
         conn.close()
     yield

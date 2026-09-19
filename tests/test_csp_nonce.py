@@ -17,6 +17,11 @@ _ON_ATTR = re.compile(r'\bon[a-z]+\s*=\s*["\']')
 
 # Genau die Bloecke, die eine Nonce tragen muessen. <script src=...> auf CDNs
 # bleibt aussen vor, die deckt die Host-Quelle in script-src ab.
+#
+# Diese Tabelle war frueher tote Deko - kein Test hat sie je gelesen. Jetzt
+# prueft test_jedes_template_hat_die_erwarteten_nonce_bloecke sie Datei fuer
+# Datei: kommt ein Inline-Block dazu oder faellt bei einem die Nonce weg,
+# stimmt die Zahl nicht mehr.
 _NONCE_ERWARTET = {
     'base.html': 4,
     'month.html': 1,
@@ -26,6 +31,23 @@ _NONCE_ERWARTET = {
     'scan_receipt.html': 1,
     'offline.html': 1,
 }
+
+# Jede Seite, die die App per render_template ausliefert - der Sweep unten
+# holt sie alle. Zweiter Wert: ob eine Anmeldung noetig ist.
+_GERENDERTE_SEITEN = [
+    '/login',
+    '/offline',
+    '/overview',
+    '/settings',
+    '/month/2026/9',
+    '/import/pdf',
+    '/search',
+    # /password/aendern fehlt bewusst: die Seite leitet um, sobald der
+    # erzwungene Wechsel erledigt ist (und die Suite raeumt genau dieses Flag
+    # fuer den Test-Admin weg). Ihr Template bringt keinen eigenen
+    # Inline-Block mit; die Bloecke aus base.html deckt jede andere Seite hier
+    # mit ab, und die Dateipruefung weiter unten sieht sie ohnehin.
+]
 
 
 def _seiten_nonces(html):
@@ -46,14 +68,52 @@ def test_inline_skripte_tragen_nonce(auth_client, pfad):
     assert len(nonces[0]) >= 16, f'{pfad}: Nonce zu kurz: {nonces[0]!r}'
 
 
-def test_kein_inline_skript_ohne_nonce(auth_client):
-    """Ein Block ohne Nonce faellt im Abschlussschritt stumm aus."""
-    html = auth_client.get('/settings').get_data(as_text=True)
+@pytest.mark.parametrize('pfad', _GERENDERTE_SEITEN)
+def test_kein_inline_skript_ohne_nonce(auth_client, pfad):
+    """Ein Block ohne Nonce faellt im Browser stumm aus - JEDE Seite pruefen.
+
+    Vorher holte dieser Test nur /settings. Nahm man die Nonce aus dem
+    Skriptblock von month.html oder overview.html - womit dort das gesamte
+    JavaScript tot waere -, blieben trotzdem alle CSP-Tests gruen.
+    """
+    antwort = auth_client.get(pfad)
+    assert antwort.status_code == 200, (
+        f'{pfad}: unerwarteter Status {antwort.status_code} - der Sweep haette '
+        'die Seite gar nicht geprueft')
+    html = antwort.get_data(as_text=True)
     ohne_src = [tag for tag in re.findall(r'<script[^>]*>', html)
                 if ' src=' not in tag]
-    assert ohne_src, 'Testannahme kaputt: /settings hat keine Inline-Skripte'
+    assert ohne_src, f'Testannahme kaputt: {pfad} hat keine Inline-Skripte'
     for tag in ohne_src:
-        assert 'nonce="' in tag, f'Inline-Skript ohne Nonce: {tag}'
+        assert 'nonce="' in tag, f'{pfad}: Inline-Skript ohne Nonce: {tag}'
+
+
+def test_jedes_template_hat_die_erwarteten_nonce_bloecke():
+    """Liest _NONCE_ERWARTET - vorher stand die Tabelle nur herum.
+
+    Deckt auch scan_receipt.html ab, das derzeit von keiner Route gerendert
+    wird und vom Sweep oben deshalb nicht erreicht wuerde.
+    """
+    for datei, erwartet in _NONCE_ERWARTET.items():
+        text = (TEMPLATES / datei).read_text(encoding='utf-8')
+        inline = [tag for tag in re.findall(r'<script[^>]*>', text)
+                  if ' src=' not in tag]
+        mit_nonce = [tag for tag in inline if 'nonce=' in tag]
+        assert len(mit_nonce) == erwartet, (
+            f'{datei}: {len(mit_nonce)} Inline-Bloecke mit Nonce, erwartet '
+            f'{erwartet} (insgesamt {len(inline)} Inline-Bloecke)')
+        assert len(inline) == erwartet, (
+            f'{datei}: {len(inline) - len(mit_nonce)} Inline-Block/Bloecke OHNE '
+            'Nonce - der faellt im Browser stumm aus')
+
+    # Und kein Template darf einen Inline-Block ohne Nonce haben - auch die
+    # nicht, die oben gar nicht gelistet sind.
+    for datei in sorted(TEMPLATES.glob('*.html')):
+        text = datei.read_text(encoding='utf-8')
+        for tag in re.findall(r'<script[^>]*>', text):
+            if ' src=' in tag:
+                continue
+            assert 'nonce=' in tag, f'{datei.name}: Inline-Skript ohne Nonce: {tag}'
 
 
 # ── 2. Die Nonce ist pro Request frisch ──────────────────────────────────────
@@ -262,6 +322,47 @@ def test_nonce_im_header_passt_zu_der_im_html(auth_client):
     assert f'nonce="{nonce_aus_header}"' in html, (
         'Die Nonce im Header taucht so nicht im HTML auf - der Browser wuerde '
         'die eigenen Skriptbloecke blockieren.')
+
+
+@pytest.mark.parametrize('direktive, wert', [
+    ('form-action', "'self'"),
+    ('base-uri', "'self'"),
+    ('object-src', "'none'"),
+])
+def test_csp_setzt_die_direktiven_ohne_rueckfall(auth_client, direktive, wert):
+    """Befund I6 (nachgebessert): diese drei erben NICHT von default-src.
+
+    Fehlen sie, sind sie schlicht unbeschraenkt: eingeschleustes Markup
+    duerfte ein Formular zu einem fremden Ziel abschicken (form-action), ein
+    <base>-Element alle relativen Pfade der Seite umlenken (base-uri) oder ein
+    <object> Code ausfuehren (object-src).
+    """
+    csp = auth_client.get('/overview').headers['Content-Security-Policy']
+    teile = [t.strip() for t in csp.split(';') if t.strip()]
+    passend = [t for t in teile if t.split()[0] == direktive]
+    assert passend, f'{direktive} fehlt in der CSP: {csp}'
+    assert passend[0] == f'{direktive} {wert}', (
+        f'{direktive} hat einen unerwarteten Wert: {passend[0]!r}')
+
+
+def test_script_src_ohne_unbenutzte_fremdquellen(auth_client):
+    """Befund M8: cdn.simpleicons.org stand in script-src, obwohl kein
+    einziges Skript von dort geladen wird - es ist ein Bild-Host. Eine
+    Skriptquelle, die niemand braucht, ist nur Angriffsflaeche."""
+    antwort = auth_client.get('/overview')
+    csp = antwort.headers['Content-Security-Policy']
+    script_src = [d for d in csp.split(';') if d.strip().startswith('script-src')][0]
+    assert 'simpleicons' not in script_src, (
+        f'Unbenutzte Skriptquelle wieder in script-src: {script_src}')
+
+    # Gegenprobe: die Quellen, die die Seiten wirklich laden, muessen bleiben.
+    for datei in sorted(TEMPLATES.glob('*.html')):
+        for treffer in re.findall(r'<script[^>]*\ssrc="(https://[^"]+)"',
+                                  datei.read_text(encoding='utf-8')):
+            host = treffer.split('/')[2]
+            assert host in script_src, (
+                f'{datei.name} laedt ein Skript von {host}, die CSP erlaubt '
+                f'das aber nicht: {script_src}')
 
 
 def test_style_src_darf_unsafe_inline_behalten(auth_client):

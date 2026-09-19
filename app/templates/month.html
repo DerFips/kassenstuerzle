@@ -360,7 +360,7 @@
 <script nonce="{{ csp_nonce() }}">
 /* ══════════════════════════════════════════════════════════════
    KASSENSTÜRZLE – month.html JavaScript
-   Alle Funktionen in EINEM einzigen <script>-Block.
+   Alle Funktionen in EINEM einzigen Skriptblock.
    ══════════════════════════════════════════════════════════════ */
 
 /* ── Jinja-Daten ──────────────────────────────────────────── */
@@ -660,8 +660,8 @@ function addRow(day='', desc='', pid='', cid='', amt='', isCash=false, pfpid='',
   const tr = document.createElement('tr');
   if (rowId) tr.dataset.rowId = rowId;
   tr.innerHTML = `
-    <td><input type="number" class="form-control form-control-sm text-center" name="day" value="${day ?? ''}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
-    <td><input type="text" class="form-control form-control-sm" name="description" value="${(desc ?? '').replace(/"/g,'&quot;')}" placeholder="${t('month.description_placeholder')}"></td>
+    <td><input type="number" class="form-control form-control-sm text-center" name="day" value="${escHtml(day ?? '')}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
+    <td><input type="text" class="form-control form-control-sm" name="description" value="${escHtml(desc ?? '')}" placeholder="${t('month.description_placeholder')}"></td>
     <td><select class="form-select form-select-sm" name="person_id"></select></td>
     <td><select class="form-select form-select-sm" name="paid_for_person_id"></select></td>
     <td><select class="form-select form-select-sm cat-select" name="category_id"></select></td>
@@ -703,8 +703,8 @@ function addIncomeRow(day='', desc='', pid='', cid='', amt='', focusRow=true, ro
   const tr = document.createElement('tr');
   if (rowId) tr.dataset.rowId = rowId;
   tr.innerHTML = `
-    <td><input type="number" class="form-control form-control-sm text-center" name="inc_day" value="${day ?? ''}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
-    <td><input type="text" class="form-control form-control-sm" name="inc_desc" value="${(desc ?? '').replace(/"/g,'&quot;')}" placeholder="${t('month.income_desc_placeholder')}"></td>
+    <td><input type="number" class="form-control form-control-sm text-center" name="inc_day" value="${escHtml(day ?? '')}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
+    <td><input type="text" class="form-control form-control-sm" name="inc_desc" value="${escHtml(desc ?? '')}" placeholder="${t('month.income_desc_placeholder')}"></td>
     <td><select class="form-select form-select-sm" name="inc_pid"></select></td>
     <td><select class="form-select form-select-sm" name="inc_cid"></select></td>
     <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="" placeholder="${t('month.amount_placeholder')}"></td>
@@ -1214,10 +1214,17 @@ function setReceiptOnRow(tr, filename) {
   btn.classList.add('has-receipt');
   btn.title = t('month.receipt_view_delete');
   if (preview) {
+    // Befund K1: der Dateiname ging roh in innerHTML - auch in die
+    // Attributpositionen src="..." und href="...". Ein Name, der ein
+    // Anfuehrungszeichen enthaelt, brach dort aus dem Attribut aus und
+    // konnte ein eigenes Ereignisattribut anhaengen. Zwei
+    // verschiedene Kontexte, also zwei verschiedene Kodierungen:
+    // escHtml fuer den Textinhalt, encodeURIComponent fuer den URL-Teil
+    // (das Ergebnis enthaelt danach weder " noch < oder >).
     const ext = (filename || '').split('.').pop().toLowerCase();
-    const url = `/api/receipt/${filename}`;
+    const url = `/api/receipt/${encodeURIComponent(filename || '')}`;
     preview.innerHTML = ext === 'pdf'
-      ? `<div class="receipt-pdf-icon"><i class="bi bi-file-earmark-pdf-fill"></i></div><div class="text-center text-muted" style="font-size:.75rem">${filename}</div>`
+      ? `<div class="receipt-pdf-icon"><i class="bi bi-file-earmark-pdf-fill"></i></div><div class="text-center text-muted" style="font-size:.75rem">${escHtml(filename || '')}</div>`
       : `<img src="${url}" alt="${t('month.receipt_add')}" loading="lazy">`;
     preview.innerHTML += `<div class="receipt-actions"><a href="${url}" target="_blank" class="btn btn-sm btn-outline-secondary"><i class="bi bi-eye me-1"></i>${t('month.receipt_open')}</a><button class="btn btn-sm btn-outline-danger js-receipt-delete"><i class="bi bi-trash me-1"></i>${t('month.receipt_delete')}</button></div>`;
   }

@@ -46,14 +46,30 @@ def _speichern(client, csrf, **payload):
 def test_beleg_upload_steht_in_der_rate_limit_tabelle(app):
     """Ohne Eintrag in RATE_LIMITS bekommt der Endpunkt gar kein Limit - das
     war der Ausgangspunkt des Befunds: der einzige Upload-Endpunkt, der
-    beliebig oft pro Minute aufgerufen werden konnte."""
-    assert 'main.api_receipt_upload' in app_paket.RATE_LIMITS, (
-        'api_receipt_upload fehlt in der Rate-Limit-Tabelle'
-    )
-    # Gleiche Groessenordnung wie die Nachbarn (Beleg-Scan verarbeitet Fotos
-    # aus derselben Oberflaeche) - ein absurd hohes Limit waere kein Limit.
-    assert (app_paket.RATE_LIMITS['main.api_receipt_upload']
-            == app_paket.RATE_LIMITS['main.api_receipt_parse'])
+    beliebig oft pro Minute aufgerufen werden konnte.
+
+    Die frueher hier stehende Pruefung 'gleicher Wert wie beim Nachbarn' war
+    kein Waechter: setzt man BEIDE auf '10000 per minute', bleibt sie gruen.
+    Geprueft wird deshalb der Wert selbst - in beide Richtungen.
+    """
+    limit = app_paket.RATE_LIMITS.get('main.api_receipt_upload')
+    assert limit, 'api_receipt_upload fehlt in der Rate-Limit-Tabelle'
+
+    menge, _, zeitraum = limit.partition(' per ')
+    assert zeitraum.strip() == 'minute', f'Unerwarteter Zeitraum: {limit!r}'
+    menge = int(menge)
+    # Obergrenze: ein absurd hohes Limit ist keins. Bei 20 MB je Upload sind
+    # 30/Minute schon 600 MB/Minute - mehr darf hier nicht stehen.
+    assert menge <= 60, (
+        f'{limit!r} ist kein Limit mehr - bei 20 MB je Beleg waeren das '
+        f'{menge * 20} MB pro Minute')
+    # Untergrenze (Befund I5, nachgebessert): der Zaehler ist bis zur Behebung
+    # von M1 haushaltsweit. Wer die Belege einer Woche nachtraegt, haengt ein
+    # gutes Dutzend Fotos in einem Zug an und darf dabei nicht gebremst werden.
+    assert menge >= 30, (
+        f'{limit!r} ist zu eng: alle Mitglieder teilen sich einen Zaehler, '
+        'ein Stapel Wochenbelege laeuft damit mitten im Vorgang gegen die Wand')
+
     # Und der Endpunkt muss es auch wirklich geben, sonst laeuft der Eintrag
     # in create_app() stillschweigend ins Leere.
     assert 'main.api_receipt_upload' in app.view_functions
@@ -117,7 +133,7 @@ def person(db):
 
 def test_beleg_wird_geloescht_wenn_die_letzte_ausgabe_verschwindet(auth_client, csrf, db,
                                                                    person, belegverzeichnis):
-    beleg = belegverzeichnis / 'aaaaaaaa.pdf'
+    beleg = belegverzeichnis / 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf'
     beleg.write_bytes(_pdf_bytes(b'rot'))
 
     neu = _speichern(auth_client, csrf, rows=[
@@ -139,7 +155,7 @@ def test_beleg_bleibt_wenn_eine_andere_ausgabe_ihn_noch_nutzt(auth_client, csrf,
     legitim denselben Beleg referenzieren (z.B. eine aufgeteilte Rechnung).
     Ein Aufraeumen, das nur auf die geloeschte Zeile schaut, wuerde der zweiten
     Ausgabe den Beleg unter den Fuessen wegziehen."""
-    beleg = belegverzeichnis / 'bbbbbbbb.pdf'
+    beleg = belegverzeichnis / 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.pdf'
     beleg.write_bytes(_pdf_bytes(b'gruen'))
 
     ids = _speichern(auth_client, csrf, rows=[
@@ -161,8 +177,8 @@ def test_beleg_bleibt_wenn_eine_andere_ausgabe_ihn_noch_nutzt(auth_client, csrf,
 
 def test_ausgetauschter_beleg_wird_aufgeraeumt(auth_client, csrf, db, person,
                                                belegverzeichnis):
-    alt = belegverzeichnis / 'cccccccc.pdf'
-    neu_datei = belegverzeichnis / 'dddddddd.pdf'
+    alt = belegverzeichnis / 'cccccccccccccccccccccccccccccccc.pdf'
+    neu_datei = belegverzeichnis / 'dddddddddddddddddddddddddddddddd.pdf'
     alt.write_bytes(_pdf_bytes(b'rot'))
     neu_datei.write_bytes(_pdf_bytes(b'blau'))
 
@@ -185,7 +201,7 @@ def test_geleerter_betrag_raeumt_den_beleg_ebenfalls_auf(auth_client, csrf, db, 
                                                          belegverzeichnis):
     """Ein auf 0 gesetzter Betrag loescht die Zeile - derselbe Weg in die
     Verwaisung, nur ueber einen anderen Zweig."""
-    beleg = belegverzeichnis / 'eeeeeeee.pdf'
+    beleg = belegverzeichnis / 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.pdf'
     beleg.write_bytes(_pdf_bytes(b'gruen'))
 
     rid = _speichern(auth_client, csrf, rows=[
@@ -198,3 +214,68 @@ def test_geleerter_betrag_raeumt_den_beleg_ebenfalls_auf(auth_client, csrf, db, 
          'person_id': person, 'amount': 0}])
 
     assert not beleg.exists()
+
+
+# ── Teil 4: Belegnamen serverseitig pruefen (Befund K1) ─────────────────────
+
+# Genau die Form, die api_receipt_upload erzeugt: MD5 des Inhalts + Endung.
+_AUSBRUCH = 'a.jpg" onerror="alert(1)" x="'
+
+
+@pytest.mark.parametrize('boeser_name', [
+    _AUSBRUCH,
+    '<img src=x onerror=alert(1)>.png',
+    '../../../etc/passwd',
+    'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ.jpg',   # 32 Zeichen, aber kein Hex
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.svg',   # Hex, aber verbotene Endung
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg',    # nur 31 Hexstellen
+])
+def test_ausgedachter_belegname_erreicht_die_datenbank_nicht(auth_client, csrf, db,
+                                                             person, boeser_name):
+    """`rfn = e.get('receipt_filename') or None` nahm jeden Text entgegen.
+
+    Ein Mitglied konnte damit beliebiges Markup in der Datenbank ablegen; es
+    kam in `const EXISTING` woertlich in die Monatsseite zurueck. Ein Beleg
+    dieser Anwendung hat immer die Form <MD5>.<erlaubte Endung> - alles andere
+    kann kein Beleg sein und darf nicht gespeichert werden.
+    """
+    rid = _speichern(auth_client, csrf, rows=[
+        {'client_key': 'a', 'day': 1, 'description': 'Bon',
+         'person_id': person, 'amount': 9.0,
+         'receipt_filename': boeser_name}]).get_json()['id_map']['a']
+
+    gespeichert = db.execute('SELECT receipt_filename FROM expenses WHERE id=?',
+                             (rid,)).fetchone()['receipt_filename']
+    assert gespeichert is None, (
+        f'Ausgedachter Belegname gespeichert: {gespeichert!r}')
+
+    # Und er taucht folglich auch nicht in der ausgelieferten Seite auf.
+    html = auth_client.get('/month/2026/9').get_data(as_text=True)
+    assert boeser_name not in html, (
+        'Der ausgedachte Belegname kommt woertlich in der Seite zurueck')
+
+
+def test_echter_belegname_bleibt_erhalten(auth_client, csrf, db, person,
+                                          belegverzeichnis):
+    """Gegenprobe: eine Pruefung, die alles verwirft, waere keine Behebung.
+
+    Der Name stammt hier aus dem Upload-Endpunkt selbst - genau die Form, die
+    im Betrieb entsteht."""
+    hoch = auth_client.post(
+        '/api/receipt/upload',
+        data={'file': (io.BytesIO(_pdf_bytes(b'echt')), 'bon.pdf')},
+        headers={'X-CSRF-Token': csrf},
+        content_type='multipart/form-data')
+    assert hoch.status_code == 200, hoch.get_data(as_text=True)
+    name = hoch.get_json()['filename']
+
+    rid = _speichern(auth_client, csrf, rows=[
+        {'client_key': 'a', 'day': 1, 'description': 'Bon',
+         'person_id': person, 'amount': 9.0,
+         'receipt_filename': name}]).get_json()['id_map']['a']
+
+    gespeichert = db.execute('SELECT receipt_filename FROM expenses WHERE id=?',
+                             (rid,)).fetchone()['receipt_filename']
+    assert gespeichert == name, (
+        'Ein echter, vom Upload erzeugter Belegname wurde verworfen - damit '
+        'liesse sich kein einziger Beleg mehr anhaengen')

@@ -63,6 +63,66 @@ def test_login_limit_greift_tatsaechlich(eigene_app):
     assert codes[10:] == [429] * 5, f'Nicht durchgehend gebremst: {codes}'
 
 
+# ── Die 429-Antwort muss benutzbar sein (Befund I4) ─────────────────────────
+
+def test_gebremster_api_aufruf_antwortet_mit_json(eigene_app):
+    """Ohne eigenen Handler liefert Werkzeug hier HTML.
+
+    Das Frontend ruft auf jede Antwort `res.json()` auf - bei HTML wirft das,
+    der Fehler erreicht die Benutzerin nie und der Klick bleibt stumm.
+
+    Bewusst ein GET-Endpunkt: die Limiter-Schicht sitzt an der View, der
+    CSRF-Schutz dagegen schon in before_request - ein POST ohne Token kaeme
+    also nie beim Limit an. Ob der Aufruf inhaltlich erlaubt ist, spielt keine
+    Rolle; geprueft wird einzig die FORM der 429-Antwort.
+    """
+    client = eigene_app.test_client()
+    antworten = [client.get('/api/backup/download/kassenstuerzle_x.db')
+                 for _ in range(13)]
+    gebremst = [a for a in antworten if a.status_code == 429]
+    assert gebremst, ('Das Limit 10/Minute hat nicht gegriffen - Statuscodes: '
+                      f'{[a.status_code for a in antworten]}')
+
+    antwort = gebremst[0]
+    assert antwort.mimetype == 'application/json', (
+        f'429 kommt als {antwort.mimetype} statt als JSON zurueck - '
+        'res.json() im Frontend wirft darauf')
+    daten = antwort.get_json()
+    assert daten['success'] is False
+    assert daten['error'], 'Die 429-Antwort traegt keinen Fehlertext'
+
+
+def test_gebremster_seitenaufruf_liefert_deutsche_seite(eigene_app):
+    """Wer sich ein paar Mal beim Passwort vertippt, landete auf Werkzeugs
+    unmarkierter englischer Standardseite - mitten in einer deutschen App."""
+    client = eigene_app.test_client()
+    antworten = [client.post('/login', data={'username': f'wer{i}', 'password': 'x'})
+                 for i in range(13)]
+    gebremst = [a for a in antworten if a.status_code == 429]
+    assert gebremst, 'Login-Limit hat nicht gegriffen'
+
+    html = gebremst[0].get_data(as_text=True)
+    assert 'text/html' in gebremst[0].content_type
+    from app.translations import translate
+    assert translate('de', 'error.rate_limited_title') in html, (
+        'Die 429-Seite ist nicht die eigene, uebersetzte Seite')
+    # Gegenprobe auf Werkzeugs Standardtext.
+    assert 'Too Many Requests' not in html
+
+
+def test_tote_rate_limit_helfer_sind_entfernt():
+    """`_rate_limit()` und `_get_limiter()` wurden von nichts aufgerufen und
+    reichten den Limit-String obendrein an `callable_name` weiter - sie haetten
+    also auch als Aufruf nichts durchgesetzt. Ihr blosses Dasein liess vier
+    Pruefdurchgaenge glauben, es gebe eine Durchsetzung."""
+    from app.routes import main as m
+
+    assert not hasattr(m, '_rate_limit'), (
+        '_rate_limit() ist zurueck - ein Helfer, der nichts durchsetzt, '
+        'taeuscht eine Absicherung vor')
+    assert not hasattr(m, '_get_limiter'), '_get_limiter() ist zurueck'
+
+
 def test_kein_eintrag_in_rate_limits_laeuft_ins_leere(eigene_app):
     """Jeder Endpunktname aus RATE_LIMITS muss es auch wirklich geben.
 
@@ -80,8 +140,18 @@ def test_kein_eintrag_in_rate_limits_laeuft_ins_leere(eigene_app):
     assert not unbekannt, (
         f'Eintrag in RATE_LIMITS ohne zugehoerige View: {unbekannt}')
 
+    # Bewusst ueber die oeffentliche Schnittstelle (decorated_limits) statt
+    # ueber `_decorated_limits`: das private Feld kann sich mit jeder
+    # flask-limiter-Version aendern. Der Name wird ausserdem exakt so gebildet
+    # wie flask-limiter ihn selbst ablegt - der frueher benutzte
+    # Suffix-Vergleich liess zwei gleichnamige Views einander gegenseitig
+    # "bestaetigen", ein Limit auf der einen galt also auch fuer die andere.
+    from flask_limiter.util import get_qualified_name
+
     limiter = eigene_app.extensions['limiter']
-    vermerkt = limiter.limit_manager._decorated_limits
-    ohne_limit = [e for e in RATE_LIMITS
-                  if not any(k.endswith('.' + e.split('.')[-1]) for k in vermerkt)]
+    ohne_limit = [
+        e for e in RATE_LIMITS
+        if not limiter.limit_manager.decorated_limits(
+            get_qualified_name(eigene_app.view_functions[e]))
+    ]
     assert not ohne_limit, f'Kein Limit vermerkt fuer: {ohne_limit}'
