@@ -443,12 +443,71 @@ _INSTANZ_ID_SCHLUESSEL = 'instance_id'
 
 # Genau die Form, die diese Anwendung fuer app_meta erwartet: (name, typ, pk).
 # PRAGMA table_info liefert je Spalte (cid, name, type, notnull, default, pk).
+#
+# ACHTUNG: Diese Liste ist eine BESCHREIBUNG, kein Beweis. table_info sieht
+# weder CHECK noch FOREIGN KEY, weder generierte Spalten noch sonst etwas,
+# was ein INSERT scheitern lassen kann. Sie ist deshalb nur die schnelle
+# Vorpruefung; verbindlich ist der Schreib-/Lese-Versuch weiter unten.
 _APP_META_SOLLFORM = [('key', 'TEXT', 1), ('value', 'TEXT', 0)]
 _APP_META_SCHEMA = 'CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT)'
+# Schluessel, unter dem der Selbsttest schreibt. Bewusst ein Name, den die
+# Anwendung sonst nirgends verwendet - die Zeile wird sofort wieder geloescht.
+_APP_META_PROBE_SCHLUESSEL = '__schreibprobe__'
+
+# Schluessel, die einen Neuaufbau von app_meta ueberleben duerfen, mit genau
+# den Werten, die diese Anwendung selbst schreibt. Uebernommen wird nur, was
+# hier woertlich steht - der Inhalt der Tabelle ist im Moment des Neuaufbaus
+# angreifergewaehlt, ein "irgendein Text" wuerde also aus der eingespielten
+# Datei stammen. Die Instanzkennung steht bewusst NICHT hier: sie wird vom
+# Aufrufer neu vergeben bzw. festgeschrieben.
+_APP_META_UEBERNAHME = {
+    # Ohne diesen Schluessel stellt sich nach jedem bestaetigten Restore der
+    # Einrichtungsassistent wieder auf "noch nicht erledigt" - der Admin
+    # bekommt ihn erneut vorgesetzt, obwohl er ihn laengst durchlaufen hat.
+    'profiles_setup_done': frozenset({'1'}),
+}
+
+
+def _app_meta_pruefen(conn) -> bool:
+    """Beweist, dass app_meta als Schluessel-/Wert-Ablage taugt.
+
+    Kein Beschreiben der erwarteten Form, sondern ein Versuch: Probeschluessel
+    schreiben, zurueckzulesen, wieder loeschen. Kommt der geschriebene Wert
+    nicht zurueck, ist die Tabelle unbrauchbar - egal WARUM. Das deckt
+    CHECK-Bedingungen, FOREIGN KEY (PRAGMA foreign_keys steht in _open_db auf
+    ON), generierte Spalten, NOT NULL, Trigger und jede kuenftige Bauart ab,
+    ohne sie einzeln aufzuzaehlen. Genau daran ist die reine Formpruefung
+    dreimal hintereinander vorbeigelaufen.
+
+    Der Probewert ist zufaellig: ein fest verdrahteter Wert liesse sich mit
+    `CHECK (value = '...')` nachbauen und der Selbsttest damit austricksen.
+    """
+    probe = secrets.token_hex(8)
+    try:
+        conn.execute('DELETE FROM app_meta WHERE key=?', (_APP_META_PROBE_SCHLUESSEL,))
+        conn.execute('INSERT INTO app_meta (key, value) VALUES (?,?)',
+                     (_APP_META_PROBE_SCHLUESSEL, probe))
+        zeile = conn.execute('SELECT value FROM app_meta WHERE key=?',
+                             (_APP_META_PROBE_SCHLUESSEL,)).fetchone()
+        gelesen = zeile[0] if zeile is not None else None
+        conn.execute('DELETE FROM app_meta WHERE key=?', (_APP_META_PROBE_SCHLUESSEL,))
+    except sqlite3.Error as exc:
+        # Bewusst KEIN conn.rollback(): _app_meta_sicherstellen() laeuft
+        # mitten in init_db(), und init_db() sammelt seine CREATE TABLEs bis
+        # zum abschliessenden commit(). Ein Rollback wuerde sie mitreissen.
+        # SQLite verwirft die gescheiterte Anweisung ohnehin fuer sich.
+        log.warning("Schreibprobe auf app_meta fehlgeschlagen (%s) - die "
+                    "Tabelle wird neu aufgebaut.", exc)
+        return False
+    if gelesen != probe:
+        log.warning("Schreibprobe auf app_meta lieferte %r statt %r - die "
+                    "Tabelle wird neu aufgebaut.", gelesen, probe)
+        return False
+    return True
 
 
 def _app_meta_sicherstellen(conn) -> None:
-    """Erzwingt die erwartete Form von app_meta - notfalls durch Neuaufbau.
+    """Erzwingt eine BRAUCHBARE app_meta - notfalls durch Neuaufbau.
 
     Nacharbeit zum Herkunftsnachweis: bei einer wiederhergestellten Datei
     stammt app_meta samt SCHEMA aus der hochgeladenen Datei. init_db() legte
@@ -460,14 +519,23 @@ def _app_meta_sicherstellen(conn) -> None:
     Text). Damit haette diese Installation fuer immer KEINE lesbare eigene
     Kennung mehr, und der Herkunftsnachweis waere erledigt.
 
-    Aus der Tabelle wird bewusst NICHTS uebernommen: ihr Inhalt ist in genau
-    dem Moment, in dem diese Funktion etwas zu tun findet, angreifergewaehlt.
+    Die Form allein zu vergleichen hat dreimal nicht gereicht: PRAGMA
+    table_info zeigt CHECK, FOREIGN KEY und generierte Spalten nicht an, eine
+    so praeparierte Tabelle sah also korrekt aus und liess trotzdem kein
+    INSERT zu. Verbindlich ist deshalb _app_meta_pruefen() - ein echter
+    Schreib-/Lese-Versuch. Die Formpruefung bleibt als billiger Schnellpfad
+    davor stehen.
+
+    Aus der Tabelle wird bis auf _APP_META_UEBERNAHME NICHTS uebernommen: ihr
+    Inhalt ist in genau dem Moment, in dem diese Funktion etwas zu tun
+    findet, angreifergewaehlt.
     """
     try:
         spalten = list(conn.execute('PRAGMA table_info(app_meta)'))
     except sqlite3.Error:
         spalten = []
-    if [(r[1], str(r[2] or '').upper(), r[5]) for r in spalten] == _APP_META_SOLLFORM:
+    if ([(r[1], str(r[2] or '').upper(), r[5]) for r in spalten] == _APP_META_SOLLFORM
+            and _app_meta_pruefen(conn)):
         return
 
     if spalten:
@@ -475,17 +543,45 @@ def _app_meta_sicherstellen(conn) -> None:
                     "aufgebaut - der bisherige Inhalt stammt aus einer "
                     "eingespielten Datei und wird verworfen.",
                     ', '.join(str(r[1]) for r in spalten))
-    # DROP TABLE scheitert, wenn unter dem Namen etwas anderes als eine
-    # Tabelle liegt (View). Beide Wege werden versucht, damit eine feindliche
-    # Datei den Start nicht zum Absturz bringen kann.
+    gerettet = _app_meta_uebernahme_lesen(conn)
+    # Unter dem Namen `app_meta` kann alles liegen: Tabelle, View, Index oder
+    # Trigger. DROP TABLE ist bei einem Index ein stilles Nichts (kein
+    # Fehler!) - frueher brach die Schleife danach ab, der Index blieb stehen
+    # und das folgende CREATE TABLE scheiterte mit "there is already an index
+    # named app_meta". Deshalb werden ALLE vier Wege ausgefuehrt, ohne break:
+    # ein Drop, der nichts getan hat, ist kein Erfolg.
     for anweisung in ('DROP TABLE IF EXISTS app_meta',
-                      'DROP VIEW IF EXISTS app_meta'):
+                      'DROP VIEW IF EXISTS app_meta',
+                      'DROP INDEX IF EXISTS app_meta',
+                      'DROP TRIGGER IF EXISTS app_meta'):
         try:
             conn.execute(anweisung)
+        except sqlite3.Error as exc:
+            log.debug("Neuaufbau app_meta: '%s' nicht anwendbar (%s)", anweisung, exc)
+    conn.execute(_APP_META_SCHEMA)
+    for schluessel, wert in gerettet.items():
+        conn.execute('INSERT INTO app_meta (key, value) VALUES (?,?)',
+                     (schluessel, wert))
+        log.info("app_meta neu aufgebaut - '%s' wurde uebernommen.", schluessel)
+
+
+def _app_meta_uebernahme_lesen(conn) -> dict:
+    """Liest die wenigen Schluessel, die einen Neuaufbau ueberleben duerfen.
+
+    Uebernommen wird ausschliesslich, was in _APP_META_UEBERNAHME woertlich
+    als erlaubter Wert steht. Alles andere - auch ein "fast richtiger" Wert -
+    wird verworfen, denn es kann aus der eingespielten Datei stammen.
+    """
+    gerettet = {}
+    for schluessel, erlaubte in _APP_META_UEBERNAHME.items():
+        try:
+            zeile = conn.execute('SELECT value FROM app_meta WHERE key=?',
+                                 (schluessel,)).fetchone()
         except sqlite3.Error:
             continue
-        break
-    conn.execute(_APP_META_SCHEMA)
+        if zeile is not None and zeile[0] in erlaubte:
+            gerettet[schluessel] = zeile[0]
+    return gerettet
 
 
 def _ensure_instanz_id(conn):
@@ -758,8 +854,22 @@ def init_db():
                  "Login erzwungen.", _bootstrap_admin_id)
 
     # 1:1-Verknuepfung Benutzer <-> Person; beide Seiten bleiben optional.
-    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person'
-                 ' ON users(person_id) WHERE person_id IS NOT NULL')
+    #
+    # Der try/except ist NICHT kosmetisch: `CREATE INDEX IF NOT EXISTS` ist
+    # nur dann ein stilles Nichts, wenn unter dem Namen bereits ein INDEX
+    # liegt. Lag dort eine TABELLE (eine eingespielte Datei mit einer Tabelle
+    # `idx_users_person`), warf die Anweisung "there is already a table named
+    # idx_users_person" - mitten in init_db(), und init_db() laeuft in
+    # create_app(). Die Anwendung startete danach ueberhaupt nicht mehr, bei
+    # `restart: unless-stopped` eine endlose Neustartschleife. Nichts in
+    # init_db() darf den Start verhindern koennen; der fehlende Index kostet
+    # hoechstens die Eindeutigkeit der 1:1-Verknuepfung.
+    try:
+        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person'
+                     ' ON users(person_id) WHERE person_id IS NOT NULL')
+    except Exception as _exc:
+        log.warning("Index idx_users_person konnte nicht angelegt werden (%s) - "
+                    "der Start laeuft trotzdem weiter.", _exc)
     # app_meta wird bewusst NICHT mit `CREATE TABLE IF NOT EXISTS` angelegt:
     # das haette die (moeglicherweise aus einer eingespielten Datei
     # stammende) vorhandene Tabelle samt ihrer Form stehen lassen.
@@ -3042,6 +3152,84 @@ class _SicherungAbgelehnt(Exception):
 # Phasen (push_subscriptions, activity, presence, app_meta) legt init_db() nach
 # dem Tausch additiv nach, sie hier zu fordern wuerde aeltere, voellig
 # legitime Sicherungen abweisen.
+# ── Positivliste der Objekte, die diese Anwendung selbst anlegt ──────────────
+#
+# Die Pruefung einer hochgeladenen Sicherung zaehlte frueher auf, was VERBOTEN
+# ist (Typ 'view' oder 'trigger'). Jede Runde fand die naechste Bauart, die
+# dort nicht stand: ein INDEX namens `app_meta` (DROP TABLE ist darauf ein
+# stilles Nichts, das folgende CREATE TABLE scheitert - die Installation hat
+# danach dauerhaft keine Kennung mehr), eine TABELLE namens
+# `idx_users_person` (init_db() stirbt beim CREATE INDEX, die App startet nie
+# wieder). Deshalb steht hier jetzt umgekehrt, was ERLAUBT ist: alles andere
+# faellt raus, unabhaengig vom Typ und unabhaengig davon, ob wir uns die
+# konkrete Schadwirkung vorstellen konnten.
+#
+# Name UND Typ muessen passen. Nur den Namen zu pruefen genuegt nicht: ein
+# Index namens `app_meta` traegt einen erlaubten Namen und ist trotzdem
+# genau der Angriff.
+#
+# ACHTUNG beim Erweitern des Schemas: eine neue Tabelle oder ein neuer Index
+# in init_db() MUSS hier nachgetragen werden, sonst lehnt die Anwendung ihre
+# eigenen Sicherungen ab. Der Gleichlauf ist getestet - siehe
+# test_erlaubte_objekte_bleiben_mit_init_db_im_gleichlauf in
+# tests/test_backup_restore_sicherheit.py: der Test baut eine frische
+# Datenbank ueber create_app() und vergleicht deren sqlite_master mit diesen
+# Mengen. Wer etwas hinzufuegt und diese Liste vergisst, bekommt Rot.
+_EIGENE_TABELLEN = frozenset({
+    'users', 'persons', 'categories', 'expenses', 'month_status',
+    'recurring_expenses', 'income', 'category_splits', 'push_subscriptions',
+    'activity', 'presence', 'app_meta',
+})
+_EIGENE_INDIZES = frozenset({
+    'idx_users_person', 'idx_expenses_year_month', 'idx_expenses_person_id',
+    'idx_expenses_category_id', 'idx_income_year_month', 'idx_income_person_id',
+    'idx_month_status_ym',
+})
+# Von SQLite selbst verwaltet, nicht von dieser Anwendung: der Zaehler fuer
+# AUTOINCREMENT. Er steht in jeder echten Sicherung.
+_SQLITE_EIGENE_TABELLEN = frozenset({'sqlite_sequence'})
+# Implizite Indizes hinter PRIMARY KEY/UNIQUE. SQLite benennt sie
+# `sqlite_autoindex_<tabelle>_<n>`; erlaubt sind sie nur zu einer Tabelle,
+# die auch sonst erlaubt ist.
+_AUTOINDEX_MUSTER = _re_modul.compile(r'^sqlite_autoindex_(?P<tabelle>.+)_\d+$')
+
+
+def _objekt_ist_eigenes(typ, name) -> bool:
+    """Wahr, wenn `name` ein Objekt ist, das init_db() selbst so anlegt.
+
+    Bezeichner sind in SQLite nicht gross-/kleinschreibungsempfindlich:
+    ein Index `APP_META` kollidiert mit der Tabelle `app_meta` genauso.
+    Der Vergleich laeuft deshalb ueber die Kleinschreibung.
+    """
+    typ_klein = str(typ or '').strip().lower()
+    name_klein = str(name or '').strip().lower()
+    if typ_klein == 'table':
+        return name_klein in _EIGENE_TABELLEN or name_klein in _SQLITE_EIGENE_TABELLEN
+    if typ_klein == 'index':
+        if name_klein in _EIGENE_INDIZES:
+            return True
+        treffer = _AUTOINDEX_MUSTER.match(name_klein)
+        return bool(treffer and treffer.group('tabelle') in _EIGENE_TABELLEN)
+    # 'view', 'trigger' - und alles, was SQLite kuenftig dazunimmt.
+    return False
+
+
+def _schema_normalisiert(sql) -> str:
+    """Vergleichsform einer CREATE-Anweisung aus sqlite_master.
+
+    Kleinschreibung, zusammengefasste Leerzeichen und ohne das optionale
+    `IF NOT EXISTS`. Letzteres ist noetig, weil app_meta bis zur Einfuehrung
+    des Herkunftsnachweises mit `CREATE TABLE IF NOT EXISTS ...` angelegt
+    wurde - sqlite_master speichert die Anweisung so, wie sie geschrieben
+    wurde, und aeltere echte Sicherungen tragen deshalb genau diese Form.
+    """
+    text = ' '.join(str(sql or '').split()).lower()
+    return text.replace('create table if not exists ', 'create table ')
+
+
+_APP_META_SCHEMA_NORMALISIERT = _schema_normalisiert(_APP_META_SCHEMA)
+
+
 _PFLICHT_TABELLEN = {
     'users':              {'id', 'username', 'password_hash'},
     'persons':            {'id', 'name'},
@@ -3122,22 +3310,41 @@ def _pruefe_sicherung(pfad: str, admin_username: str,
     con = _oeffne_sicherung(pfad)
     try:
         objekte = con.execute(
-            'SELECT type, name FROM sqlite_master').fetchall()
+            'SELECT type, name, sql FROM sqlite_master').fetchall()
         if not objekte:
             # Eine leere Datei ist eine gueltige leere SQLite-Datenbank -
             # sie wuerde den gesamten Bestand loeschen.
             raise _SicherungAbgelehnt('srv.restore_empty')
 
-        # Diese Anwendung legt weder Views noch Trigger an. Ein Trigger in der
-        # hochgeladenen Datei wuerde bei jedem spaeteren INSERT/UPDATE eigenen
-        # SQL-Code im Kontext der App ausfuehren.
-        auffaellig = sorted(name for typ, name in objekte
-                            if typ in ('view', 'trigger'))
+        # Positivliste statt Verbotsliste (siehe _EIGENE_TABELLEN): abgelehnt
+        # wird jedes Objekt, das diese Anwendung nicht selbst so anlegt -
+        # unabhaengig von seinem Typ. Eine Verbotsliste ('view', 'trigger')
+        # liess jeweils die naechste Bauart durch; eine echte Sicherung ist
+        # dagegen eine Dateikopie der eigenen Datenbank und enthaelt per
+        # Definition nichts anderes als das eigene Schema.
+        auffaellig = sorted({str(zeile[1]) for zeile in objekte
+                             if not _objekt_ist_eigenes(zeile[0], zeile[1])})
         if auffaellig:
             raise _SicherungAbgelehnt('srv.restore_objects',
                                       objekte=', '.join(auffaellig[:5]))
 
-        tabellen = {name for typ, name in objekte if typ == 'table'}
+        # app_meta traegt den Herkunftsnachweis. Bei ihr genuegt der richtige
+        # Name nicht: eine Tabelle
+        #   app_meta (key TEXT PRIMARY KEY, value TEXT CHECK (value='x'))
+        # bzw. mit `REFERENCES users(username)` sieht unter PRAGMA table_info
+        # exakt richtig aus und nimmt trotzdem kein INSERT an - die
+        # Installation haette danach dauerhaft keine eigene Kennung. Statt
+        # Bedingungsarten aufzuzaehlen wird der Wortlaut der Anweisung mit
+        # dem verglichen, den diese Anwendung selbst schreibt. Fehlt app_meta
+        # ganz, ist das der normale Fall einer alten Sicherung - dann greift
+        # weiter unten der Zweig 'keine Instanzkennung'.
+        for zeile in objekte:
+            if str(zeile[0] or '').lower() == 'table' \
+                    and str(zeile[1] or '').lower() == 'app_meta' \
+                    and _schema_normalisiert(zeile[2]) != _APP_META_SCHEMA_NORMALISIERT:
+                raise _SicherungAbgelehnt('srv.restore_app_meta_fremd')
+
+        tabellen = {zeile[1] for zeile in objekte if zeile[0] == 'table'}
         fehlend = []
         for tabelle, pflichtspalten in _PFLICHT_TABELLEN.items():
             if tabelle not in tabellen:

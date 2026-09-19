@@ -416,8 +416,14 @@ TRANSLATIONS = {
                                  'Instanz dauerhaft unbrauchbar machen würde.',
         'srv.restore_empty': 'Die Sicherung enthält keine Daten (leere Datenbank) und würde '
                              'den gesamten Bestand löschen.',
-        'srv.restore_objects': 'Die Sicherung enthält unerwartete Views oder Trigger ({objekte}). '
-                               'Kassenstürzle legt so etwas nie an.',
+        'srv.restore_objects': 'Die Sicherung enthält Objekte, die Kassenstürzle selbst nie '
+                               'anlegt ({objekte}). Sie wurde abgelehnt, weil solche Objekte '
+                               'nach dem Einspielen eigenen SQL-Code ausführen oder den Start '
+                               'der Anwendung dauerhaft verhindern können.',
+        'srv.restore_app_meta_fremd': 'Die Tabelle „app_meta" in der Sicherung hat nicht die '
+                                      'Form, die Kassenstürzle selbst anlegt. Sie wurde '
+                                      'abgelehnt, weil diese Installation danach ihre eigene '
+                                      'Instanzkennung nicht mehr speichern könnte.',
         'srv.restore_missing_tables': 'Die Sicherung stammt nicht aus Kassenstürzle – es fehlen: '
                                       '{fehlend}',
         'srv.restore_integrity': 'Die Sicherung ist beschädigt (Integritätsprüfung fehlgeschlagen).',
@@ -434,11 +440,15 @@ TRANSLATIONS = {
                                         'Sicherungen, die vor diesem Update erstellt wurden, '
                                         'lassen sich nur nach ausdrücklicher Bestätigung '
                                         'einspielen.',
+        # Bewusst KEIN "bitte neu starten": beim Neustart läuft dieselbe
+        # init_db() in denselben Fehler. Der Hinweis versprach eine Erholung,
+        # die er nicht einlösen konnte.
         'srv.restore_kein_eigener_nachweis': 'Diese Installation kann ihre eigene '
                                              'Instanzkennung nicht lesen. Damit lässt sich die '
                                              'Herkunft einer Sicherung nicht prüfen, und es wird '
-                                             'nichts eingespielt. Bitte die Anwendung neu starten '
-                                             'und das Server-Protokoll prüfen.',
+                                             'nichts eingespielt. Ein Neustart behebt das nicht – '
+                                             'die Ursache steht im Server-Protokoll und muss '
+                                             'direkt an der Datenbank-Datei behoben werden.',
         'srv.reserved_backup_label': 'Das Label „{label}" ist für automatische Schutzkopien '
                                      'reserviert. Bitte ein anderes wählen.',
         'srv.ocr_unreadable': 'Beleg konnte nicht gelesen werden.',
@@ -851,8 +861,14 @@ TRANSLATIONS = {
                                  'instance.',
         'srv.restore_empty': 'The backup contains no data (empty database) and would wipe '
                              'everything.',
-        'srv.restore_objects': 'The backup contains unexpected views or triggers ({objekte}). '
-                               'Kassenstürzle never creates those.',
+        'srv.restore_objects': 'The backup contains objects that Kassenstürzle never creates '
+                               'itself ({objekte}). It was rejected because such objects can '
+                               'execute their own SQL after a restore, or permanently prevent '
+                               'the application from starting.',
+        'srv.restore_app_meta_fremd': 'The "app_meta" table in the backup does not have the '
+                                      'shape Kassenstürzle creates itself. It was rejected '
+                                      'because this installation would no longer be able to '
+                                      'store its own instance id.',
         'srv.restore_missing_tables': 'The backup does not come from Kassenstürzle – missing: '
                                       '{fehlend}',
         'srv.restore_integrity': 'The backup is corrupted (integrity check failed).',
@@ -870,8 +886,9 @@ TRANSLATIONS = {
                                         'confirmation.',
         'srv.restore_kein_eigener_nachweis': 'This installation cannot read its own instance '
                                              'id. The origin of a backup therefore cannot be '
-                                             'verified and nothing was restored. Please restart '
-                                             'the application and check the server log.',
+                                             'verified and nothing was restored. Restarting does '
+                                             'not help – the cause is in the server log and has '
+                                             'to be fixed on the database file itself.',
         'srv.reserved_backup_label': 'The label "{label}" is reserved for automatic protective '
                                      'copies. Please choose a different one.',
         'srv.ocr_unreadable': 'Receipt could not be read.',
