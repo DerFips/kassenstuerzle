@@ -15,9 +15,19 @@ RUN echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.lis
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Befund I10: requirements.lock ist der verbindliche, vollstaendig gepinnte und
+# hashgesicherte Stand (erzeugen mit `make requirements.lock`, braucht
+# Netzzugang). Die eckige Klammer ist der uebliche Kniff fuer ein OPTIONALES
+# COPY: passt das Muster auf nichts, bleibt die Datei einfach weg - COPY
+# scheitert nicht, weil requirements.txt immer trifft.
+COPY requirements.txt requirements.loc[k] ./
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    if [ -f requirements.lock ]; then \
+        pip install --no-cache-dir -r requirements.lock; \
+    else \
+        echo "HINWEIS: requirements.lock fehlt - Build ist nicht reproduzierbar (Befund I10)." >&2; \
+        pip install --no-cache-dir -r requirements.txt; \
+    fi
 
 COPY . .
 
