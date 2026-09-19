@@ -35,7 +35,18 @@ USER kassenstuerzle
 
 # Umgebungsvariablen (Defaults; per -e oder .env überschreibbar)
 ENV DATABASE_PATH=/app/data/kassenstuerzle.db
-ENV HTTPS=0
+# Sicherheit (Befund I7): HTTPS=1, damit das Sitzungscookie das Secure-Flag
+# bekommt. Hier stand vorher HTTPS=0 und docker-compose.yml überschrieb es
+# nicht - die Sitzungscookies gingen also ohne Secure-Flag hinaus und waren
+# auf jedem Klartext-Weg zum Container mitlesbar. Der Container läuft
+# ausschließlich hinter dem TLS-terminierenden Reverse-Proxy; wer bewusst
+# reines HTTP fahren will, setzt HTTPS=0 in seiner .env.
+ENV HTTPS=1
+# Rückfall-Kennzeichen für app/__init__.py:_laeuft_im_container(): setzt der
+# Betreiber HTTPS gar nicht, gilt im Container trotzdem "Secure", bei einem
+# lokalen `python run.py` dagegen nicht (sonst sperrt das Secure-Cookie die
+# Entwicklung über http://127.0.0.1 aus).
+ENV KASSENSTUERZLE_IM_CONTAINER=1
 
 EXPOSE 5000
 

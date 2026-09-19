@@ -65,6 +65,50 @@ RATE_LIMITS = {
 }
 
 
+def _laeuft_im_container() -> bool:
+    """Erkennt, ob dieser Prozess in einem Container laeuft (Befund I7).
+
+    Unterschieden wird an Merkmalen, die es nur im Container gibt:
+      * `/.dockerenv` legt der Docker-Daemon in jedem Container an,
+      * `/run/.containerenv` ist das Gegenstueck von Podman,
+      * `KASSENSTUERZLE_IM_CONTAINER=1` setzt unser eigenes Dockerfile
+        ausdruecklich - der Rueckfall, falls eine Laufzeit keine der beiden
+        Dateien anlegt.
+    """
+    if os.environ.get('KASSENSTUERZLE_IM_CONTAINER', '').strip() == '1':
+        return True
+    return os.path.exists('/.dockerenv') or os.path.exists('/run/.containerenv')
+
+
+def _secure_cookie_aktiv() -> bool:
+    """Liefert den Wert fuer SESSION_COOKIE_SECURE (Befund I7).
+
+    Frueher stand hier `os.environ.get('HTTPS', '0') == '1'`: der Default war
+    UNSICHER. Wer `HTTPS` im Dockerfile oder in der .env vergass - und das
+    Dockerfile setzte selbst `HTTPS=0` -, verschickte Sitzungscookies ohne
+    `Secure`-Flag. Zusammen mit dem auf alle Interfaces veroeffentlichten Port
+    5000 liess sich der TLS-terminierende Reverse-Proxy umgehen und das Cookie
+    im Klartext mitlesen.
+
+    Jetzt gilt: `HTTPS` ist die ausdrueckliche Entscheidung des Betreibers und
+    hat immer Vorrang - `HTTPS=0` ist der bewusste Ausstieg fuer einen reinen
+    Klartext-Aufbau. Ist die Variable NICHT gesetzt, ist der Default "sicher",
+    sobald wir in einem Container laufen.
+
+    Warum nicht bedingungslos `True`? Ein `python run.py` auf dem
+    Entwicklungsrechner spricht Klartext-HTTP auf 127.0.0.1. Ein Secure-Cookie
+    sendet der Browser ueber `http://` nicht zurueck - die Anmeldung wuerde
+    endlos auf die Login-Seite zurueckfallen. Deshalb haengt der Default an
+    `_laeuft_im_container()`: im Container (dort steht immer der Proxy davor)
+    sicher, beim lokalen Lauf nicht. Wer lokal doch mit TLS testet, setzt
+    `HTTPS=1`; wer im Container bewusst Klartext fahren will, setzt `HTTPS=0`.
+    """
+    wert = os.environ.get('HTTPS')
+    if wert is not None and wert.strip() != '':
+        return wert.strip() == '1'
+    return _laeuft_im_container()
+
+
 def create_app():
     app = Flask(__name__)
 
@@ -77,7 +121,8 @@ def create_app():
 
     app.config['SESSION_COOKIE_HTTPONLY'] = True
     app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'   # CSRF-Schutz: verhindert Cross-Site Requests
-    app.config['SESSION_COOKIE_SECURE'] = os.environ.get('HTTPS', '0') == '1'  # True wenn hinter HTTPS
+    # Befund I7: Default ist jetzt "sicher" (siehe _secure_cookie_aktiv oben).
+    app.config['SESSION_COOKIE_SECURE'] = _secure_cookie_aktiv()
 
     # Session-Lifetime: läuft nach Inaktivität ab (Standard 12h, via ENV konfigurierbar)
     from datetime import timedelta

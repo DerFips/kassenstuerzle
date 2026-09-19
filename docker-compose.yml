@@ -3,7 +3,14 @@ services:
   web:
     build: .
     ports:
-      - "5000:5000"
+      # Sicherheit (Befund I7): NUR an 127.0.0.1 binden. Ein blosses
+      # "5000:5000" veroeffentlicht den Port auf ALLEN Host-Interfaces (also
+      # auch im LAN und, je nach Host, im Internet) und haengt dabei die
+      # docker-proxy-Regel vor die Host-Firewall. Damit laesst sich der
+      # TLS-terminierende Reverse-Proxy komplett umgehen: Anmeldedaten und
+      # Sitzungscookies gehen dann im Klartext ueber das Netz. Der Proxy laeuft
+      # auf demselben Host und erreicht 127.0.0.1:5000 weiterhin.
+      - "127.0.0.1:5000:5000"
     volumes:
       - ./data:/app/data
     restart: unless-stopped
