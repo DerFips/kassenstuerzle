@@ -183,3 +183,37 @@ def test_migration_keeps_backup_if_verification_fails(tmp_path, monkeypatch):
     backup_path = str(db_path) + '.unencrypted.bak'
     assert os.path.exists(backup_path), (
         'Klartext-Sicherung wurde entfernt, obwohl die Verifikation fehlschlug')
+
+
+def test_secret_key_folgt_der_datenbank_nicht_dem_quellcode(tmp_path, monkeypatch):
+    """Regression: der Signierschluessel gehoert neben die Datenbank.
+
+    Vorher war das Verzeichnis relativ zum Quellcode verdrahtet
+    (`app/__init__.py` -> `../data`), unabhaengig von DATABASE_PATH. Zwei
+    Folgen: die Testsuite schrieb bei jedem Lauf in das echte
+    Datenverzeichnis des Repos, und wer DATABASE_PATH umsetzte, bekam
+    Schluessel und Datenbank an getrennten Orten - beim Verschieben der
+    Datenbank waeren alle Sitzungen ohne erkennbaren Grund ungueltig
+    geworden.
+    """
+    import importlib
+    import app as app_paket
+
+    eigenes = tmp_path / 'woanders'
+    eigenes.mkdir()
+    monkeypatch.setenv('DATABASE_PATH', str(eigenes / 'kassenstuerzle.db'))
+    monkeypatch.setenv('DISABLE_RATE_LIMIT', '1')
+
+    # Das Repo-data/ darf dabei unberuehrt bleiben.
+    repo_data = Path(app_paket.__file__).resolve().parent.parent / 'data'
+    vorher = set(repo_data.iterdir()) if repo_data.is_dir() else set()
+
+    importlib.reload(app_paket)
+    app_paket.create_app()
+
+    assert (eigenes / '.secret_key').exists(), (
+        'Der Signierschluessel wurde nicht neben der Datenbank angelegt')
+
+    nachher = set(repo_data.iterdir()) if repo_data.is_dir() else set()
+    assert nachher == vorher, (
+        f'Der Testlauf hat das echte Datenverzeichnis veraendert: {nachher - vorher}')

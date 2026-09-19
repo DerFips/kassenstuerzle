@@ -172,7 +172,16 @@ def create_app():
     app = Flask(__name__)
 
     # Security: Use a consistent secret key across all workers.
-    data_dir = os.path.join(os.path.dirname(__file__), '..', 'data')
+    # Das Verzeichnis wird aus DATABASE_PATH abgeleitet, nicht relativ zum
+    # Quellcode verdrahtet. Vorher landete der Signierschluessel immer in
+    # <repo>/data, auch wenn die Datenbank ganz woanders lag: die Testsuite
+    # schrieb damit bei jedem Lauf in das echte Datenverzeichnis, und wer
+    # DATABASE_PATH umsetzt, bekam Schluessel und Datenbank an getrennten
+    # Orten. Im Container aendert sich nichts - dort ist dirname(DATABASE_PATH)
+    # genau das /app/data von vorher.
+    data_dir = os.path.dirname(os.environ.get(
+        'DATABASE_PATH',
+        os.path.join(os.path.dirname(__file__), '..', 'data', 'kassenstuerzle.db')))
     secret = _ensure_data_dir_and_secret(data_dir)
     app.secret_key = os.environ.get('SECRET_KEY', secret)
 
