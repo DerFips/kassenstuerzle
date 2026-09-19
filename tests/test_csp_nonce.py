@@ -1,0 +1,143 @@
+"""CSP-Nonce-Infrastruktur und Abbau der Inline-Ereignisattribute (Befund I6).
+
+Was diese Tests NICHT koennen: JavaScript ausfuehren. Ob ein umgestellter
+Handler im Browser noch feuert, kann hier niemand pruefen - dafuer gibt es
+den Browser-Durchgang im Abschlussschritt. Geprueft wird ausschliesslich,
+was am gerenderten HTML und am Header ablesbar ist.
+"""
+import pathlib
+import re
+
+import pytest
+
+TEMPLATES = pathlib.Path(__file__).resolve().parents[1] / 'app' / 'templates'
+
+# Ereignisattribute im Markup: on...= ausserhalb von Kommentaren.
+_ON_ATTR = re.compile(r'\bon[a-z]+\s*=\s*["\']')
+
+# Genau die Bloecke, die eine Nonce tragen muessen. <script src=...> auf CDNs
+# bleibt aussen vor, die deckt die Host-Quelle in script-src ab.
+_NONCE_ERWARTET = {
+    'base.html': 4,
+    'month.html': 1,
+    'settings.html': 2,
+    'import_pdf.html': 1,
+    'overview.html': 2,   # inkl. des JSON-Datenblocks
+    'scan_receipt.html': 1,
+    'offline.html': 1,
+}
+
+
+def _seiten_nonces(html):
+    return re.findall(r'<script[^>]*\snonce="([^"]+)"', html)
+
+
+# ── 1. Die gerenderte Seite traegt Nonces an den Inline-Skripten ──────────────
+
+@pytest.mark.parametrize('pfad', ['/overview', '/settings', '/month/2026/9'])
+def test_inline_skripte_tragen_nonce(auth_client, pfad):
+    html = auth_client.get(pfad).get_data(as_text=True)
+    nonces = _seiten_nonces(html)
+    assert nonces, f'{pfad}: kein einziges <script> mit nonce-Attribut'
+    # Alle Bloecke einer Antwort muessen denselben Wert tragen, sonst passt
+    # spaeter nur ein Teil davon zum Header.
+    assert len(set(nonces)) == 1, f'{pfad}: uneinheitliche Nonces {set(nonces)}'
+    assert nonces[0] != '', f'{pfad}: leeres nonce-Attribut'
+    assert len(nonces[0]) >= 16, f'{pfad}: Nonce zu kurz: {nonces[0]!r}'
+
+
+def test_kein_inline_skript_ohne_nonce(auth_client):
+    """Ein Block ohne Nonce faellt im Abschlussschritt stumm aus."""
+    html = auth_client.get('/settings').get_data(as_text=True)
+    ohne_src = [tag for tag in re.findall(r'<script[^>]*>', html)
+                if ' src=' not in tag]
+    assert ohne_src, 'Testannahme kaputt: /settings hat keine Inline-Skripte'
+    for tag in ohne_src:
+        assert 'nonce="' in tag, f'Inline-Skript ohne Nonce: {tag}'
+
+
+# ── 2. Die Nonce ist pro Request frisch ──────────────────────────────────────
+
+def test_nonce_unterscheidet_sich_zwischen_requests(auth_client):
+    """Ein fester Wert waere wertlos: wer ihn kennt, umgeht die CSP."""
+    a = _seiten_nonces(auth_client.get('/overview').get_data(as_text=True))
+    b = _seiten_nonces(auth_client.get('/overview').get_data(as_text=True))
+    assert a and b
+    assert a[0] != b[0], f'Nonce ist konstant: {a[0]!r}'
+
+
+def test_nonce_auch_ueber_verschiedene_seiten_frisch(auth_client):
+    a = _seiten_nonces(auth_client.get('/settings').get_data(as_text=True))
+    b = _seiten_nonces(auth_client.get('/month/2026/9').get_data(as_text=True))
+    assert a and b and a[0] != b[0]
+
+
+# ── 3. Die umgestellten Templates haben keine Ereignisattribute mehr ─────────
+
+def _markup_ohne_kommentare(name):
+    """Jinja- und HTML-Kommentare raus: dort stehen on...=-Erwaehnungen als
+    Prosa (z.B. die XSS-Erklaerung in base.html), die kein Handler sind."""
+    text = (TEMPLATES / name).read_text(encoding='utf-8')
+    text = re.sub(r'\{#.*?#\}', '', text, flags=re.S)
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.S)
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+    text = re.sub(r'^\s*//.*$', '', text, flags=re.M)
+    return text
+
+
+@pytest.mark.parametrize('name', ['base.html', 'offline.html', 'settings.html'])
+def test_umgestellte_templates_ohne_inline_handler(name):
+    treffer = _ON_ATTR.findall(_markup_ohne_kommentare(name))
+    assert not treffer, f'{name}: Inline-Handler uebrig: {treffer}'
+
+
+def test_konkrete_entfernte_handler_sind_weg():
+    """Namentlich die Handler aus diesem Schritt - damit ein Rueckfall auf
+    genau diese Stellen nicht durch eine andere Zaehlung verdeckt wird."""
+    settings = _markup_ohne_kommentare('settings.html')
+    base = _markup_ohne_kommentare('base.html')
+    offline = _markup_ohne_kommentare('offline.html')
+    for schnipsel in ('onchange="toggleCatSplitPanel(this)"',
+                      'onclick="enablePush()"',
+                      'onclick="createBackup()"',
+                      'onclick="restoreBackup()"',
+                      "onclick=\"deleteBackup('"):
+        assert schnipsel not in settings, f'settings.html: {schnipsel} noch da'
+    assert 'onclick="location.reload()"' not in base
+    assert 'onclick="location.reload()"' not in offline
+
+
+def test_ersatzverdrahtung_vorhanden():
+    """Handler entfernt UND nicht ersetzt waere eine stille Regression."""
+    settings = (TEMPLATES / 'settings.html').read_text(encoding='utf-8')
+    for id_ in ('createBackupBtn', 'restoreBackupBtn', 'enablePushBtn'):
+        assert f"getElementById('{id_}')" in settings and 'addEventListener' in settings
+    assert 'js-backup-delete' in settings
+    assert "getElementById('categories-list').addEventListener('change'" in settings
+    base = (TEMPLATES / 'base.html').read_text(encoding='utf-8')
+    assert 'js-activity-reload' in base
+    offline = (TEMPLATES / 'offline.html').read_text(encoding='utf-8')
+    assert "getElementById('offline-retry-btn')" in offline
+
+
+# ── 4. Der Header bleibt in diesem Schritt bewusst unveraendert ──────────────
+
+def test_script_src_traegt_noch_keine_nonce_quelle(auth_client):
+    """Sobald eine Nonce in script-src steht, ignoriert der Browser
+    'unsafe-inline' - month.html haette dann keinen funktionierenden Handler
+    mehr. Die Nonce-Quelle kommt erst im Abschlussschritt dazu."""
+    csp = auth_client.get('/overview').headers['Content-Security-Policy']
+    script_src = [d for d in csp.split(';') if d.strip().startswith('script-src')][0]
+    assert "'unsafe-inline'" in script_src
+    assert 'nonce-' not in script_src, (
+        "script-src traegt eine Nonce, solange month.html noch on...=-Attribute "
+        "hat - das blockt sie alle.")
+
+
+def test_scan_receipt_warnt_vor_seinen_inline_handlern():
+    """Totes Template (M13), bewusst nicht konvertiert - aber markiert."""
+    text = (TEMPLATES / 'scan_receipt.html').read_text(encoding='utf-8')
+    assert _ON_ATTR.search(text), 'Testannahme kaputt: keine Handler mehr drin'
+    kopf = text[:text.index('{% extends')]
+    assert 'CSP' in kopf or 'script-src' in kopf
+    assert 'addEventListener' in kopf
