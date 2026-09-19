@@ -231,27 +231,61 @@ def test_gerenderte_monatsseite_ohne_ereignisattribute(auth_client):
     assert not treffer, f'/month/2026/9: Ereignisattribute im HTML: {treffer}'
 
 
-# ── 4. Der Header bleibt in diesem Schritt bewusst unveraendert ──────────────
+# ── 4. Der Header ist scharf geschaltet ─────────────────────────────────────
 
-def test_script_src_traegt_noch_keine_nonce_quelle(auth_client):
-    """Sobald eine Nonce in script-src steht, ignoriert der Browser
-    'unsafe-inline'. Seit Schritt 2 hat zwar kein Template mehr ein
-    on...=-Attribut, aber das Scharfschalten bleibt ein eigener Schritt:
-    'unsafe-inline' raus und 'nonce-...' rein gehoeren in EINEN Zug, nach
-    einem Browser-Durchgang ueber alle Seiten. Dieser Test haelt fest, dass
-    er noch aussteht."""
+def test_script_src_nutzt_nonce_statt_unsafe_inline(auth_client):
+    """Der eigentliche Zweck von Befund I6.
+
+    'unsafe-inline' erlaubte jedes eingeschleuste Skript und entwertete damit
+    genau den Schutz, der hinter den XSS-Befunden K1 und K3 greifen soll.
+    """
     csp = auth_client.get('/overview').headers['Content-Security-Policy']
     script_src = [d for d in csp.split(';') if d.strip().startswith('script-src')][0]
-    assert "'unsafe-inline'" in script_src
-    assert 'nonce-' not in script_src, (
-        "script-src traegt eine Nonce, solange month.html noch on...=-Attribute "
-        "hat - das blockt sie alle.")
+    assert 'nonce-' in script_src, f'Keine Nonce in script-src: {script_src}'
+    assert "'unsafe-inline'" not in script_src, (
+        f"script-src erlaubt weiterhin beliebige Inline-Skripte: {script_src}")
 
 
-def test_scan_receipt_warnt_vor_seinen_inline_handlern():
-    """Totes Template (M13), bewusst nicht konvertiert - aber markiert."""
-    text = (TEMPLATES / 'scan_receipt.html').read_text(encoding='utf-8')
-    assert _ON_ATTR.search(text), 'Testannahme kaputt: keine Handler mehr drin'
-    kopf = text[:text.index('{% extends')]
-    assert 'CSP' in kopf or 'script-src' in kopf
-    assert 'addEventListener' in kopf
+def test_nonce_im_header_passt_zu_der_im_html(auth_client):
+    """Header und Markup muessen denselben Wert tragen.
+
+    Weichen sie ab, blockt der Browser die eigenen Skriptbloecke der App -
+    ein Fehler, der in den Python-Tests sonst voellig unsichtbar waere, weil
+    dort nie JavaScript laeuft.
+    """
+    antwort = auth_client.get('/overview')
+    csp = antwort.headers['Content-Security-Policy']
+    script_src = [d for d in csp.split(';') if d.strip().startswith('script-src')][0]
+    nonce_aus_header = script_src.split("'nonce-")[1].split("'")[0]
+
+    html = antwort.get_data(as_text=True)
+    assert f'nonce="{nonce_aus_header}"' in html, (
+        'Die Nonce im Header taucht so nicht im HTML auf - der Browser wuerde '
+        'die eigenen Skriptbloecke blockieren.')
+
+
+def test_style_src_darf_unsafe_inline_behalten(auth_client):
+    """Abgrenzung, damit niemand aus Eifer zu viel abschaltet.
+
+    Die Templates nutzen an vielen Stellen style="..."-Attribute. Die
+    unterliegen style-src, nicht script-src, und sind ein deutlich
+    geringeres Risiko - Befund I6 betrifft sie ausdruecklich nicht.
+    """
+    csp = auth_client.get('/overview').headers['Content-Security-Policy']
+    style_src = [d for d in csp.split(';') if d.strip().startswith('style-src')][0]
+    assert "'unsafe-inline'" in style_src
+
+
+def test_json_antwort_bekommt_gueltigen_header(auth_client):
+    """Auch Antworten ohne Template muessen einen vollstaendigen Header haben.
+
+    Die Nonce entsteht in before_request, nicht erst beim Abruf aus dem
+    Template. Waere sie an das Rendern gekoppelt, stuende hier 'nonce-' ohne
+    Wert - ein Header, den Browser als kaputte Quellenliste behandeln.
+    """
+    antwort = auth_client.get('/api/activity?scope=2026-09')
+    csp = antwort.headers['Content-Security-Policy']
+    script_src = [d for d in csp.split(';') if d.strip().startswith('script-src')][0]
+    assert "'nonce-'" not in script_src, f'Leere Nonce im Header: {script_src}'
+    nonce = script_src.split("'nonce-")[1].split("'")[0]
+    assert len(nonce) >= 16, f'Nonce zu kurz oder leer: {nonce!r}'

@@ -245,14 +245,29 @@ def create_app():
     # Jeder Request bekommt einen frischen Zufallswert. Templates schreiben ihn
     # per <script nonce="{{ csp_nonce() }}"> in ihre Inline-Bloecke. Der Wert
     # landet auf g, damit Header und Template garantiert denselben benutzen.
+    #
+    # Bewusst in before_request und nicht erst beim ersten Abruf aus dem
+    # Template: der CSP-Header wird fuer JEDE Antwort gesetzt, auch fuer
+    # JSON-Antworten und Weiterleitungen, die gar kein Template rendern. Ein
+    # nur bei Bedarf erzeugter Wert waere dort nicht vorhanden und der Header
+    # wuerde beim Zusammenbauen scheitern.
+    @app.before_request
+    def _erzeuge_csp_nonce():
+        from flask import g
+        import secrets as _sec
+        g.csp_nonce = _sec.token_urlsafe(16)
+
     @app.context_processor
     def inject_csp_nonce():
         from flask import g
-        import secrets as _sec
 
         def csp_nonce():
+            # Fallback nur fuer Aufrufe ausserhalb eines Requests (z.B.
+            # render_template in einem Skript) - im Normalfall steht der Wert
+            # laengst aus before_request bereit.
             if not hasattr(g, 'csp_nonce'):
-                g.csp_nonce = _sec.token_urlsafe(16)
+                import secrets as _sec2
+                g.csp_nonce = _sec2.token_urlsafe(16)
             return g.csp_nonce
 
         return {'csp_nonce': csp_nonce}
@@ -301,6 +316,7 @@ def create_app():
     # ── Security Response Headers ─────────────────────────────────────────
     @app.after_request
     def set_security_headers(response):
+        from flask import g
         # Verhindert MIME-Type-Sniffing (z.B. JS in Bild-Upload)
         response.headers['X-Content-Type-Options'] = 'nosniff'
         # Verhindert Clickjacking (App darf nicht in iframe eingebettet werden)
@@ -311,23 +327,23 @@ def create_app():
         response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
         # Content Security Policy: nur eigene Ressourcen + CDNs die die App nutzt
         #
-        # script-src traegt hier BEWUSST noch KEINE 'nonce-...'-Quelle, obwohl die
-        # Infrastruktur dafuer steht (context processor csp_nonce() + nonce-Attribute
-        # an allen Inline-<script>-Bloecken). Grund: sobald eine Nonce (oder ein Hash)
-        # in der Quellenliste steht, ignoriert der Browser 'unsafe-inline' vollstaendig.
-        # Das ist im Browser nachgemessen: Chrome meldet dann
-        # "Note that 'unsafe-inline' is ignored if either a hash or nonce value is
-        # present in the source list" und blockt sowohl Inline-Bloecke ohne Nonce als
-        # auch JEDES on...=-Attribut - Nonces gelten fuer Ereignis-Attribute gar nicht.
-        # month.html enthaelt noch ~35 solcher Attribute; eine Nonce an dieser Stelle
-        # wuerde die Seite also sofort funktionsunfaehig machen.
+        # script-src setzt auf eine Nonce pro Antwort statt auf 'unsafe-inline'
+        # (Befund I6). 'unsafe-inline' erlaubte JEDES eingeschleuste Skript und
+        # entwertete damit genau den Schutz, der hinter den XSS-Befunden K1 und K3
+        # greifen soll.
         #
-        # Die Nonce-Quelle kommt deshalb erst im Abschlussschritt dazu - zusammen mit
-        # dem Entfernen von 'unsafe-inline', nachdem alle Handler auf addEventListener
-        # umgestellt und im Browser geprueft sind (Befund I6).
+        # Zwei Eigenheiten, die beim Aendern dieser Zeile wichtig sind:
+        # 1. Sobald eine Nonce (oder ein Hash) in der Quellenliste steht, ignoriert
+        #    der Browser 'unsafe-inline' vollstaendig - beides gleichzeitig
+        #    anzugeben bringt also nichts. Im Browser nachgemessen.
+        # 2. Nonces gelten NICHT fuer on...=-Attribute. Ein einziges neues
+        #    onclick="..." in einem Template ist ab hier tot und faellt in den
+        #    Python-Tests nicht auf, weil die kein JavaScript ausfuehren. Deshalb
+        #    wacht tests/test_csp_nonce.py darueber, dass keine Inline-Handler
+        #    zurueckkommen - diesen Test nicht abschwaechen.
         csp = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://cdn.simpleicons.org; "
+            f"script-src 'self' 'nonce-{getattr(g, 'csp_nonce', '')}' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://cdn.simpleicons.org; "
             "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://api.fontshare.com; "
             "img-src 'self' data: blob:; "
