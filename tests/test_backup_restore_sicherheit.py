@@ -458,27 +458,35 @@ def test_bestaetigte_altsicherung_macht_die_instanz_nicht_dauerhaft_annahmeberei
     Danach war die Installation frueher dauerhaft annahmebereit: ihre eigene
     Kennung liess sich nicht mehr lesen, und jede weitere fremde Datenbank
     ging OHNE jede Bestaetigung mit 200 durch.
+
+    Die Behauptung ist jetzt schaerfer als zuvor: diese Datei kommt gar nicht
+    mehr bis zum Bestaetigungsdialog. Ihre app_meta hat nicht den Wortlaut,
+    den diese Anwendung selbst schreibt, und wird schon am Tor abgewiesen -
+    mit UND ohne Bestaetigungskennzeichen. Frueher stand hier nur, dass die
+    Kennung den Restore ueberlebt; das war auch dann noch wahr, wenn man den
+    Neuaufbau von app_meta zurueckdrehte.
     """
     praepariert = sicherung_bauen('vor_update_sicherung.db', app_meta_sql=(
         'CREATE TABLE app_meta (key, value)',
         "INSERT INTO app_meta (key, value) VALUES ('instance_id', '')",
     ))
+    kennung_vorher = m._eigene_instanz_id()
+    assert kennung_vorher
 
-    # Schritt 1: der gewohnte Dialog - erst Ablehnung, dann eine Bestaetigung.
-    ohne = _hochladen(auth_client, csrf, praepariert)
-    assert ohne.status_code == 400
-    assert ohne.get_json()['grund'] == 'srv.restore_keine_instanz_id', (
-        'Die Datei muss wie jede Altsicherung aussehen - sonst prueft dieser '
-        'Test nicht den Weg, den ein Angreifer wirklich geht')
+    # Schritt 1: die Datei wird abgewiesen - und zwar unabhaengig davon, ob
+    # der Admin den Altsicherungs-Dialog bestaetigt.
+    for bestaetigt in (False, True):
+        res = _hochladen(auth_client, csrf, praepariert, bestaetigt=bestaetigt)
+        assert res.status_code == 400, (
+            f'Die praeparierte app_meta ging durch (bestaetigt={bestaetigt})')
+        assert res.get_json()['grund'] == 'srv.restore_app_meta_fremd', (
+            'Erwartet wird die Ablehnung wegen der fremden app_meta-Form, '
+            f"nicht {res.get_json()['grund']!r}")
 
-    mit = _hochladen(auth_client, csrf, praepariert, bestaetigt=True)
-    assert mit.status_code == 200, mit.get_data(as_text=True)
-
-    # Schritt 2: die Installation kennt ihre eigene Herkunft weiterhin.
-    eigene = m._eigene_instanz_id()
-    assert eigene, (
-        'Nach einer einzigen Bestaetigung kann die Installation ihre eigene '
-        'Kennung nicht mehr lesen - der Herkunftsnachweis ist damit erledigt')
+    # Schritt 2: die Installation kennt ihre eigene Herkunft unveraendert.
+    assert m._eigene_instanz_id() == kennung_vorher, (
+        'Die eigene Kennung hat sich durch den Angriffsversuch veraendert - '
+        'damit waeren alle bestehenden Sicherungen unerreichbar')
 
     # Schritt 3: und deshalb prallt die naechste fremde Datei weiter ab -
     # ohne Flag, ohne Rueckfrage, mit dem Grund, der nicht uebersteuerbar ist.
@@ -486,7 +494,7 @@ def test_bestaetigte_altsicherung_macht_die_instanz_nicht_dauerhaft_annahmeberei
                             benutzer=(('admin', 'passwort-des-angreifers', 'admin'),))
     res = _hochladen(auth_client, csrf, fremd)
     assert res.status_code == 400, (
-        'Nach der einen Bestaetigung wurde eine voellig fremde Datenbank ohne '
+        'Nach dem Angriffsversuch wurde eine voellig fremde Datenbank ohne '
         'jedes Kennzeichen uebernommen - der Angreifer ist jetzt Admin')
     assert res.get_json()['grund'] == 'srv.restore_fremde_instanz'
 
@@ -509,9 +517,15 @@ def test_create_app_startet_nach_restore_mit_kaputtem_app_meta(
     ))
 
     antwort = _hochladen(auth_client, csrf, kaputt, bestaetigt=True)
-    assert antwort.status_code in (200, 400), (
-        f'Unerwarteter Status {antwort.status_code} - ein 500 bedeutet: Datei '
-        'schon getauscht, Migration gescheitert')
+    # Frueher stand hier `in (200, 400)` - das galt, ob die Datei angenommen
+    # oder abgelehnt wurde, und bewachte damit nichts. Gewollt ist genau ein
+    # Ausgang: die Datei kommt nicht herein. Ihre app_meta hat nicht den
+    # Wortlaut, den diese Anwendung schreibt.
+    assert antwort.status_code == 400, (
+        f'Unerwarteter Status {antwort.status_code} - erwartet wird die '
+        'Ablehnung am Tor; ein 500 bedeutet: Datei schon getauscht, '
+        'Migration gescheitert')
+    assert antwort.get_json()['grund'] == 'srv.restore_app_meta_fremd'
 
     # Die entscheidende Aussage: die Anwendung startet danach noch.
     zweite = create_app()
@@ -543,6 +557,462 @@ def test_create_app_startet_nach_restore_mit_kaputtem_app_meta(
     assert m._eigene_instanz_id(), (
         'Nach dem Neuaufbau von app_meta fehlt die Kennung - damit waere '
         'jeder weitere Restore blockiert')
+
+
+# ── Dritte Nachpruefung: die Pruefung zaehlte auf, was verboten ist ──────────
+#
+# Drei Bauarten, die alle drei nur eine einzige Bestaetigung im ganz
+# gewoehnlichen Altsicherungs-Dialog brauchten:
+#   A  ein INDEX namens `app_meta` (Typ 'index', also nicht 'view'/'trigger')
+#   B  eine TABELLE namens `idx_users_person` (init_db() stirbt beim CREATE
+#      INDEX, create_app() danach fuer immer)
+#   C  eine app_meta mit CHECK bzw. FOREIGN KEY - unter PRAGMA table_info
+#      exakt die Sollform, trotzdem nimmt sie kein INSERT an
+#
+# Alle drei muessen am Tor scheitern, VOR dem Dateitausch. Und danach muss
+# die Installation unveraendert arbeitsfaehig sein.
+
+
+def _instanz_ist_heil(app, auth_client, csrf, kennung_vorher):
+    """Gemeinsame Nachbedingung der drei Angriffsfaelle.
+
+    Prueft genau das, was bei den bisherigen Bauarten kaputt ging: die eigene
+    Kennung ist weiter lesbar und unveraendert, die Anwendung startet noch,
+    und der Rueckweg - die eigene Schutzkopie - laesst sich OHNE Bestaetigung
+    einspielen.
+    """
+    from app import create_app
+
+    assert m._eigene_instanz_id() == kennung_vorher, (
+        'Die eigene Instanzkennung ist weg oder rotiert - damit waere kein '
+        'einziger Restore mehr moeglich, auch der Rueckweg nicht')
+
+    zweite = create_app()
+    assert zweite.test_client().get('/login').status_code == 200, (
+        'Die Anwendung startet nach dem Angriffsversuch nicht mehr')
+
+    # Eine echte Schutzkopie dieser Installation - eine Dateikopie der
+    # laufenden Datenbank, mit allen Indizes, sqlite_sequence und den
+    # impliziten sqlite_autoindex_*. Genau die Datei, die eine zu strenge
+    # Positivliste als erstes faelschlich abweisen wuerde.
+    with app.app_context():
+        schutzkopie = m.create_backup('pre-restore', schutz=True)
+    zurueck = _hochladen(auth_client, csrf, schutzkopie)
+    assert zurueck.status_code == 200, (
+        'Die eigene Schutzkopie laesst sich nicht mehr einspielen: '
+        + zurueck.get_data(as_text=True))
+
+
+def test_restore_lehnt_index_namens_app_meta_ab(
+        app, auth_client, csrf, sicherung_bauen, sauberes_backupverzeichnis):
+    """Angriff A: ein INDEX, der den Namen der Tabelle app_meta belegt.
+
+    Die Datei ist in jeder Hinsicht eine gueltige Altsicherung - alle
+    Pflichttabellen, ein Benutzer 'admin', saubere Integritaet, keine Views,
+    keine Trigger. Nur traegt sie keine app_meta-Tabelle, sondern einen
+    gleichnamigen Index. Die alte Pruefung sah nur die Typen 'view' und
+    'trigger' und liess ihn durch.
+
+    Danach lieferte `PRAGMA table_info(app_meta)` eine leere Liste,
+    `DROP TABLE IF EXISTS app_meta` war ein stilles Nichts und das folgende
+    CREATE TABLE scheiterte mit 'there is already an index named app_meta'.
+    Die Installation hatte ab da DAUERHAFT keine eigene Kennung mehr - und
+    weil srv.restore_kein_eigener_nachweis nicht uebersteuerbar ist, liess
+    sich keine Datei mehr einspielen, auch die Schutzkopie nicht.
+    """
+    kennung_vorher = m._eigene_instanz_id()
+    assert kennung_vorher
+
+    boese = sicherung_bauen('index_app_meta.db', instanz_id=None, zusatz_sql=(
+        'CREATE INDEX app_meta ON users(username)',
+    ))
+
+    for bestaetigt in (False, True):
+        res = _hochladen(auth_client, csrf, boese, bestaetigt=bestaetigt)
+        assert res.status_code == 400, (
+            f'Ein Index namens app_meta ging durch (bestaetigt={bestaetigt})')
+        assert res.get_json()['grund'] == 'srv.restore_objects'
+        assert 'app_meta' in res.get_json()['error']
+
+    _instanz_ist_heil(app, auth_client, csrf, kennung_vorher)
+
+
+def test_restore_lehnt_tabelle_namens_idx_users_person_ab(
+        app, auth_client, csrf, sicherung_bauen, sauberes_backupverzeichnis):
+    """Angriff B: eine TABELLE, die den Namen eines Index von init_db() belegt.
+
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person` ist nur dann ein
+    stilles Nichts, wenn dort schon ein INDEX liegt. Bei einer Tabelle wirft
+    es 'there is already a table named idx_users_person' - mitten in
+    init_db(), und init_db() laeuft in create_app(). Mit
+    `restart: unless-stopped` eine endlose Neustartschleife.
+
+    Die Datei traegt die ECHTE Kennung dieser Installation: sie braucht
+    nicht einmal eine Bestaetigung, sie sieht aus wie die eigene Sicherung
+    von gestern.
+    """
+    kennung_vorher = m._eigene_instanz_id()
+    assert kennung_vorher
+
+    boese = sicherung_bauen('tabelle_idx_users_person.db', zusatz_sql=(
+        'CREATE TABLE idx_users_person (person_id INTEGER)',
+    ))
+
+    res = _hochladen(auth_client, csrf, boese)
+    assert res.status_code == 400, (
+        'Eine Tabelle namens idx_users_person wurde uebernommen - die '
+        'Anwendung startet danach nie wieder')
+    assert res.get_json()['grund'] == 'srv.restore_objects'
+    assert 'idx_users_person' in res.get_json()['error']
+
+    _instanz_ist_heil(app, auth_client, csrf, kennung_vorher)
+
+
+@pytest.mark.parametrize('app_meta_schema, kennung_in_datei, bezeichnung', [
+    ("CREATE TABLE app_meta (key TEXT PRIMARY KEY,"
+     " value TEXT CHECK (value = 'nur_dies'))", 'nur_dies', 'check'),
+    ("CREATE TABLE app_meta (key TEXT PRIMARY KEY REFERENCES users(username),"
+     " value TEXT)", 'eigen', 'fremdschluessel'),
+])
+def test_restore_lehnt_app_meta_mit_unsichtbarer_bedingung_ab(
+        app, auth_client, csrf, sicherung_bauen, sauberes_backupverzeichnis,
+        app_meta_schema, kennung_in_datei, bezeichnung):
+    """Angriff C: app_meta, die der Formpruefung nichts zu beanstanden gibt.
+
+    `PRAGMA table_info` liefert je Spalte nur (cid, name, type, notnull,
+    default, pk). CHECK-Bedingungen, FOREIGN KEY, generierte Spalten - nichts
+    davon taucht dort auf. Beide Varianten ergeben exakt _APP_META_SOLLFORM,
+    es wurde also nichts neu aufgebaut; das spaetere INSERT der Kennung warf
+    IntegrityError, wurde verschluckt, und die Installation hatte fuer immer
+    keine eigene Kennung. Leiser als Variante A, weil die Tabelle korrekt
+    aussieht.
+
+    (_open_db setzt PRAGMA foreign_keys = ON - die FOREIGN-KEY-Variante
+    greift also wirklich.)
+    """
+    kennung_vorher = m._eigene_instanz_id()
+    assert kennung_vorher
+
+    # Die Fremdschluessel-Variante traegt die ECHTE Kennung dieser
+    # Installation: sie sieht aus wie die eigene Sicherung von gestern und
+    # braeuchte nicht einmal eine Bestaetigung.
+    wert = kennung_vorher if kennung_in_datei == 'eigen' else kennung_in_datei
+    boese = sicherung_bauen(f'app_meta_{bezeichnung}.db', app_meta_sql=(
+        app_meta_schema,
+        "INSERT INTO app_meta (key, value) VALUES ('instance_id', '%s')" % wert,
+    ))
+
+    # Vorbedingung: unter PRAGMA table_info sieht diese Tabelle exakt richtig
+    # aus - sonst prueft der Test nicht den Weg, um den es geht.
+    probe = _sqlite3.connect(str(boese))
+    try:
+        form = [(r[1], str(r[2] or '').upper(), r[5])
+                for r in probe.execute('PRAGMA table_info(app_meta)')]
+    finally:
+        probe.close()
+    assert form == m._APP_META_SOLLFORM, (
+        f'Die praeparierte app_meta faellt schon der Formpruefung auf: {form}')
+
+    for bestaetigt in (False, True):
+        res = _hochladen(auth_client, csrf, boese, bestaetigt=bestaetigt)
+        assert res.status_code == 400, (
+            f'app_meta mit {bezeichnung} ging durch (bestaetigt={bestaetigt})')
+        assert res.get_json()['grund'] == 'srv.restore_app_meta_fremd'
+
+    _instanz_ist_heil(app, auth_client, csrf, kennung_vorher)
+
+
+def test_app_meta_neuaufbau_gewinnt_den_namen_gegen_index_und_trigger(tmp_path):
+    """Der zweite Riegel hinter Angriff A, als Einzelteil.
+
+    `DROP TABLE IF EXISTS app_meta` ist bei einem INDEX dieses Namens ein
+    stilles Nichts - es wirft nicht, es tut nur nichts. Die Schleife brach
+    danach mit `break` ab ("hat nicht geworfen, also hat es geklappt"), der
+    Index blieb stehen, und das folgende CREATE TABLE scheiterte mit
+    'there is already an index named app_meta'. Ein Drop, der nichts getan
+    hat, ist kein Erfolg.
+    """
+    for zusatz in ('CREATE INDEX app_meta ON traeger(x)',
+                   'CREATE VIEW app_meta AS SELECT x AS key, x AS value FROM traeger',
+                   'CREATE TRIGGER app_meta AFTER INSERT ON traeger BEGIN'
+                   ' UPDATE traeger SET x=1; END'):
+        pfad = tmp_path / f'namenskollision_{abs(hash(zusatz))}.db'
+        con = _sqlite3.connect(str(pfad))
+        con.execute('CREATE TABLE traeger (x)')
+        con.execute(zusatz)
+        con.commit()
+        try:
+            kennung = m._ensure_instanz_id(con)   # darf nicht werfen
+            assert kennung, f'Keine Kennung - blockiert durch: {zusatz}'
+            assert m._lies_instanz_id(con) == kennung, (
+                'Die Kennung ist nicht lesbar - die Installation koennte ab '
+                f'jetzt keine Sicherung mehr einspielen. Blockiert durch: {zusatz}')
+        finally:
+            con.close()
+
+
+def test_app_meta_mit_unsichtbarer_bedingung_wird_neu_aufgebaut(tmp_path):
+    """Der zweite Riegel hinter Angriff C, als Einzelteil.
+
+    Selbst wenn eine solche Tabelle auf anderem Weg in die laufende Datei
+    geraet (Kopie ins Volume, Dateisystem-Snapshot), darf die Installation
+    nicht ohne Kennung dastehen. Die Formpruefung sieht die Bedingung nicht -
+    der Schreib-/Lese-Versuch schon.
+    """
+    for schema in (
+        "CREATE TABLE app_meta (key TEXT PRIMARY KEY,"
+        " value TEXT CHECK (value = 'nur_dies'))",
+        "CREATE TABLE app_meta (key TEXT PRIMARY KEY,"
+        " value TEXT GENERATED ALWAYS AS (upper(key)) VIRTUAL)",
+    ):
+        pfad = tmp_path / f'bedingung_{abs(hash(schema))}.db'
+        con = _sqlite3.connect(str(pfad))
+        con.execute('PRAGMA foreign_keys = ON')
+        con.execute(schema)
+        try:
+            kennung = m._ensure_instanz_id(con)
+            assert kennung, f'Keine Kennung trotz Neuaufbau - Schema: {schema}'
+            assert m._lies_instanz_id(con) == kennung, (
+                'Die Kennung ist nach dem Neuaufbau nicht lesbar - genau der '
+                'Zustand, in dem kein Restore mehr moeglich ist')
+        finally:
+            con.close()
+
+
+def test_app_meta_neuaufbau_erhaelt_den_abgeschlossenen_einrichtungsassistenten(
+        tmp_path):
+    """Der Neuaufbau warf `profiles_setup_done` bisher mit weg.
+
+    Folge: nach jedem bestaetigten Restore stand der Einrichtungsassistent
+    wieder auf "noch offen" (done: true -> done: false), obwohl der Admin ihn
+    laengst durchlaufen hatte. Uebernommen wird ausschliesslich der Wert '1' -
+    genau der, den api_setup_profiles_complete() schreibt.
+    """
+    pfad = tmp_path / 'assistent.db'
+    con = _sqlite3.connect(str(pfad))
+    # Kaputte Form -> Neuaufbau, aber mit einem gueltigen Flag darin.
+    con.execute('CREATE TABLE app_meta (key, value)')
+    con.execute("INSERT INTO app_meta (key, value) VALUES ('profiles_setup_done','1')")
+    con.execute("INSERT INTO app_meta (key, value) VALUES ('irgendwas','beliebig')")
+    con.commit()
+    try:
+        m._app_meta_sicherstellen(con)
+        werte = dict(con.execute('SELECT key, value FROM app_meta'))
+        assert werte.get('profiles_setup_done') == '1', (
+            'Der abgeschlossene Assistent wurde verworfen - er stellt sich '
+            'nach jedem Restore erneut in den Weg')
+        assert 'irgendwas' not in werte, (
+            'Es wurde mehr uebernommen als die Positivliste erlaubt - der '
+            'Inhalt stammt aus der eingespielten Datei')
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize('wert', ['0', '', 'ja', '1 ', 'x' * 200])
+def test_app_meta_neuaufbau_uebernimmt_nur_den_woertlichen_wert(tmp_path, wert):
+    """Alles ausser dem woertlichen '1' wird verworfen.
+
+    Der Inhalt von app_meta ist im Moment des Neuaufbaus angreifergewaehlt.
+    Uebernommen werden darf deshalb nur, was diese Anwendung selbst schreibt.
+    """
+    pfad = tmp_path / f'assistent_{abs(hash(wert))}.db'
+    con = _sqlite3.connect(str(pfad))
+    con.execute('CREATE TABLE app_meta (key, value)')
+    con.execute("INSERT INTO app_meta (key, value) VALUES ('profiles_setup_done',?)",
+                (wert,))
+    con.commit()
+    try:
+        m._app_meta_sicherstellen(con)
+        werte = dict(con.execute('SELECT key, value FROM app_meta'))
+        assert 'profiles_setup_done' not in werte, (
+            f'Der Fremdwert {wert!r} wurde uebernommen')
+    finally:
+        con.close()
+
+
+def test_ensure_instanz_id_gibt_none_zurueck_wenn_app_meta_nicht_anlegbar_ist(
+        tmp_path):
+    """Der Zweig `except sqlite3.Error` in _ensure_instanz_id.
+
+    Er war in der Suite toter Code: jeder Test, der "init_db darf nicht
+    auseinanderfliegen" behauptete, wurde in Wahrheit vom Neuaufbau
+    aufgefangen, es kam nie ein sqlite3.Error bis hierher. Entfernte man den
+    except-Block, blieben alle Tests gruen.
+
+    Der realistische Fall, in dem es ihn wirklich braucht: das Volume ist
+    schreibgeschuetzt eingehaengt (oder die Dateirechte passen nicht). Dann
+    scheitert das CREATE TABLE des Neuaufbaus. init_db() laeuft in
+    create_app() - fliegt der Fehler durch, startet die Anwendung nicht mehr.
+    """
+    pfad = tmp_path / 'nur_lesen.db'
+    con = _sqlite3.connect(str(pfad))
+    con.execute('CREATE TABLE platzhalter (x)')
+    con.commit()
+    con.close()
+
+    nur_lesend = _sqlite3.connect(f'file:{pfad}?mode=ro', uri=True)
+    try:
+        # Vorbedingung des Tests: hier MUSS wirklich ein sqlite3.Error
+        # entstehen, sonst prueft der Test den Zweig nicht.
+        with pytest.raises(_sqlite3.Error):
+            nur_lesend.execute(m._APP_META_SCHEMA)
+
+        kennung = m._ensure_instanz_id(nur_lesend)
+        assert kennung is None, (
+            'Erwartet wird ein sauberes None - jeder Restore wird dann '
+            'abgelehnt, aber die Anwendung startet')
+    finally:
+        nur_lesend.close()
+
+
+def test_create_app_startet_mit_einer_tabelle_namens_idx_users_person(app):
+    """Angriff B, als Waechter ueber init_db() selbst.
+
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person` war die einzige
+    Index-Anweisung in init_db(), die NICHT in try/except stand - die sechs
+    darunter schon. Liegt unter dem Namen eine Tabelle, wirft sie 'there is
+    already a table named idx_users_person'. init_db() laeuft in
+    create_app(): die Anwendung startete danach nie wieder, mit
+    `restart: unless-stopped` in einer Dauerschleife.
+
+    Das Tor (Positivliste) haelt solche Dateien jetzt draussen. Dieser Test
+    bewacht den zweiten Riegel: auch wenn die Datei auf anderem Weg in den
+    Zustand geraet (Kopie ins Volume, Snapshot, abgebrochener Restore), darf
+    init_db() den Start nicht verhindern.
+    """
+    from app import create_app
+
+    con = m._open_db(m.DB_PATH)
+    try:
+        con.execute('DROP INDEX IF EXISTS idx_users_person')
+        con.execute('CREATE TABLE idx_users_person (person_id INTEGER)')
+        con.commit()
+    finally:
+        con.close()
+    try:
+        zweite = create_app()      # darf nicht mit 'already a table' sterben
+        assert zweite.test_client().get('/login').status_code == 200
+        assert m._eigene_instanz_id(), (
+            'Nach dem Start fehlt die Kennung - jeder Restore waere blockiert')
+    finally:
+        con = m._open_db(m.DB_PATH)
+        try:
+            con.execute('DROP TABLE IF EXISTS idx_users_person')
+            con.commit()
+        finally:
+            con.close()
+        with app.app_context():
+            m.init_db()
+
+
+def test_fehlertext_verspricht_keinen_neustart_als_heilmittel():
+    """Befund aus der Nachpruefung: der Text log den Admin an.
+
+    'Bitte die Anwendung neu starten und das Server-Protokoll pruefen' - beim
+    Neustart laeuft dieselbe init_db() in denselben Fehler. Ein Hinweis, der
+    eine Erholung verspricht, die er nicht einloesen kann, kostet den
+    Betreiber genau die Zeit, die er nicht hat.
+    """
+    for sprache in ('de', 'en'):
+        text = translate(sprache, 'srv.restore_kein_eigener_nachweis').lower()
+        assert 'neu starten' not in text and 'restart the application' not in text, (
+            f'[{sprache}] Der Text verspricht weiterhin einen Neustart als '
+            f'Heilmittel: {text}')
+        assert 'protokoll' in text or 'log' in text, (
+            f'[{sprache}] Ohne Verweis auf das Protokoll bleibt der Admin '
+            'ganz ohne Anhaltspunkt')
+
+
+def test_echte_dateikopie_der_laufenden_datenbank_restauriert_ohne_bestaetigung(
+        app, auth_client, csrf, sauberes_backupverzeichnis):
+    """Die Gegenprobe zur verschaerften Positivliste.
+
+    Eine echte Sicherung ist keine nachgebaute Testdatei, sondern eine
+    DATEIKOPIE der laufenden Datenbank: mit allen sieben idx_*-Indizes, mit
+    sqlite_sequence und mit den impliziten sqlite_autoindex_*. Genau diese
+    Objekte wuerde eine zu eng gefasste Positivliste als erstes abweisen -
+    und der Betreiber stuende ohne jeden Rueckweg da.
+
+    Sie muss OHNE jede Bestaetigung durchgehen.
+    """
+    with app.app_context():
+        kopie = m.create_backup('gegenprobe')
+
+    con = _sqlite3.connect(str(kopie))
+    try:
+        objekte = {(t_, n) for t_, n in con.execute(
+            'SELECT type, name FROM sqlite_master')}
+    finally:
+        con.close()
+    # Testannahme absichern: die Kopie enthaelt wirklich das, worum es geht.
+    assert ('table', 'sqlite_sequence') in objekte
+    assert ('index', 'idx_users_person') in objekte
+    assert any(t_ == 'index' and n.startswith('sqlite_autoindex_')
+               for t_, n in objekte)
+
+    res = _hochladen(auth_client, csrf, kopie)   # bewusst ohne Bestaetigung
+    assert res.status_code == 200, (
+        'Eine echte Sicherung dieser Installation wurde abgelehnt: '
+        + res.get_data(as_text=True))
+    assert res.get_json() == {'success': True}
+
+
+def test_erlaubte_objekte_bleiben_mit_init_db_im_gleichlauf(tmp_path):
+    """Der Waechter ueber der Positivliste.
+
+    _EIGENE_TABELLEN/_EIGENE_INDIZES sind von Hand gepflegt. Wer init_db()
+    um eine Tabelle oder einen Index erweitert und diese Listen vergisst,
+    baut eine Anwendung, die ihre EIGENEN Sicherungen ablehnt - und das faellt
+    erst beim naechsten Restore auf, also im schlechtesten Moment.
+
+    Deshalb wird hier eine frische Datenbank wirklich gebaut (create_app() in
+    einem eigenen Prozess, damit DATABASE_PATH sauber greift) und ihr
+    sqlite_master gegen die Listen gehalten. Umgekehrt genauso: ein Eintrag,
+    den init_db() gar nicht mehr anlegt, waere ein unnoetig offenes Tor.
+    """
+    import json
+    import subprocess
+    import sys
+
+    ziel = tmp_path / 'frisch' / 'k.db'
+    ziel.parent.mkdir(parents=True, exist_ok=True)
+    umgebung = dict(os.environ)
+    umgebung.update(DATABASE_PATH=str(ziel), ADMIN_PASSWORD='egal',
+                    DISABLE_SCHEDULER='1', DISABLE_RATE_LIMIT='1')
+    umgebung.pop('DB_ENCRYPTION_KEY', None)
+    quelle = (
+        'import json, os, sqlite3\n'
+        'from app import create_app\n'
+        'create_app()\n'
+        "con = sqlite3.connect(os.environ['DATABASE_PATH'])\n"
+        "print(json.dumps(sorted(tuple(r) for r in"
+        " con.execute('SELECT type, name FROM sqlite_master'))))\n"
+    )
+    lauf = subprocess.run([sys.executable, '-c', quelle], env=umgebung,
+                          cwd=str(Path(__file__).resolve().parents[1]),
+                          capture_output=True, text=True)
+    assert lauf.returncode == 0, lauf.stderr
+    objekte = [tuple(e) for e in json.loads(lauf.stdout.strip().splitlines()[-1])]
+    assert objekte, 'Die frische Datenbank ist leer - Testannahme kaputt'
+
+    tabellen = {n for typ, n in objekte if typ == 'table'} - m._SQLITE_EIGENE_TABELLEN
+    indizes = {n for typ, n in objekte
+               if typ == 'index' and not n.startswith('sqlite_autoindex_')}
+
+    assert tabellen == set(m._EIGENE_TABELLEN), (
+        'init_db() und _EIGENE_TABELLEN laufen auseinander. Nur in init_db(): '
+        f'{sorted(tabellen - set(m._EIGENE_TABELLEN))}; nur in der Liste: '
+        f'{sorted(set(m._EIGENE_TABELLEN) - tabellen)}')
+    assert indizes == set(m._EIGENE_INDIZES), (
+        'init_db() und _EIGENE_INDIZES laufen auseinander. Nur in init_db(): '
+        f'{sorted(indizes - set(m._EIGENE_INDIZES))}; nur in der Liste: '
+        f'{sorted(set(m._EIGENE_INDIZES) - indizes)}')
+
+    # Und jedes Objekt der frischen Datenbank muss die Pruefung passieren -
+    # sonst lehnt die Anwendung die Sicherung einer frischen Installation ab.
+    for typ, name in objekte:
+        assert m._objekt_ist_eigenes(typ, name), (
+            f'Eigenes Objekt {typ} {name!r} wird als fremd abgewiesen')
 
 
 def test_schutzkopie_bleibt_nach_bestaetigtem_altrestore_einspielbar(
