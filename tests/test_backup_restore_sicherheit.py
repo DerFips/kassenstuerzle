@@ -302,6 +302,306 @@ def test_alte_sicherung_ohne_kennung_nur_mit_ausdruecklicher_bestaetigung(
             f.unlink()
 
 
+# ── Nacharbeit zu Blocker 1: der Nachweis selbst war angreifbar ──────────────
+#
+# Drei Befunde der Nachpruefung, hier jeweils als vollstaendige Angriffskette:
+#  1. Der Vergleich fiel offen aus: ohne lesbare eigene Kennung wurde der
+#     Zweig fuer die fremde Installation uebersprungen.
+#  2. Die hochgeladene Datei bestimmte das SCHEMA von app_meta mit. Eine
+#     Tabelle ohne Primaerschluessel machte `INSERT OR REPLACE` zum Anhaengen
+#     und die eigene Kennung dauerhaft unlesbar - eine einzige Bestaetigung
+#     im gewohnten Altsicherungs-Dialog genuegte.
+#  3. Ein bestaetigter Altrestore rotierte die Kennung und entwertete damit
+#     alle eigenen Sicherungen, auch die Sekunden zuvor angelegte Schutzkopie.
+
+
+def _pfade_der_schutzkopien():
+    backup_dir = Path(os.path.dirname(m.DB_PATH)) / 'backups'
+    return sorted(backup_dir.glob('kassenstuerzle_*_pre-restore.db'))
+
+
+@pytest.fixture()
+def sauberes_backupverzeichnis(app):
+    """Leeres Sicherungsverzeichnis, und danach wieder eine intakte Instanz.
+
+    Die Tests hier tauschen die Datenbank der Testsession wirklich aus - sie
+    muessen sie also auch wieder in einen benutzbaren Zustand bringen.
+    """
+    backup_dir = Path(os.path.dirname(m.DB_PATH)) / 'backups'
+    backup_dir.mkdir(exist_ok=True)
+    for f in backup_dir.glob('kassenstuerzle_*.db'):
+        f.unlink()
+    yield backup_dir
+    conn = m._open_db(m.DB_PATH)
+    try:
+        conn.execute("DELETE FROM persons WHERE name IN ('Altbestand','VorDemRestore')")
+        conn.commit()
+    finally:
+        conn.close()
+    with app.app_context():
+        m.init_db()
+    for f in backup_dir.glob('kassenstuerzle_*.db'):
+        f.unlink()
+
+
+def test_ensure_instanz_id_baut_gebasteltes_app_meta_neu_auf(tmp_path):
+    """Kern des zweiten Befunds, als Einzelteil.
+
+    init_db() legte app_meta mit `CREATE TABLE IF NOT EXISTS` an - eine in
+    der eingespielten Datei mitgelieferte Tabelle `app_meta (key, value)`
+    OHNE Primaerschluessel blieb damit bestehen. Darin ersetzt
+    `INSERT OR REPLACE` nichts, es haengt an; `SELECT ... fetchone()` liefert
+    danach fuer immer die erste, vom Angreifer gewaehlte Zeile.
+    """
+    pfad = tmp_path / 'gebastelt.db'
+    con = _sqlite3.connect(str(pfad))
+    con.execute('CREATE TABLE app_meta (key, value)')
+    con.execute("INSERT INTO app_meta (key, value) VALUES ('instance_id', '')")
+    con.execute("INSERT INTO app_meta (key, value) VALUES ('instance_id', 'zweite')")
+    con.commit()
+    try:
+        kennung = m._ensure_instanz_id(con)
+
+        assert kennung, 'Keine Kennung erzeugt - der Herkunftsnachweis waere tot'
+        assert len(kennung) >= 32, f'Zu kurze Kennung: {kennung!r}'
+        assert m._lies_instanz_id(con) == kennung, (
+            'Die Kennung ist nach dem Anlegen nicht lesbar - genau der '
+            'Zustand, in dem jede fremde Sicherung durchgewunken wurde')
+
+        form = [(r[1], str(r[2] or '').upper(), r[5])
+                for r in con.execute('PRAGMA table_info(app_meta)')]
+        assert form == [('key', 'TEXT', 1), ('value', 'TEXT', 0)], (
+            f'app_meta hat weiterhin die untergeschobene Form: {form}')
+        anzahl = con.execute("SELECT COUNT(*) FROM app_meta WHERE key='instance_id'"
+                             ).fetchone()[0]
+        assert anzahl == 1, f'{anzahl} Zeilen fuer instance_id - es darf nur eine geben'
+    finally:
+        con.close()
+
+
+def test_ensure_instanz_id_ueberlebt_app_meta_ohne_spalte_value(tmp_path):
+    """Zweiter Befund, andere Bauart: app_meta ohne die Spalte `value`.
+
+    `SELECT value FROM app_meta` lief ohne try/except - init_db() flog mit
+    'no such column: value' auseinander. Weil init_db() auch in create_app()
+    laeuft, startete die Anwendung danach ueberhaupt nicht mehr.
+    """
+    pfad = tmp_path / 'ohne_value.db'
+    con = _sqlite3.connect(str(pfad))
+    con.execute('CREATE TABLE app_meta (key TEXT PRIMARY KEY)')
+    con.execute("INSERT INTO app_meta (key) VALUES ('instance_id')")
+    con.commit()
+    try:
+        kennung = m._ensure_instanz_id(con)   # darf nicht werfen
+        assert kennung and m._lies_instanz_id(con) == kennung
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize('wert, erwartet', [
+    (None, None),
+    ('', None),
+    ('a' * 32, 'a' * 32),
+])
+def test_lies_instanz_id_wertet_leer_und_null_als_fehlend(tmp_path, wert, erwartet):
+    """Der NULL/Leerstring-Zweig von _lies_instanz_id.
+
+    Er ist sicherheitsrelevant: ein leerer Wert MUSS 'fehlt' bedeuten, nicht
+    'Kennung ist der leere Text'. Sonst wuerde eine hochgeladene Datei mit
+    instance_id='' zur Kennung dieser Installation passen, sobald deren
+    eigene Kennung aus irgendeinem Grund ebenfalls leer ist - und der
+    Vergleich waere wertlos.
+    """
+    pfad = tmp_path / 'werte.db'
+    con = _sqlite3.connect(str(pfad))
+    con.execute('CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT)')
+    con.execute("INSERT INTO app_meta (key, value) VALUES ('instance_id', ?)", (wert,))
+    con.commit()
+    try:
+        assert m._lies_instanz_id(con) == erwartet
+    finally:
+        con.close()
+
+
+def test_restore_faellt_ohne_eigene_kennung_zu(auth_client, csrf, sicherung_bauen,
+                                               kein_dateitausch, monkeypatch):
+    """Erster Befund: `elif eigene is not None and fremde != eigene`.
+
+    Konnte die laufende Installation ihre eigene Kennung nicht lesen, wurde
+    der ganze Zweig uebersprungen - und JEDE fremde Sicherung angenommen,
+    ohne Bestaetigung, ohne Rueckfrage. Fehlt der Nachweis, muss der Restore
+    zufallen, nicht aufgehen.
+    """
+    monkeypatch.setattr(m, '_eigene_instanz_id', lambda: None)
+    fremd = sicherung_bauen('fremde_installation.db', instanz_id='ff' * 16)
+
+    for bestaetigt in (False, True):
+        res = _hochladen(auth_client, csrf, fremd, bestaetigt=bestaetigt)
+        assert res.status_code == 400, (
+            'Ohne eigene Instanzkennung wurde eine fremde Sicherung '
+            f'eingespielt (bestaetigt={bestaetigt})')
+        assert res.get_json()['grund'] == 'srv.restore_kein_eigener_nachweis'
+        assert res.get_json()['error'] == translate(
+            'de', 'srv.restore_kein_eigener_nachweis')
+    assert kein_dateitausch == [], 'Die Datenbank wurde trotz Ablehnung ersetzt'
+
+
+def test_bestaetigte_altsicherung_macht_die_instanz_nicht_dauerhaft_annahmebereit(
+        app, auth_client, csrf, sicherung_bauen, sauberes_backupverzeichnis):
+    """Die vollstaendige Kette aus der Nachpruefung.
+
+    Der Angreifer liefert eine "Sicherung von vor dem Update": app_meta mit
+    dem Schema `(key, value)` - ohne Primaerschluessel - und instance_id=''.
+    Der Admin sieht den ganz gewoehnlichen Altsicherungs-Dialog, denselben,
+    den jede echte alte Sicherung ausloest, und bestaetigt einmal.
+
+    Danach war die Installation frueher dauerhaft annahmebereit: ihre eigene
+    Kennung liess sich nicht mehr lesen, und jede weitere fremde Datenbank
+    ging OHNE jede Bestaetigung mit 200 durch.
+    """
+    praepariert = sicherung_bauen('vor_update_sicherung.db', app_meta_sql=(
+        'CREATE TABLE app_meta (key, value)',
+        "INSERT INTO app_meta (key, value) VALUES ('instance_id', '')",
+    ))
+
+    # Schritt 1: der gewohnte Dialog - erst Ablehnung, dann eine Bestaetigung.
+    ohne = _hochladen(auth_client, csrf, praepariert)
+    assert ohne.status_code == 400
+    assert ohne.get_json()['grund'] == 'srv.restore_keine_instanz_id', (
+        'Die Datei muss wie jede Altsicherung aussehen - sonst prueft dieser '
+        'Test nicht den Weg, den ein Angreifer wirklich geht')
+
+    mit = _hochladen(auth_client, csrf, praepariert, bestaetigt=True)
+    assert mit.status_code == 200, mit.get_data(as_text=True)
+
+    # Schritt 2: die Installation kennt ihre eigene Herkunft weiterhin.
+    eigene = m._eigene_instanz_id()
+    assert eigene, (
+        'Nach einer einzigen Bestaetigung kann die Installation ihre eigene '
+        'Kennung nicht mehr lesen - der Herkunftsnachweis ist damit erledigt')
+
+    # Schritt 3: und deshalb prallt die naechste fremde Datei weiter ab -
+    # ohne Flag, ohne Rueckfrage, mit dem Grund, der nicht uebersteuerbar ist.
+    fremd = sicherung_bauen('uebernahme.db', instanz_id='ff' * 16,
+                            benutzer=(('admin', 'passwort-des-angreifers', 'admin'),))
+    res = _hochladen(auth_client, csrf, fremd)
+    assert res.status_code == 400, (
+        'Nach der einen Bestaetigung wurde eine voellig fremde Datenbank ohne '
+        'jedes Kennzeichen uebernommen - der Angreifer ist jetzt Admin')
+    assert res.get_json()['grund'] == 'srv.restore_fremde_instanz'
+
+
+def test_create_app_startet_nach_restore_mit_kaputtem_app_meta(
+        app, auth_client, csrf, sicherung_bauen, sauberes_backupverzeichnis):
+    """Der Bricking-Fall, end to end.
+
+    app_meta ohne die Spalte `value` liess init_db() nach dem Dateitausch mit
+    'no such column: value' scheitern: 500 zurueck, die Datenbank aber schon
+    ersetzt. Weil init_db() auch in create_app() laeuft, startete die
+    Anwendung danach gar nicht mehr - mit `restart: unless-stopped` eine
+    Neustartschleife, aus der nur ein Shell-Zugriff auf das Volume herausfuehrt.
+    """
+    from app import create_app
+
+    kaputt = sicherung_bauen('kaputtes_app_meta.db', app_meta_sql=(
+        'CREATE TABLE app_meta (key TEXT PRIMARY KEY)',
+        "INSERT INTO app_meta (key) VALUES ('instance_id')",
+    ))
+
+    antwort = _hochladen(auth_client, csrf, kaputt, bestaetigt=True)
+    assert antwort.status_code in (200, 400), (
+        f'Unerwarteter Status {antwort.status_code} - ein 500 bedeutet: Datei '
+        'schon getauscht, Migration gescheitert')
+
+    # Die entscheidende Aussage: die Anwendung startet danach noch.
+    zweite = create_app()
+    assert zweite is not None
+    klient = zweite.test_client()
+    assert klient.get('/login').status_code == 200
+
+    # Und der Herkunftsnachweis steht wieder auf eigenen Fuessen.
+    assert m._eigene_instanz_id(), (
+        'Die Installation hat nach dem Neustart keine lesbare Kennung')
+
+    # Zweiter Teil, und der eigentliche Waechter: dieselbe kaputte Form
+    # direkt in der laufenden Datei. Der Restore-Pfad raeumt sie schon beim
+    # Festschreiben der Kennung weg - geprueft werden soll aber init_db()
+    # selbst. Es laeuft bei JEDEM Start, auch wenn die Datei auf anderem Weg
+    # in diesen Zustand geraten ist (Kopie ins Volume, abgebrochener
+    # Restore, Wiederherstellung aus einem Dateisystem-Snapshot).
+    con = m._open_db(m.DB_PATH)
+    try:
+        con.execute('DROP TABLE IF EXISTS app_meta')
+        con.execute('CREATE TABLE app_meta (key TEXT PRIMARY KEY)')
+        con.execute("INSERT INTO app_meta (key) VALUES ('instance_id')")
+        con.commit()
+    finally:
+        con.close()
+
+    dritte = create_app()      # darf nicht mit 'no such column: value' sterben
+    assert dritte.test_client().get('/login').status_code == 200
+    assert m._eigene_instanz_id(), (
+        'Nach dem Neuaufbau von app_meta fehlt die Kennung - damit waere '
+        'jeder weitere Restore blockiert')
+
+
+def test_schutzkopie_bleibt_nach_bestaetigtem_altrestore_einspielbar(
+        app, auth_client, csrf, sicherung_bauen, sauberes_backupverzeichnis):
+    """Dritter Befund: die Kennung rotierte beim Restore.
+
+    Eine bestaetigt eingespielte Altsicherung traegt keine Kennung, init_db()
+    praegte danach eine frische - und ab diesem Moment war JEDE Sicherung
+    dieser Installation 'srv.restore_fremde_instanz'. Auch die Schutzkopie
+    'pre-restore', die derselbe Aufruf Sekunden vorher angelegt hatte. Fuer
+    diesen Grund gibt es bewusst keine Uebersteuerung: der Betreiber haette
+    die falsche Datei eingespielt und keinen Rueckweg mehr.
+    """
+    conn = m._open_db(m.DB_PATH)
+    try:
+        conn.execute("DELETE FROM persons WHERE name='VorDemRestore'")
+        conn.execute("INSERT INTO persons (name) VALUES ('VorDemRestore')")
+        conn.commit()
+    finally:
+        conn.close()
+    kennung_vorher = m._eigene_instanz_id()
+    assert kennung_vorher
+
+    alt = sicherung_bauen('alte_sicherung.db', instanz_id=None)
+    con = _sqlite3.connect(str(alt))
+    con.execute("INSERT INTO persons (name) VALUES ('Altbestand')")
+    con.commit()
+    con.close()
+
+    mit = _hochladen(auth_client, csrf, alt, bestaetigt=True)
+    assert mit.status_code == 200, mit.get_data(as_text=True)
+
+    assert m._eigene_instanz_id() == kennung_vorher, (
+        'Die Instanzkennung ist beim Restore rotiert - damit sind alle '
+        'bestehenden Sicherungen dieser Installation unerreichbar')
+
+    schutzkopien = _pfade_der_schutzkopien()
+    assert schutzkopien, 'Vor dem Tausch wurde keine Schutzkopie angelegt'
+
+    # Der eigentliche Rueckweg: OHNE Bestaetigung, denn die Schutzkopie ist
+    # eine echte Sicherung DIESER Installation.
+    zurueck = _hochladen(auth_client, csrf, schutzkopien[-1])
+    assert zurueck.status_code == 200, (
+        'Die eigene Schutzkopie laesst sich nicht mehr einspielen: '
+        + zurueck.get_data(as_text=True))
+
+    namen = _personennamen_der_laufenden_instanz()
+    assert 'VorDemRestore' in namen, 'Der Stand vor dem Restore ist nicht zurueck'
+    assert 'Altbestand' not in namen
+
+
+def _personennamen_der_laufenden_instanz():
+    conn = m._open_db(m.DB_PATH)
+    try:
+        return {r[0] for r in conn.execute('SELECT name FROM persons')}
+    finally:
+        conn.close()
+
+
 # ── I4 ───────────────────────────────────────────────────────────────────────
 
 def test_restore_lehnt_klartext_datei_bei_gesetztem_schluessel_ab(

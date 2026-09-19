@@ -165,6 +165,11 @@ def sicherung_bauen(tmp_path):
       * None     - gar keine app_meta-Tabelle, wie jede Sicherung, die vor
                    dieser Aenderung erstellt wurde,
       * ein Text - eine fremde Kennung, also eine andere Installation.
+
+    `app_meta_sql` uebergeht `instanz_id` vollstaendig und legt app_meta genau
+    so an, wie es dort steht. Das ist der Hebel fuer die Missbrauchsfaelle:
+    die hochgeladene Datei bestimmt das SCHEMA von app_meta mit, nicht nur
+    ihren Inhalt.
     """
     import sqlite3 as _sqlite3
     from werkzeug.security import generate_password_hash
@@ -180,11 +185,14 @@ def sicherung_bauen(tmp_path):
 
     def _bauen(name='sicherung.db', benutzer=(('admin', 'test-password-123', 'admin'),),
                phase_b=True, zusatz_sql=(), tabellen_weglassen=(),
-               instanz_id='eigen'):
+               instanz_id='eigen', app_meta_sql=None):
         zaehler['n'] += 1
         pfad = tmp_path / f"{zaehler['n']}_{name}"
         con = _sqlite3.connect(str(pfad))
-        if instanz_id is not None:
+        if app_meta_sql is not None:
+            for sql in app_meta_sql:
+                con.execute(sql)
+        elif instanz_id is not None:
             # Eine echte Sicherung ist eine Dateikopie der Datenbank und
             # traegt app_meta deshalb immer mit.
             wert = _eigene_instanz_id() if instanz_id == 'eigen' else instanz_id

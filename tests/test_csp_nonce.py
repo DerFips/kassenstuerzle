@@ -145,9 +145,17 @@ def _markup_ohne_kommentare(name):
     return text
 
 
-@pytest.mark.parametrize('name', ['base.html', 'offline.html', 'settings.html',
-                                  'month.html'])
+@pytest.mark.parametrize('name', sorted(_NONCE_ERWARTET))
 def test_umgestellte_templates_ohne_inline_handler(name):
+    """Bewusst ueber _NONCE_ERWARTET parametrisiert statt ueber eine zweite,
+    handgepflegte Liste.
+
+    Die beiden Listen liefen frueher auseinander: scan_receipt.html stand in
+    _NONCE_ERWARTET, im Sweep hier aber nicht - und enthielt deshalb
+    unbemerkt elf Inline-Handler, die unter der scharfen CSP ohnehin tot
+    gewesen waeren. Eine Datei, die einen Inline-Block mit Nonce hat, muss
+    auch ohne Ereignisattribute auskommen; beides gehoert zusammen.
+    """
     treffer = _ON_ATTR.findall(_markup_ohne_kommentare(name))
     assert not treffer, f'{name}: Inline-Handler uebrig: {treffer}'
 
@@ -179,6 +187,15 @@ def test_ersatzverdrahtung_vorhanden():
     assert 'js-activity-reload' in base
     offline = (TEMPLATES / 'offline.html').read_text(encoding='utf-8')
     assert "getElementById('offline-retry-btn')" in offline
+    # scan_receipt.html wird derzeit von keiner Route gerendert (Befund M13),
+    # seine Handler haengen aber trotzdem am Nonce-Block statt an on...=:
+    # eine Ausnahme "nur hier nicht" hat sich als Falle erwiesen.
+    scan = (TEMPLATES / 'scan_receipt.html').read_text(encoding='utf-8')
+    for id_ in ('dropZone', 'receiptFileInput', 'cameraInput', 'openCameraBtn',
+                'scanBtn', 'receiptForm'):
+        assert f"getElementById('{id_}').addEventListener" in scan, (
+            f'scan_receipt.html: keine Ersatzverdrahtung fuer {id_}')
+    assert "querySelectorAll('.js-receipt-clear')" in scan
 
 
 # ── 3b. month.html: die 34 Handler aus Schritt 2 ─────────────────────────────

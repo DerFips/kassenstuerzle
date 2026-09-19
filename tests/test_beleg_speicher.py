@@ -63,12 +63,15 @@ def test_beleg_upload_steht_in_der_rate_limit_tabelle(app):
     assert menge <= 60, (
         f'{limit!r} ist kein Limit mehr - bei 20 MB je Beleg waeren das '
         f'{menge * 20} MB pro Minute')
-    # Untergrenze (Befund I5, nachgebessert): der Zaehler ist bis zur Behebung
-    # von M1 haushaltsweit. Wer die Belege einer Woche nachtraegt, haengt ein
-    # gutes Dutzend Fotos in einem Zug an und darf dabei nicht gebremst werden.
-    assert menge >= 30, (
-        f'{limit!r} ist zu eng: alle Mitglieder teilen sich einen Zaehler, '
-        'ein Stapel Wochenbelege laeuft damit mitten im Vorgang gegen die Wand')
+    # Hier stand frueher `assert menge >= 30` mit einer UX-Begruendung (der
+    # Zaehler ist bis zur Behebung von M1 haushaltsweit, ein Stapel
+    # Wochenbelege soll durchlaufen). Das war an dieser Stelle falsch: es
+    # machte das VERSCHAERFEN des Limits zu einem Testfehler und haette
+    # jemanden, der auf einen Missbrauch reagiert, gegen die Suite arbeiten
+    # lassen. Eine Sicherheitsaussage darf nur in die strenge Richtung
+    # wirken. Geblieben ist die Untergrenze, die keine Geschmacksfrage ist:
+    # ein Limit von 0 wuerde den Endpunkt komplett abschalten.
+    assert menge >= 1, f'{limit!r} schaltet den Endpunkt ganz ab'
 
     # Und der Endpunkt muss es auch wirklich geben, sonst laeuft der Eintrag
     # in create_app() stillschweigend ins Leere.
@@ -212,6 +215,62 @@ def test_geleerter_betrag_raeumt_den_beleg_ebenfalls_auf(auth_client, csrf, db, 
     _speichern(auth_client, csrf, rows=[
         {'id': rid, 'day': 1, 'description': 'Bon',
          'person_id': person, 'amount': 0}])
+
+    assert not beleg.exists()
+
+
+def test_abgelehnter_belegname_loescht_die_datei_nicht(auth_client, csrf, db, person,
+                                                       belegverzeichnis):
+    """Nacharbeit zu K1: still verwerfen ist dokumentiert, still LOESCHEN nicht.
+
+    Bei einem ungueltigen Belegnamen wird der Wert verworfen (rfn = None).
+    Der alte Name landete trotzdem in den Aufraeum-Kandidaten, und nach dem
+    UPDATE zeigte keine Zeile mehr auf ihn - _verwaiste_belege_loeschen()
+    entfernte die Datei also von der Platte. Ein einziger Autosave aus einem
+    alten Tab, ein Copy-and-Paste-Fehler in der Oberflaeche, und der Beleg
+    ist unwiederbringlich weg, ohne dass irgendwo etwas davon steht.
+    """
+    beleg = belegverzeichnis / 'ffffffffffffffffffffffffffffffff.pdf'
+    beleg.write_bytes(_pdf_bytes(b'gelb'))
+
+    rid = _speichern(auth_client, csrf, rows=[
+        {'client_key': 'a', 'day': 1, 'description': 'Bon',
+         'person_id': person, 'amount': 30.0,
+         'receipt_filename': beleg.name}]).get_json()['id_map']['a']
+    assert beleg.exists()
+
+    antwort = _speichern(auth_client, csrf, rows=[
+        {'id': rid, 'day': 1, 'description': 'Bon', 'person_id': person,
+         'amount': 30.0, 'receipt_filename': 'a.jpg" onerror="alert(1)" x="'}])
+    assert antwort.status_code == 200
+
+    # Der ungueltige Wert erreicht die Datenbank nach wie vor nicht ...
+    zeile = db.execute('SELECT receipt_filename FROM expenses WHERE id=?',
+                       (rid,)).fetchone()
+    assert zeile['receipt_filename'] is None
+
+    # ... aber die Datei ist noch da.
+    assert beleg.exists(), (
+        'Ein abgelehnter Belegname hat die Belegdatei geloescht - das stille '
+        'Verwerfen des Werts darf keine Daten vernichten')
+
+
+def test_gueltiger_namenswechsel_raeumt_weiterhin_auf(auth_client, csrf, db, person,
+                                                      belegverzeichnis):
+    """Gegenprobe zum Test darueber: die Ausnahme gilt NUR fuer abgelehnte
+    Namen. Wer den Beleg regulaer entfernt, bekommt die Datei weiterhin
+    aufgeraeumt - sonst waere aus der Behebung ein Leck geworden."""
+    beleg = belegverzeichnis / '99999999999999999999999999999999.pdf'
+    beleg.write_bytes(_pdf_bytes(b'lila'))
+
+    rid = _speichern(auth_client, csrf, rows=[
+        {'client_key': 'a', 'day': 1, 'description': 'Bon',
+         'person_id': person, 'amount': 30.0,
+         'receipt_filename': beleg.name}]).get_json()['id_map']['a']
+
+    _speichern(auth_client, csrf, rows=[
+        {'id': rid, 'day': 1, 'description': 'Bon', 'person_id': person,
+         'amount': 30.0, 'receipt_filename': ''}])
 
     assert not beleg.exists()
 

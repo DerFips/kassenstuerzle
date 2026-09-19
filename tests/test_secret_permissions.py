@@ -236,3 +236,48 @@ def test_secret_key_folgt_der_datenbank_nicht_dem_quellcode(tmp_path, monkeypatc
     nachher = set(repo_data.iterdir()) if repo_data.is_dir() else set()
     assert nachher == vorher, (
         f'Der Testlauf hat das echte Datenverzeichnis veraendert: {nachher - vorher}')
+
+
+# ── Nacharbeit: unbeschreibbares Datenverzeichnis ───────────────────────────
+
+def test_unbeschreibbares_datenverzeichnis_nennt_den_chown_befehl(tmp_path):
+    """Ohne das dokumentierte `sudo chown -R 1000:1000 ./data` starb der Start
+    mit einem nackten PermissionError-Traceback.
+
+    Mit `restart: unless-stopped` laeuft der Container dann in einer Schleife
+    und schreibt immer denselben Stacktrace ins Log - ohne einen Hinweis
+    darauf, was der Betreiber zu tun hat. Geprueft wird deshalb nicht nur,
+    DASS es einen Fehler gibt, sondern dass er den Befehl nennt.
+    """
+    import pytest
+
+    data_dir = tmp_path / 'nur_lesbar'
+    data_dir.mkdir()
+    os.chmod(data_dir, 0o500)          # r-x: betretbar, nicht beschreibbar
+    try:
+        if os.access(data_dir, os.W_OK):
+            pytest.skip('Test laeuft als root - Rechte greifen nicht')
+
+        with pytest.raises(RuntimeError) as fehler:
+            app_package._ensure_data_dir_and_secret(str(data_dir))
+
+        text = str(fehler.value)
+        assert 'chown' in text, f'Die Meldung nennt den Befehl nicht: {text!r}'
+        assert f'{os.getuid()}:{os.getgid()}' in text, (
+            f'Die Meldung nennt nicht die uid/gid dieses Prozesses: {text!r}')
+        assert './data' in text
+        assert str(data_dir) in text, 'Die Meldung nennt das Verzeichnis nicht'
+    finally:
+        os.chmod(data_dir, 0o700)
+
+
+def test_beschreibbares_datenverzeichnis_laeuft_unveraendert_durch(tmp_path):
+    """Gegenprobe: die Vorpruefung darf den Normalfall nicht stoeren - und
+    darf vor allem ihre Schreibprobe nicht liegen lassen."""
+    data_dir = tmp_path / 'ganz_normal'
+
+    secret = app_package._ensure_data_dir_and_secret(str(data_dir))
+
+    assert len(secret) == 32
+    assert sorted(p.name for p in data_dir.iterdir()) == ['.secret_key'], (
+        'Die Schreibprobe wurde nicht wieder entfernt')

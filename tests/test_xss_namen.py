@@ -98,9 +98,16 @@ _UNBEDENKLICHE_KETTEN = {
     'label', 'inputs', 'buildSplitPanelHtml',
     # Reine Meldungstexte aus t(), von den Aufrufern uebersetzt.
     'msg',
-    # In JS berechnet, nie aus Benutzereingaben: CSS-Klasse bzw. eine ueber
-    # encodeURIComponent gebaute URL.
-    'rowClass', 'url',
+    # In JS berechnet, nie aus Benutzereingaben: eine CSS-Klasse.
+    'rowClass',
+    # 'url' stand hier frueher mit der Begruendung "ueber encodeURIComponent
+    # gebaut" - und genau das pruefte niemand nach. Die Zeile
+    # `const url = ``/api/receipt/${encodeURIComponent(filename)}``;` baut
+    # kein Markup ('<' kommt darin nicht vor), der Scanner sah sie also gar
+    # nicht an; `${url}` daneben war per Liste freigestellt. Man konnte
+    # encodeURIComponent ersatzlos streichen, ohne dass ein einziger Test rot
+    # wurde. Statt des Eintrags loest _literal_variablen() solche Variablen
+    # jetzt auf und prueft die Einsetzungen IHRES Literals mit.
     # Zahlen und Flags aus dem Server-JSON; sie steuern nur Ternaries und
     # erreichen das Dokument nie als Text.
     'isCash', 'isSplitCat', 'settled', 'i',
@@ -108,17 +115,17 @@ _UNBEDENKLICHE_KETTEN = {
 }
 
 
-def _template_literale_mit_einsetzungen(text):
-    """Zerlegt JS-Quelltext in Template-Literale samt ihren ${...}-Ausdruecken.
+def _literale_mit_position(text):
+    """Wie _template_literale_mit_einsetzungen, zusaetzlich mit der Position.
 
-    Bewusst ein echter Scanner statt eines regulaeren Ausdrucks: in
-    import_pdf.html stecken Literale INNERHALB einer Einsetzung, und eine
-    Paarung ueber `[^`]*` wuerde dort die falschen Backticks zusammenlegen
-    und die Haelfte der Senken uebersehen.
+    Liefert (position_des_oeffnenden_backticks, inhalt, ausdruecke). Die
+    Position braucht _literal_variablen(), um ein Literal seiner Variablen
+    zuzuordnen.
     """
     ergebnis = []
 
     def literal(i):
+        beginn = i - 1          # das oeffnende Backtick
         inhalt, ausdruecke = [], []
         while i < len(text):
             c = text[i]
@@ -126,7 +133,7 @@ def _template_literale_mit_einsetzungen(text):
                 i += 2
                 continue
             if c == '`':
-                ergebnis.append((''.join(inhalt), ausdruecke))
+                ergebnis.append((beginn, ''.join(inhalt), ausdruecke))
                 return i + 1
             if text[i:i + 2] == '${':
                 i, ausdruck = einsetzung(i + 2)
@@ -134,7 +141,7 @@ def _template_literale_mit_einsetzungen(text):
                 continue
             inhalt.append(c)
             i += 1
-        ergebnis.append((''.join(inhalt), ausdruecke))
+        ergebnis.append((beginn, ''.join(inhalt), ausdruecke))
         return i
 
     def einsetzung(i):
@@ -169,6 +176,44 @@ def _template_literale_mit_einsetzungen(text):
     return ergebnis
 
 
+def _template_literale_mit_einsetzungen(text):
+    """Zerlegt JS-Quelltext in Template-Literale samt ihren ${...}-Ausdruecken.
+
+    Bewusst ein echter Scanner statt eines regulaeren Ausdrucks: in
+    import_pdf.html stecken Literale INNERHALB einer Einsetzung, und eine
+    Paarung ueber `[^`]*` wuerde dort die falschen Backticks zusammenlegen
+    und die Haelfte der Senken uebersehen.
+    """
+    return [(inhalt, ausdruecke) for _, inhalt, ausdruecke in _literale_mit_position(text)]
+
+
+# Zuweisungen der Form `const url = ` unmittelbar vor einem Template-Literal.
+_LITERAL_ZUWEISUNG = re.compile(
+    r'\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*$')
+
+
+def _literal_variablen(text):
+    """Ordnet Variablennamen die Einsetzungen ihres Template-Literals zu.
+
+    Hintergrund: der Scanner unten sieht sich nur Literale an, die '<'
+    enthalten - alles andere baut kein Markup. Ein Literal, das erst ueber
+    eine Variable in eine HTML-Senke wandert, fiel damit durch:
+
+        const url = `/api/receipt/${filename}`;     // kein '<', ungeprueft
+        el.innerHTML = `<img src="${url}">`;        // 'url' stand auf der Liste
+
+    Beide Haelften einzeln harmlos, zusammen die Senke. Aufgeloest wird
+    deshalb ueber den Namen: wo `url` in einer HTML-Senke steht, werden die
+    Einsetzungen SEINES Literals geprueft.
+    """
+    zuordnung = {}
+    for beginn, _inhalt, ausdruecke in _literale_mit_position(text):
+        treffer = _LITERAL_ZUWEISUNG.search(text[max(0, beginn - 80):beginn])
+        if treffer:
+            zuordnung.setdefault(treffer.group(1), []).extend(ausdruecke)
+    return zuordnung
+
+
 def _ohne_stringliterale(code):
     return re.sub(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`", ' ', code)
 
@@ -197,20 +242,31 @@ def _ohne_sichere_aufrufe(code):
 
 def _ungeschuetzte_einsetzungen(html):
     """Liefert (Ausdruck, Kette) fuer jede ungeschuetzte HTML-Einsetzung."""
+    variablen = _literal_variablen(html)
     funde = []
+
+    def pruefe(ausdruck, aufgeloest):
+        rest = _ohne_sichere_aufrufe(_ohne_stringliterale(ausdruck))
+        rest = re.sub(r'/[^/\n]*/[gimsuy]*', ' ', rest)   # Regex-Literale
+        for kette in re.findall(
+                r'[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*', rest):
+            if kette.split('.')[0] in _KEINE_DATEN:
+                continue
+            if kette in variablen and kette not in aufgeloest:
+                # Aus einem Template-Literal gebaut: nicht die Variable
+                # bewerten, sondern das, was in sie hineinlaeuft.
+                for innen in variablen[kette]:
+                    pruefe(innen, aufgeloest | {kette})
+                continue
+            if kette in _UNBEDENKLICHE_KETTEN:
+                continue
+            funde.append((ausdruck.strip(), kette))
+
     for inhalt, ausdruecke in _template_literale_mit_einsetzungen(html):
         if '<' not in inhalt:
             continue          # baut kein Markup - hier gibt es keine Senke
         for ausdruck in ausdruecke:
-            rest = _ohne_sichere_aufrufe(_ohne_stringliterale(ausdruck))
-            rest = re.sub(r'/[^/\n]*/[gimsuy]*', ' ', rest)   # Regex-Literale
-            for kette in re.findall(
-                    r'[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*', rest):
-                if kette.split('.')[0] in _KEINE_DATEN:
-                    continue
-                if kette in _UNBEDENKLICHE_KETTEN:
-                    continue
-                funde.append((ausdruck.strip(), kette))
+            pruefe(ausdruck, frozenset())
     return funde
 
 
