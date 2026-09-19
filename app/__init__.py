@@ -3,6 +3,56 @@ import os
 import logging
 
 
+def _chown_hinweis(data_dir, ursache):
+    """Baut die Startmeldung fuer ein Datenverzeichnis ohne Schreibrecht.
+
+    Befund M (Nacharbeit): ueberspringt der Betreiber das dokumentierte
+    `sudo chown -R 1000:1000 ./data`, starb der Start mit einem nackten
+    PermissionError-Traceback - ohne jeden Hinweis darauf, was zu tun ist.
+    Mit `restart: unless-stopped` laeuft der Container dann in einer
+    Schleife, und im Log steht dreimal pro Minute derselbe Stacktrace.
+
+    Die Meldung nennt den Befehl mit der WIRKLICHEN uid/gid dieses Prozesses
+    und dem WIRKLICHEN Pfad - nicht die Beispielwerte aus der
+    docker-compose.yml, die je nach Image auch anders sein koennen.
+    """
+    try:
+        uid, gid = os.getuid(), os.getgid()
+    except AttributeError:      # Windows kennt getuid() nicht
+        uid = gid = 1000
+    return (
+        f"Das Datenverzeichnis '{data_dir}' ist fuer diesen Prozess nicht "
+        f"beschreibbar ({ursache}).\n"
+        "Kassenstuerzle laeuft bewusst nicht als root und kann die Rechte "
+        "deshalb nicht selbst richten.\n"
+        "Auf dem HOST (im Projektverzeichnis) einmalig ausfuehren:\n"
+        f"    sudo chown -R {uid}:{gid} ./data\n"
+        "Danach den Container neu starten. Ohne diesen Schritt startet die "
+        "Anwendung nicht - sie koennte weder den Signierschluessel noch die "
+        "Datenbank anlegen."
+    )
+
+
+def _pruefe_datenverzeichnis_beschreibbar(data_dir):
+    """Stellt VOR dem ersten echten Schreibzugriff fest, ob es ueberhaupt geht.
+
+    Ein blosses os.access() reicht nicht: bei einem Bind-Mount entscheidet
+    der Eigentuemer im Container, und das laesst sich nur durch einen
+    tatsaechlichen Schreibversuch klaeren.
+    """
+    probe = os.path.join(data_dir, '.schreibprobe')
+    try:
+        with open(probe, 'wb'):
+            pass
+    except OSError as exc:
+        raise RuntimeError(_chown_hinweis(data_dir, exc)) from exc
+    finally:
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+
+
 def _ensure_data_dir_and_secret(data_dir):
     """Legt das Datenverzeichnis und den Signierschlüssel an (falls nötig) und
     liest ihn sonst ein. In eine eigene Funktion ausgelagert, damit sie
@@ -21,7 +71,11 @@ def _ensure_data_dir_and_secret(data_dir):
     secret_file = os.path.join(data_dir, '.secret_key')
 
     _data_dir_existed = os.path.isdir(data_dir)
-    os.makedirs(data_dir, exist_ok=True)
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(_chown_hinweis(data_dir, exc)) from exc
+    _pruefe_datenverzeichnis_beschreibbar(data_dir)
     if not _data_dir_existed:
         try:
             os.chmod(data_dir, 0o700)
@@ -70,7 +124,16 @@ RATE_LIMITS = {
     # dieses Limit; es verzoegert nur.
     'main.api_receipt_upload': '30 per minute',
     'main.api_backup_create':  '5 per minute',
-    'main.api_backup_restore': '3 per minute',
+    # Nacharbeit: ein einziger bewusster Restore verbraucht ZWEI Aufrufe.
+    # Eine Sicherung ohne Instanzkennung wird zuerst abgelehnt; erst nach der
+    # Rueckfrage geht dieselbe Datei mit dem Uebersteuerungs-Kennzeichen
+    # erneut raus (siehe settings.html). Bei 3/Minute war damit nach einem
+    # einzigen Versuch Schluss - der zweite Anlauf lief in ein 429, und zwar
+    # genau in dem Moment, in dem der Betreiber gerade eine Datenbank
+    # zurueckholen will. 6/Minute lassen drei vollstaendige Versuche zu und
+    # sind als Bremse gegen das Durchprobieren fremder Dateien unveraendert
+    # wirksam: jeder Versuch schreibt vorher eine Schutzkopie.
+    'main.api_backup_restore': '6 per minute',
     'main.import_csv':         '20 per minute',
     'main.api_backup_download':'10 per minute',
     'main.export_csv':         '20 per minute',

@@ -44,20 +44,28 @@ _BELEGNAME_MUSTER = _re_modul.compile(r'^[0-9a-f]{32}\.(jpg|jpeg|png|gif|webp|pd
 def _pruefe_belegname(wert):
     """Laesst nur Belegnamen durch, die api_receipt_upload so erzeugt haben kann.
 
+    Rueckgabe: (gepruefter_name_oder_None, abgelehnt). `abgelehnt` ist nur
+    dann wahr, wenn wirklich ein Wert ankam und die Pruefung ihn verworfen
+    hat - ein leeres Feld ist keine Ablehnung, sondern "kein Beleg".
+
     Bewusst verwerfen statt den ganzen Speichervorgang mit 400 abzubrechen:
     die Oberflaeche schickt bei jedem Autosave ALLE Zeilen des Monats mit.
     Ein einzelner, vor dieser Pruefung gespeicherter Altwert wuerde sonst das
     Speichern des ganzen Monats dauerhaft blockieren. So wird er beim
     naechsten Speichern still bereinigt - der Wert erreicht die Datenbank
     (und damit `const EXISTING` in der Seite) in keinem Fall.
+
+    Die zweite Rueckgabe gibt es, weil "still verwerfen" und "still loeschen"
+    zweierlei sind: der Aufrufer darf die Belegdatei der Zeile nach einer
+    Ablehnung NICHT als verwaist aufraeumen (siehe save_expenses).
     """
     if not wert:
-        return None
+        return None, False
     if _BELEGNAME_MUSTER.match(str(wert)):
-        return str(wert)
+        return str(wert), False
     log.warning("Ungueltiger Belegname verworfen (%r) - Benutzer '%s'",
                 str(wert)[:80], session.get('username', ''))
-    return None
+    return None, True
 # Sicherheit (Befund I5): Obergrenze fuer das gesamte Beleg-Verzeichnis.
 # Ohne sie kann jedes eingeloggte Mitglied - nicht nur ein Admin - den
 # Upload in einer Schleife aufrufen und den Datentraeger fuellen; danach
@@ -426,26 +434,128 @@ def _autolink_single_person(conn) -> None:
 # eine Sicherung dieser Installation von einer untergeschobenen Datei zu
 # unterscheiden ist. Weil sie in der Datenbank steht, traegt jede Sicherung
 # (ein blosser Dateikopie-Vorgang) sie automatisch mit.
+#
+# Sie bezeichnet die INSTALLATION, nicht den Datenbestand: ein Restore
+# schreibt die bisherige Kennung in die eingespielte Datei zurueck
+# (_instanz_id_festschreiben), sonst wuerde er alle uebrigen Sicherungen
+# derselben Installation entwerten.
 _INSTANZ_ID_SCHLUESSEL = 'instance_id'
 
+# Genau die Form, die diese Anwendung fuer app_meta erwartet: (name, typ, pk).
+# PRAGMA table_info liefert je Spalte (cid, name, type, notnull, default, pk).
+_APP_META_SOLLFORM = [('key', 'TEXT', 1), ('value', 'TEXT', 0)]
+_APP_META_SCHEMA = 'CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT)'
 
-def _ensure_instanz_id(conn) -> str:
+
+def _app_meta_sicherstellen(conn) -> None:
+    """Erzwingt die erwartete Form von app_meta - notfalls durch Neuaufbau.
+
+    Nacharbeit zum Herkunftsnachweis: bei einer wiederhergestellten Datei
+    stammt app_meta samt SCHEMA aus der hochgeladenen Datei. init_db() legte
+    die Tabelle mit CREATE TABLE IF NOT EXISTS an, eine mitgelieferte
+    Tabelle `app_meta (key, value)` OHNE Primaerschluessel blieb also
+    bestehen. Darin wirkt `INSERT OR REPLACE` nicht als Ersetzen, sondern
+    haengt eine zweite Zeile an - `SELECT ... fetchone()` liefert danach
+    dauerhaft die erste, vom Angreifer gewaehlte Zeile (z.B. den leeren
+    Text). Damit haette diese Installation fuer immer KEINE lesbare eigene
+    Kennung mehr, und der Herkunftsnachweis waere erledigt.
+
+    Aus der Tabelle wird bewusst NICHTS uebernommen: ihr Inhalt ist in genau
+    dem Moment, in dem diese Funktion etwas zu tun findet, angreifergewaehlt.
+    """
+    try:
+        spalten = list(conn.execute('PRAGMA table_info(app_meta)'))
+    except sqlite3.Error:
+        spalten = []
+    if [(r[1], str(r[2] or '').upper(), r[5]) for r in spalten] == _APP_META_SOLLFORM:
+        return
+
+    if spalten:
+        log.warning("app_meta hat eine unerwartete Form (%s) und wird neu "
+                    "aufgebaut - der bisherige Inhalt stammt aus einer "
+                    "eingespielten Datei und wird verworfen.",
+                    ', '.join(str(r[1]) for r in spalten))
+    # DROP TABLE scheitert, wenn unter dem Namen etwas anderes als eine
+    # Tabelle liegt (View). Beide Wege werden versucht, damit eine feindliche
+    # Datei den Start nicht zum Absturz bringen kann.
+    for anweisung in ('DROP TABLE IF EXISTS app_meta',
+                      'DROP VIEW IF EXISTS app_meta'):
+        try:
+            conn.execute(anweisung)
+        except sqlite3.Error:
+            continue
+        break
+    conn.execute(_APP_META_SCHEMA)
+
+
+def _ensure_instanz_id(conn):
     """Legt die Instanzkennung beim Start an, falls sie noch fehlt.
 
-    Rueckgabe ist die (ggf. frisch erzeugte) Kennung. Kein Rotieren, kein
-    Ueberschreiben: eine neue Kennung wuerde alle bisherigen Sicherungen
+    Rueckgabe ist die (ggf. frisch erzeugte) Kennung, oder None, wenn sie
+    sich nicht sicherstellen laesst. Kein Rotieren, kein Ueberschreiben einer
+    gueltigen Kennung: eine neue Kennung wuerde alle bisherigen Sicherungen
     dieser Installation entwerten.
+
+    Die Funktion laeuft in init_db() - und init_db() laeuft in create_app().
+    Sie darf deshalb unter keinen Umstaenden durchschlagen: eine eingespielte
+    Datei mit kaputtem app_meta (z.B. ohne Spalte `value`) liess den Start
+    frueher mit `no such column: value` scheitern. Die Datei war zu dem
+    Zeitpunkt schon getauscht - die Anwendung startete danach gar nicht mehr
+    und war bei `restart: unless-stopped` nur noch per Shell zu retten.
     """
-    row = conn.execute('SELECT value FROM app_meta WHERE key=?',
-                       (_INSTANZ_ID_SCHLUESSEL,)).fetchone()
-    if row is not None and row[0]:
-        return row[0]
-    import secrets as _sec
-    neue = _sec.token_hex(16)
-    conn.execute('INSERT OR REPLACE INTO app_meta (key, value) VALUES (?,?)',
-                 (_INSTANZ_ID_SCHLUESSEL, neue))
-    log.info("Instanzkennung fuer den Herkunftsnachweis von Sicherungen angelegt.")
-    return neue
+    try:
+        _app_meta_sicherstellen(conn)
+        row = conn.execute('SELECT value FROM app_meta WHERE key=?',
+                           (_INSTANZ_ID_SCHLUESSEL,)).fetchone()
+        if row is not None and row[0]:
+            return row[0]
+        neue = secrets.token_hex(16)
+        # Bewusst DELETE + INSERT statt INSERT OR REPLACE: `OR REPLACE`
+        # ersetzt nur ueber eine Eindeutigkeitsbedingung. Sie steht zwar
+        # gerade wieder (siehe _app_meta_sicherstellen), aber die Absicht
+        # "es gibt genau eine Zeile" soll nicht von der Form der Tabelle
+        # abhaengen.
+        conn.execute('DELETE FROM app_meta WHERE key=?', (_INSTANZ_ID_SCHLUESSEL,))
+        conn.execute('INSERT INTO app_meta (key, value) VALUES (?,?)',
+                     (_INSTANZ_ID_SCHLUESSEL, neue))
+        log.info("Instanzkennung fuer den Herkunftsnachweis von Sicherungen angelegt.")
+        return neue
+    except sqlite3.Error as exc:
+        log.error("Instanzkennung konnte nicht sichergestellt werden (%s). Der "
+                  "Herkunftsnachweis ist damit nicht fuehrbar - jeder Restore "
+                  "wird abgelehnt, bis das behoben ist.", exc)
+        return None
+
+
+def _instanz_id_festschreiben(pfad, kennung) -> None:
+    """Schreibt die Kennung der LAUFENDEN Installation in die Datei `pfad`.
+
+    Die Kennung bezeichnet die INSTALLATION, nicht den Datenbestand. Ohne
+    diesen Schritt bekam eine mit Bestaetigung eingespielte Altsicherung
+    (die noch keine Kennung traegt) beim anschliessenden init_db() eine
+    frische - und danach war JEDE eigene Sicherung dieser Installation
+    'srv.restore_fremde_instanz', inklusive der Sekunden zuvor angelegten
+    Schutzkopie 'pre-restore'. Der Betreiber haette die falsche Datei
+    eingespielt und keinen Rueckweg mehr.
+    """
+    if not kennung:
+        return
+    con = _open_db(pfad)
+    try:
+        _app_meta_sicherstellen(con)
+        con.execute('DELETE FROM app_meta WHERE key=?', (_INSTANZ_ID_SCHLUESSEL,))
+        con.execute('INSERT INTO app_meta (key, value) VALUES (?,?)',
+                    (_INSTANZ_ID_SCHLUESSEL, kennung))
+        con.commit()
+    except sqlite3.Error:
+        log.exception("Instanzkennung konnte nach dem Restore nicht "
+                      "festgeschrieben werden - eigene Sicherungen koennten "
+                      "danach als fremd gelten.")
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 def _lies_instanz_id(conn):
@@ -650,7 +760,10 @@ def init_db():
     # 1:1-Verknuepfung Benutzer <-> Person; beide Seiten bleiben optional.
     conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person'
                  ' ON users(person_id) WHERE person_id IS NOT NULL')
-    conn.execute('CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)')
+    # app_meta wird bewusst NICHT mit `CREATE TABLE IF NOT EXISTS` angelegt:
+    # das haette die (moeglicherweise aus einer eingespielten Datei
+    # stammende) vorhandene Tabelle samt ihrer Form stehen lassen.
+    # _app_meta_sicherstellen() legt sie an bzw. baut sie neu auf.
     _ensure_instanz_id(conn)
 
     _ensure_admin(conn)
@@ -1536,15 +1649,23 @@ def save_expenses():
         cid     = int(e['category_id'])        if e.get('category_id')        else None
         pfpid   = int(e['paid_for_person_id']) if e.get('paid_for_person_id') else None
         is_cash = 1 if e.get('is_cash') else 0
-        rfn     = _pruefe_belegname(e.get('receipt_filename'))
+        rfn, _name_abgelehnt = _pruefe_belegname(e.get('receipt_filename'))
         day     = int(e.get('day') or 1)
         desc    = e.get('description', '')
 
         if rid is not None:
             # Wird der Beleg ausgetauscht oder entfernt, ist der alte danach
             # moeglicherweise verwaist (Befund I5).
+            #
+            # Nacharbeit: NICHT nach einem abgelehnten Namen. Das stille
+            # Verwerfen eines ungueltigen Werts ist dokumentiert - das stille
+            # Loeschen der zugehoerigen Datei war es nicht. Ohne diese
+            # Ausnahme genuegte ein einziger Autosave mit kaputtem Namen
+            # (z.B. aus einem alten Tab), damit der Beleg von der Platte
+            # verschwindet: rfn wird None, die Zeile zeigt auf nichts mehr,
+            # und _verwaiste_belege_loeschen() raeumt die Datei weg.
             _alter_beleg = _beleg_von(rid)
-            if _alter_beleg and _alter_beleg != rfn:
+            if _alter_beleg and _alter_beleg != rfn and not _name_abgelehnt:
                 _belegkandidaten.add(_alter_beleg)
             conn.execute(
                 'UPDATE expenses SET day=?, description=?, person_id=?, category_id=?,'
@@ -3044,6 +3165,15 @@ def _pruefe_sicherung(pfad: str, admin_username: str,
         # er muesste die laufende Datenbank bereits lesen koennen.
         fremde = _lies_instanz_id(con)
         eigene = _eigene_instanz_id()
+        if eigene is None:
+            # Nacharbeit: frueher stand hier `elif eigene is not None and
+            # fremde != eigene` - ohne eigene Kennung wurde der Zweig fuer
+            # die fremde Installation komplett uebersprungen und JEDE fremde
+            # Datei angenommen. Genau dieser Zustand liess sich herbeifuehren
+            # (kaputtes app_meta in einer einmal bestaetigten Altsicherung).
+            # Kann diese Installation ihre eigene Herkunft nicht angeben, ist
+            # der Nachweis nicht fuehrbar - dann wird nichts eingespielt.
+            raise _SicherungAbgelehnt('srv.restore_kein_eigener_nachweis')
         if fremde is None:
             # Sicherungen von VOR dieser Aenderung tragen die Kennung noch
             # nicht. Sie pauschal abzulehnen wuerde dem Betreiber jeden
@@ -3057,9 +3187,11 @@ def _pruefe_sicherung(pfad: str, admin_username: str,
                 "eingespielt werden soll. Die Datei kann aus einer fremden "
                 "Installation stammen und ersetzt alle Benutzerkonten.",
                 admin_username)
-        elif eigene is not None and fremde != eigene:
+        elif fremde != eigene:
             # Eindeutig eine fremde Installation - hier hilft keine
             # Bestaetigung, das ist nie ein gewolltes Wiederherstellen.
+            # Der Vergleich laeuft bedingungslos: `eigene` ist an dieser
+            # Stelle garantiert gesetzt (siehe oben).
             raise _SicherungAbgelehnt('srv.restore_fremde_instanz')
 
         # Zweites Signal, bewusst beibehalten: der gerade angemeldete Admin
@@ -3126,6 +3258,11 @@ def api_backup_restore():
             "Backup-Restore: hochgeladene Datei konnte nicht geprüft werden")
         tmp.unlink(missing_ok=True)
         return jsonify(success=False, error=t('srv.invalid_db_upload')), 400
+    # Die Kennung DIESER Installation vor dem Tausch festhalten. Sie
+    # bezeichnet die Installation, nicht den Datenbestand - siehe
+    # _instanz_id_festschreiben(). _pruefe_sicherung() ist gerade
+    # durchgelaufen, sie ist also gesetzt.
+    _eigene_kennung = _eigene_instanz_id()
     create_backup("pre-restore", schutz=True)
     shutil.copy(str(tmp), db_path)
     # WAL-Sidecars der alten Datenbank entfernen: ein übrig gebliebenes -wal
@@ -3136,6 +3273,12 @@ def api_backup_restore():
         except FileNotFoundError:
             pass
     tmp.unlink(missing_ok=True)
+    # Die Installation behaelt ihre Kennung ueber den Restore hinweg. Sonst
+    # praegte init_db() gleich darunter eine frische Kennung, und alle
+    # bestehenden Sicherungen dieser Installation - inklusive der eben
+    # angelegten Schutzkopie 'pre-restore' - waeren ab sofort
+    # 'srv.restore_fremde_instanz' und damit unerreichbar.
+    _instanz_id_festschreiben(db_path, _eigene_kennung)
     # Eine wiederhergestellte Datenbank kann aelter als die Profil-Migration
     # sein (z.B. eine vor Phase B geschriebene Sicherung). Seit dieser Phase
     # setzt JEDE Anfrage (login_required, login()) auf role/is_active/

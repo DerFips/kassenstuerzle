@@ -434,6 +434,11 @@ TRANSLATIONS = {
                                         'Sicherungen, die vor diesem Update erstellt wurden, '
                                         'lassen sich nur nach ausdrücklicher Bestätigung '
                                         'einspielen.',
+        'srv.restore_kein_eigener_nachweis': 'Diese Installation kann ihre eigene '
+                                             'Instanzkennung nicht lesen. Damit lässt sich die '
+                                             'Herkunft einer Sicherung nicht prüfen, und es wird '
+                                             'nichts eingespielt. Bitte die Anwendung neu starten '
+                                             'und das Server-Protokoll prüfen.',
         'srv.reserved_backup_label': 'Das Label „{label}" ist für automatische Schutzkopien '
                                      'reserviert. Bitte ein anderes wählen.',
         'srv.ocr_unreadable': 'Beleg konnte nicht gelesen werden.',
@@ -863,6 +868,10 @@ TRANSLATIONS = {
                                         'installation (no instance id). Backups created before '
                                         'this update can only be restored after an explicit '
                                         'confirmation.',
+        'srv.restore_kein_eigener_nachweis': 'This installation cannot read its own instance '
+                                             'id. The origin of a backup therefore cannot be '
+                                             'verified and nothing was restored. Please restart '
+                                             'the application and check the server log.',
         'srv.reserved_backup_label': 'The label "{label}" is reserved for automatic protective '
                                      'copies. Please choose a different one.',
         'srv.ocr_unreadable': 'Receipt could not be read.',
