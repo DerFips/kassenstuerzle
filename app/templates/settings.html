@@ -24,8 +24,14 @@
             <input type="number" step="0.01" class="form-control person-wallet-amount"
                    value="{{ p.wallet_start_amount or '' }}" placeholder="{{ t('settings.wallet_start_amount_placeholder') }}" style="max-width:130px">
             {% if current_role == 'admin' %}
+            <!-- Loeschen passiert nur noch ueber die Kontofelder (Task-5-Review,
+                 Befund 2): jede Person hat seit Task 4 zwingend ein Konto, der
+                 fruehere eigene Loesch-Button hier fuehrte ueber
+                 /api/persons/save zu einem zweiten, abweichenden Loeschpfad
+                 (blockierte stillschweigend bei aktivem Konto, loeschte bei
+                 deaktiviertem Konto die Person und liess das Konto verwaist
+                 zurueck). -->
             <span class="input-group-text person-account-slot bg-white" style="min-width:0;"></span>
-            <button class="btn btn-outline-danger remove-person-btn" type="button"><i class="bi bi-trash"></i></button>
             {% endif %}
           </div>
           {% endfor %}
@@ -561,7 +567,6 @@ function urlBase64ToUint8Array(base64String) {
 <script nonce="{{ csp_nonce() }}">
 const PERSONS_FOR_SPLITS = {{ persons | tojson }};
 const ACTIVITY_VERSION = {{ activity_version | tojson }};
-let _pendingPersonDeletes = [];
 let _pendingCatDeletes = [];
 let _pendingRecurDeletes = [];
 let _ckSeq = 0;
@@ -591,19 +596,14 @@ document.getElementById('add-person-btn')?.addEventListener('click', async () =>
     body: JSON.stringify({username: name.trim(), role: 'member', person_id: null})
   })).json();
   if (!d.success) { showToast(d.error, 'danger'); return; }
-  zeigeInitialpasswort(name.trim(), d.password);
-  // Neuladen bewusst verzoegert: ein sofortiger Reload wuerde das gerade
-  // angezeigte Einmalpasswort (P1: wird nur genau jetzt angezeigt) augenblicklich
-  // wieder entfernen, bevor jemand es lesen/kopieren kann.
-  setTimeout(personenNeuLaden, 4000);
+  // Neuladen erst wenn die Admin-Person das Einmalpasswort per Klick
+  // bestaetigt (Task-5-Review, Befund 3) - ein Timer koennte die Box
+  // (P1: wird nur genau jetzt angezeigt) wegreloaden, bevor sie gelesen ist.
+  zeigeInitialpasswort(name.trim(), d.password, personenNeuLaden);
 });
-document.getElementById('persons-list').addEventListener('click', e => {
-  if (e.target.closest('.remove-person-btn')) {
-    const row = e.target.closest('.person-row');
-    if (row.dataset.id) _pendingPersonDeletes.push(parseInt(row.dataset.id, 10));
-    row.remove();
-  }
-});
+// Es gibt keinen eigenen Loesch-Button mehr auf der Personen-Zeile (Befund 2)
+// - Loeschen laeuft ausschliesslich ueber den Button im Kontofeld
+// (benutzerLoeschen), der Person und Konto atomar zusammen entfernt.
 document.getElementById('save-persons-btn').addEventListener('click', async () => {
   const rows = [...document.querySelectorAll('.person-row')].map(r => ({
     ...rowIdentity(r),
@@ -611,19 +611,15 @@ document.getElementById('save-persons-btn').addEventListener('click', async () =
     wallet_start_date: r.querySelector('.person-wallet-date').value || null,
     wallet_start_amount: parseFloat(r.querySelector('.person-wallet-amount').value) || 0
   })).filter(p => p.name);
-  const sentDeletes = _pendingPersonDeletes.slice();
   const res = await fetch('/api/persons/save', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ v: 2, rows, deleted_ids: sentDeletes })
+    body: JSON.stringify({ v: 2, rows })
   });
   const d = await res.json();
   if (d.success) {
     applyIdMap(d.id_map, '.person-row');
-    _pendingPersonDeletes = _pendingPersonDeletes.filter(id => !sentDeletes.includes(id));
     if (typeof activityWatchVersion === 'function') activityWatchVersion(d.activity_version);
-    if (d.blocked && d.blocked.length) {
-      showToast(t('settings.person_blocked', {names: d.blocked.join(', ')}), 'warning');
-    } else if (d.conflicts && d.conflicts.length) {
+    if (d.conflicts && d.conflicts.length) {
       showToast(t('settings.name_conflict', {names: d.conflicts.join(', ')}), 'warning');
     } else {
       showToast(t('settings.toast_persons_saved'), 'success');
@@ -832,6 +828,15 @@ function kontoFelderEinfuegen(u) {
   cb.addEventListener('change', () => benutzerAendern(u.id, {is_active: cb.checked ? 1 : 0}));
   slot.appendChild(cb);
 
+  // Befund 1 (Task-5-Review): letzte Anmeldung ging beim Zusammenfuehren
+  // verloren, obwohl /api/users sie weiterhin liefert. Fallback-Zeichen wie
+  // im fruehereren benutzerZeile()/zelle(): '—' fuer null.
+  const letzterLogin = document.createElement('span');
+  letzterLogin.className = 'small text-muted me-1';
+  letzterLogin.title = t('settings.user_last_login');
+  letzterLogin.textContent = u.last_login == null ? '—' : String(u.last_login);
+  slot.appendChild(letzterLogin);
+
   const reset = document.createElement('button');
   reset.type = 'button';
   reset.className = 'btn btn-sm btn-outline-secondary me-1';
@@ -887,8 +892,15 @@ async function benutzerLoeschen(id, name) {
   personenNeuLaden();
 }
 
-/** Zeigt das Initialpasswort genau einmal an (Entscheidung P1). */
-function zeigeInitialpasswort(name, passwort) {
+/** Zeigt das Initialpasswort genau einmal an (Entscheidung P1).
+ *
+ * Schliessen passiert nur noch per Klick, nicht mehr per Timer
+ * (Task-5-Review, Befund 3): ein `setTimeout` liesse die Seite neu laden,
+ * egal ob das Passwort schon gelesen/kopiert wurde, und liesse sich weder
+ * verlaengern noch bestaetigen. `beiSchliessen` ist optional - beim Anlegen
+ * einer Person (neue Zeile, braucht ein Neuladen) wird `personenNeuLaden`
+ * uebergeben, beim reinen Passwort-Reset (Zeile bleibt unveraendert) nichts. */
+function zeigeInitialpasswort(name, passwort, beiSchliessen) {
   const box = document.createElement('div');
   box.className = 'alert alert-warning mt-3';
   const titel = document.createElement('div');
@@ -897,7 +909,15 @@ function zeigeInitialpasswort(name, passwort) {
   const code = document.createElement('code');
   code.className = 'fs-5 d-block my-2';
   code.textContent = passwort;
-  box.appendChild(titel); box.appendChild(code);
+  const schliessen = document.createElement('button');
+  schliessen.type = 'button';
+  schliessen.className = 'btn btn-sm btn-outline-secondary';
+  schliessen.textContent = t('settings.password_dismiss');
+  schliessen.addEventListener('click', () => {
+    box.remove();
+    if (beiSchliessen) beiSchliessen();
+  });
+  box.appendChild(titel); box.appendChild(code); box.appendChild(schliessen);
   document.getElementById('persons-list').closest('.card-body').appendChild(box);
 }
 
