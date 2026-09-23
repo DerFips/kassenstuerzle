@@ -1660,15 +1660,28 @@ def api_users_create():
     if not username:
         return jsonify(success=False, error=t('srv.missing_data')), 400
 
-    conn_pruef = get_db()
-    if person_id is not None and conn_pruef.execute(
-            'SELECT id FROM users WHERE person_id=?', (person_id,)).fetchone():
+    conn = get_db()
+    # Zwingende 1:1-Kopplung (Nutzerentscheidung): fehlt person_id, entsteht
+    # die Person automatisch mit demselben Namen, atomar mit dem Konto. Eine
+    # einzige Verbindung fuer Person-Insert, Vorab-Pruefung und User-Insert,
+    # damit ein conn.rollback() bei einem fehlschlagenden User-Insert auch
+    # das zuvor angelegte Person-Insert zurücknimmt. Ein Aufruf MIT
+    # person_id bleibt unveraendert moeglich.
+    if person_id is None:
+        try:
+            cur_p = conn.execute('INSERT INTO persons (name) VALUES (?)', (username,))
+            person_id = cur_p.lastrowid
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return jsonify(success=False, error=t('settings.name_conflict', names=username)), 409
+
+    if conn.execute('SELECT id FROM users WHERE person_id=?', (person_id,)).fetchone():
         # Vorab pruefen, damit die Meldung stimmt: der IntegrityError unten
         # kann sowohl vom Benutzernamen als auch vom Personen-Index kommen.
+        conn.rollback()
         return jsonify(success=False, error=t('srv.person_already_linked')), 409
 
     passwort = _neues_initialpasswort()
-    conn = get_db()
     try:
         cur = conn.execute(
             'INSERT INTO users (username, password_hash, role, is_active,'
@@ -1677,7 +1690,10 @@ def api_users_create():
             (username, generate_password_hash(passwort), role,
              datetime.now().isoformat(timespec='seconds'), person_id))
     except sqlite3.IntegrityError:
-        # Benutzername oder Personen-Verknuepfung bereits vergeben
+        # Benutzername oder Personen-Verknuepfung bereits vergeben. Rollback
+        # nimmt auch eine oben in dieser Transaktion automatisch angelegte
+        # Person wieder zurueck - sonst bliebe sie verwaist zurueck.
+        conn.rollback()
         return jsonify(success=False, error=t('srv.username_taken')), 409
     conn.commit()
     # Das Initialpasswort wird genau einmal zurueckgegeben (Entscheidung P1).
@@ -1764,7 +1780,7 @@ def api_users_reset_password(user_id):
 @admin_required
 def api_users_delete(user_id):
     conn = get_db()
-    row = conn.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
+    row = conn.execute('SELECT role, person_id FROM users WHERE id=?', (user_id,)).fetchone()
     if row is None:
         return jsonify(success=False, error=t('srv.user_not_found')), 404
     if user_id == session.get('user_id'):
@@ -1772,6 +1788,11 @@ def api_users_delete(user_id):
     if row['role'] == 'admin' and _anzahl_aktiver_admins(conn, ausser_id=user_id) == 0:
         return jsonify(success=False, error=t('srv.last_admin')), 400
     conn.execute('DELETE FROM users WHERE id=?', (user_id,))
+    # Zwingende 1:1-Kopplung (Nutzerentscheidung): die verknuepfte Person
+    # verschwindet atomar mit dem Konto. Kein Fehler, falls keine
+    # verknuepft ist (Bestand aus der Zeit vor dieser Regel).
+    if row['person_id'] is not None:
+        conn.execute('DELETE FROM persons WHERE id=?', (row['person_id'],))
     conn.commit()
     return jsonify(success=True)
 

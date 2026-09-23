@@ -215,6 +215,101 @@ def test_rollenwechsel_bumped_session_weiterhin(auth_client, csrf, db):
         db.commit()
 
 
+def test_anlegen_ohne_person_id_erzeugt_person_automatisch(auth_client, csrf, db):
+    """Kernaenderung von Task 4: fehlt person_id, entsteht die Person
+    automatisch mit demselben Namen wie der Benutzername - atomar mit
+    dem Benutzerkonto."""
+    try:
+        res = _anlegen(auth_client, csrf, username='dora', person_id=None)
+        assert res.status_code == 200
+        body = res.get_json()
+        person = db.execute("SELECT id, name FROM persons WHERE name='dora'").fetchone()
+        assert person is not None, 'Es wurde keine Person zum neuen Konto angelegt'
+        benutzer = db.execute("SELECT person_id FROM users WHERE username='dora'").fetchone()
+        assert benutzer['person_id'] == person['id']
+    finally:
+        db.execute("DELETE FROM users WHERE username='dora'")
+        db.execute("DELETE FROM persons WHERE name='dora'")
+        db.commit()
+
+
+def test_anlegen_mit_vorhandener_person_id_bleibt_moeglich(auth_client, csrf, db):
+    """Rueckwaertskompatibilitaet: ein Aufruf MIT person_id legt keine
+    zusaetzliche Person an, nutzt die uebergebene."""
+    db.execute("INSERT INTO persons (name) VALUES ('Elias')")
+    elias = db.execute("SELECT id FROM persons WHERE name='Elias'").fetchone()['id']
+    db.commit()
+    try:
+        res = _anlegen(auth_client, csrf, username='eliaskonto', person_id=elias)
+        assert res.status_code == 200
+        anzahl_personen_namens_elias = db.execute(
+            "SELECT COUNT(*) c FROM persons WHERE name='Elias'").fetchone()['c']
+        assert anzahl_personen_namens_elias == 1
+        benutzer = db.execute("SELECT person_id FROM users WHERE username='eliaskonto'").fetchone()
+        assert benutzer['person_id'] == elias
+    finally:
+        db.execute("DELETE FROM users WHERE username='eliaskonto'")
+        db.execute("DELETE FROM persons WHERE name='Elias'")
+        db.commit()
+
+
+def test_loeschen_entfernt_verknuepfte_person_atomar(auth_client, csrf, db):
+    """Kernaenderung von Task 4: Konto loeschen entfernt die verknuepfte
+    Person in derselben Aktion mit."""
+    try:
+        res = _anlegen(auth_client, csrf, username='finn', person_id=None)
+        neue_id = res.get_json()['id']
+        assert db.execute("SELECT id FROM persons WHERE name='finn'").fetchone() is not None
+
+        res = auth_client.delete(f'/api/users/{neue_id}', headers={'X-CSRF-Token': csrf})
+        assert res.status_code == 200
+        assert db.execute("SELECT id FROM users WHERE id=?", (neue_id,)).fetchone() is None
+        assert db.execute("SELECT id FROM persons WHERE name='finn'").fetchone() is None, \
+            'Person wurde beim Loeschen des Kontos nicht mitentfernt'
+    finally:
+        db.execute("DELETE FROM users WHERE username='finn'")
+        db.execute("DELETE FROM persons WHERE name='finn'")
+        db.commit()
+
+
+def test_loeschen_ohne_verknuepfte_person_funktioniert_weiterhin(auth_client, csrf, db):
+    """Randfall: ein (nach altem Bestand) unverknuepftes Konto laesst sich
+    weiterhin loeschen, ohne dass ein Fehler auftritt, weil keine Person
+    zum Mitloeschen existiert."""
+    try:
+        res = _anlegen(auth_client, csrf, username='greta', person_id=None)
+        neue_id = res.get_json()['id']
+        db.execute("UPDATE users SET person_id=NULL WHERE id=?", (neue_id,))
+        db.execute("DELETE FROM persons WHERE name='greta'")
+        db.commit()
+
+        res = auth_client.delete(f'/api/users/{neue_id}', headers={'X-CSRF-Token': csrf})
+        assert res.status_code == 200
+    finally:
+        db.execute("DELETE FROM users WHERE username='greta'")
+        db.execute("DELETE FROM persons WHERE name='greta'")
+        db.commit()
+
+
+def test_fehlgeschlagener_user_insert_hinterlaesst_keine_verwaiste_person(auth_client, csrf, db):
+    """Schlaegt der User-Insert fehl (Benutzername bereits vergeben), nachdem
+    im selben Request bereits eine Person automatisch angelegt wurde, darf
+    davon keine Spur bleiben - Person-Insert und User-Insert muessen in
+    derselben Transaktion stehen und gemeinsam zurueckgerollt werden."""
+    db.execute("INSERT INTO users (username, password_hash) VALUES ('milo', 'x')")
+    db.commit()
+    try:
+        res = _anlegen(auth_client, csrf, username='milo', person_id=None)
+        assert res.status_code == 409
+        assert res.get_json()['success'] is False
+        assert db.execute("SELECT id FROM persons WHERE name='milo'").fetchone() is None, \
+            'Verwaiste Person nach fehlgeschlagenem User-Insert (kein Rollback)'
+    finally:
+        db.execute("DELETE FROM users WHERE username='milo'")
+        db.execute("DELETE FROM persons WHERE name='milo'")
+        db.commit()
+
+
 def test_verknuepfte_person_nicht_loeschbar(auth_client, csrf, db):
     cur = db.execute("INSERT INTO persons (name) VALUES ('Greta')")
     pid = cur.lastrowid
