@@ -431,6 +431,13 @@ TRANSLATIONS = {
         'srv.restore_admin_missing': 'In der Sicherung fehlt das angemeldete Konto „{benutzer}". '
                                      'Eine fremde Sicherung einzuspielen würde diese Instanz an '
                                      'unbekannte Konten übergeben.',
+        'srv.restore_password_hash': 'Die Sicherung enthält Benutzerkonten ohne gültigen '
+                                     'Passwort-Hash. Kassenstürzle legt solche Konten nie an – '
+                                     'die Datei wurde abgelehnt.',
+        'srv.restore_generated_column': 'Die Sicherung enthält berechnete Spalten ({spalten}), '
+                                        'die Kassenstürzle selbst nie anlegt. Sie wurde '
+                                        'abgelehnt, weil die Anwendung nach dem Einspielen '
+                                        'nicht mehr darauf schreiben könnte.',
         # ── Herkunftsnachweis über die Instanzkennung (Blocker 1) ─────────
         'srv.restore_fremde_instanz': 'Diese Sicherung gehört zu einer anderen Kassenstürzle-'
                                       'Installation. Sie wurde abgelehnt, weil sie alle Benutzer '
@@ -876,6 +883,13 @@ TRANSLATIONS = {
         'srv.restore_admin_missing': 'The backup does not contain the account you are signed in '
                                      'as ("{benutzer}"). Restoring a foreign backup would hand '
                                      'this instance over to unknown accounts.',
+        'srv.restore_password_hash': 'The backup contains user accounts without a valid '
+                                     'password hash. Kassenstürzle never creates such '
+                                     'accounts – the file was rejected.',
+        'srv.restore_generated_column': 'The backup contains computed columns ({spalten}) that '
+                                        'Kassenstürzle never creates itself. It was rejected '
+                                        'because the application could no longer write to '
+                                        'them after the restore.',
         # ── Origin proof via the instance id (blocker 1) ──────────────────
         'srv.restore_fremde_instanz': 'This backup belongs to a different Kassenstürzle '
                                       'installation. It was rejected because it would replace '

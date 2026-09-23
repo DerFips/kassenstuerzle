@@ -14,6 +14,7 @@ try:
 except ImportError:
     import sqlite3
     _SQLCIPHER_AVAILABLE = False
+from contextlib import contextmanager
 from datetime import datetime
 import logging
 log = logging.getLogger(__name__)
@@ -493,8 +494,10 @@ def _app_meta_pruefen(conn) -> bool:
         conn.execute('DELETE FROM app_meta WHERE key=?', (_APP_META_PROBE_SCHLUESSEL,))
     except sqlite3.Error as exc:
         # Bewusst KEIN conn.rollback(): _app_meta_sicherstellen() laeuft
-        # mitten in init_db(), und init_db() sammelt seine CREATE TABLEs bis
-        # zum abschliessenden commit(). Ein Rollback wuerde sie mitreissen.
+        # mitten in einem groesseren Schritt (init_db(), bzw.
+        # _instanz_id_festschreiben()), und ein Rollback hier wuerde dessen
+        # bisherige Arbeit mitreissen. Ob der Schritt als Ganzes zurueckgerollt
+        # wird, entscheidet der Aufrufer (in init_db(): _startschritt()).
         # SQLite verwirft die gescheiterte Anweisung ohnehin fuer sich.
         log.warning("Schreibprobe auf app_meta fehlgeschlagen (%s) - die "
                     "Tabelle wird neu aufgebaut.", exc)
@@ -688,6 +691,49 @@ def _eigene_instanz_id():
             pass
 
 
+@contextmanager
+def _startschritt(conn, schritt: str, folge: str):
+    """Ein Schritt von init_db(), der den Start NICHT verhindern darf.
+
+    Die Regel, um die es geht (vier Pruefrunden lang jeweils an genau einer
+    weiteren Anweisung verletzt): init_db() laeuft in create_app(). Wirft
+    darin irgendetwas, startet die Anwendung nie wieder - mit
+    `restart: unless-stopped` eine endlose Neustartschleife, aus der nur ein
+    Shell-Zugriff auf das Volume herausfuehrt. Und nach einem Restore stammen
+    Tabellen UND Zeilen aus einer hochgeladenen Datei: jede Anweisung, die
+    darauf schreibt oder deren Werte weiterverarbeitet, kann an einer Form
+    scheitern, die sich niemand vorher ausgedacht hat.
+
+    Deshalb wird hier nicht die einzelne bekannte Ursache abgefangen, sondern
+    JEDE Ausnahme des Schritts. `folge` sagt im Protokoll, welche Garantie
+    dadurch fehlt - der Betreiber soll erkennen koennen, WELCHER Schritt
+    ausgefallen ist und welche davor und danach gelaufen sind.
+
+    Jeder Schritt ist fuer sich atomar: bei Erfolg wird er sofort
+    festgeschrieben, beim Scheitern nur SEINE Arbeit zurueckgerollt. So kann
+    weder ein halb ausgefuehrter Schritt stehen bleiben noch ein
+    `ON CONFLICT ROLLBACK` bzw. ein erst beim COMMIT gepruefter
+    (DEFERRABLE) Fremdschluessel aus einer eingespielten Tabelle die
+    Arbeit der vorherigen Schritte mitreissen.
+
+    NICHT fuer die Anweisungen, die das Schema selbst aufbauen (CREATE
+    TABLE, ALTER TABLE ADD COLUMN): fehlt eine Kerntabelle, ist die
+    Anwendung auch dann nicht sinnvoll "gestartet", wenn der Prozess laeuft.
+    Solche Fehler bleiben laut.
+    """
+    try:
+        yield
+        conn.commit()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        log.warning("Start-Schritt '%s' fehlgeschlagen (%s: %s). Die Anwendung "
+                    "startet trotzdem, aber mit eingeschraenkter Garantie: %s",
+                    schritt, type(exc).__name__, exc, folge)
+
+
 def init_db():
     conn = get_db()
     conn.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -714,36 +760,54 @@ def init_db():
     # geloggte Wert wertlos.
     _bootstrap_admin_id = None
     if not user and _user_count == 0:
-        from werkzeug.security import generate_password_hash
-        import os as _os
-        # Passwort aus ENV oder sicheres Zufalls-Passwort generieren
-        _init_pwd = _os.environ.get('ADMIN_PASSWORD', '')
-        if not _init_pwd:
-            import secrets as _s
-            _init_pwd = _s.token_urlsafe(12)
-            import logging as _lg
-            _lg.getLogger(__name__).warning(
-                "ACHTUNG: Kein ADMIN_PASSWORD gesetzt. Einmal-Passwort für den "
-                "Benutzer 'admin': %s — es MUSS beim ersten Login geändert werden, "
-                "die App erzwingt das. Achtung: dieses Passwort steht jetzt im "
-                "Klartext im Log (z.B. im Docker-Log). Das Log ist damit "
-                "vertraulich zu behandeln und nach dem ersten Login zu löschen "
-                "bzw. zu rotieren.", _init_pwd
-            )
-        default_hash = generate_password_hash(_init_pwd)
-        _cur = conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
-                            ('admin', default_hash))
-        _bootstrap_admin_id = _cur.lastrowid
+        # Bootstrap, keine Schemadefinition - darf den Start nicht verhindern
+        # (Regel: siehe _startschritt). Scheitert das INSERT an einer
+        # eingespielten users-Tabelle, startet die Anwendung ohne Konto, statt
+        # gar nicht; das Protokoll sagt, warum.
+        with _startschritt(conn, 'Bootstrap-Admin anlegen',
+                           "es wurde kein Benutzer 'admin' angelegt, eine "
+                           "Anmeldung ist erst nach Reparatur der users-Tabelle "
+                           "moeglich"):
+            from werkzeug.security import generate_password_hash
+            import os as _os
+            # Passwort aus ENV oder sicheres Zufalls-Passwort generieren
+            _init_pwd = _os.environ.get('ADMIN_PASSWORD', '')
+            if not _init_pwd:
+                import secrets as _s
+                _init_pwd = _s.token_urlsafe(12)
+                import logging as _lg
+                _lg.getLogger(__name__).warning(
+                    "ACHTUNG: Kein ADMIN_PASSWORD gesetzt. Einmal-Passwort für den "
+                    "Benutzer 'admin': %s — es MUSS beim ersten Login geändert werden, "
+                    "die App erzwingt das. Achtung: dieses Passwort steht jetzt im "
+                    "Klartext im Log (z.B. im Docker-Log). Das Log ist damit "
+                    "vertraulich zu behandeln und nach dem ersten Login zu löschen "
+                    "bzw. zu rotieren.", _init_pwd
+                )
+            default_hash = generate_password_hash(_init_pwd)
+            _cur = conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                                ('admin', default_hash))
+            _bootstrap_admin_id = _cur.lastrowid
     else:
-        # Prüfe ob noch das alte Default-Passwort 'admin' aktiv ist
-        from werkzeug.security import check_password_hash as _cph
-        _row = conn.execute("SELECT password_hash FROM users WHERE username = 'admin'").fetchone()
-        if _row and _cph(_row['password_hash'], 'admin'):
-            import logging as _lg
-            _lg.getLogger(__name__).warning(
-                "SICHERHEITSWARNUNG: Admin-Passwort ist noch 'admin'. "
-                "Bitte sofort unter Einstellungen → Passwort ändern!"
-            )
+        # Prüfe ob noch das alte Default-Passwort 'admin' aktiv ist.
+        #
+        # Reine Diagnose - und ein Schritt, der Werte aus einer eingespielten
+        # Datei verarbeitet (Regel: siehe _startschritt). check_password_hash
+        # wirft bei password_hash = NULL oder einer Zahl AttributeError und
+        # bei einem Text wie 'x$y$z' ValueError ("Invalid hash method").
+        # Letzteres ist ein nicht leerer Text und kommt damit auch an der
+        # Restore-Pruefung vorbei; nur dieser Rahmen haelt ihn auf.
+        with _startschritt(conn, "Pruefung auf das Standardpasswort 'admin'",
+                           "es wird nur nicht gewarnt, falls das Admin-Passwort "
+                           "noch 'admin' lautet"):
+            from werkzeug.security import check_password_hash as _cph
+            _row = conn.execute("SELECT password_hash FROM users WHERE username = 'admin'").fetchone()
+            if _row and _cph(_row['password_hash'], 'admin'):
+                import logging as _lg
+                _lg.getLogger(__name__).warning(
+                    "SICHERHEITSWARNUNG: Admin-Passwort ist noch 'admin'. "
+                    "Bitte sofort unter Einstellungen → Passwort ändern!"
+                )
 
     conn.execute("""CREATE TABLE IF NOT EXISTS persons (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
@@ -841,6 +905,23 @@ def init_db():
         except Exception as _exc:
             log.debug("Migration uebersprungen (vermutlich bereits vorhanden): %s (%s)", sql, _exc)
 
+    # ════════════════════════════════════════════════════════════════════
+    # Ab hier steht das Schema. Was folgt, ist Absicherung, Bootstrap und
+    # Nacharbeit - und fuer ALLES davon gilt eine einzige Regel:
+    #
+    #   Nichts in diesem Abschnitt darf den Start verhindern koennen.
+    #
+    # Jeder Schritt laeuft deshalb in _startschritt() (Begruendung dort).
+    # Frueher stand hier genau EIN try/except, um den Index idx_users_person;
+    # die Regel galt also fuer eine Anweisung, und die naechste Pruefrunde
+    # fand die naechste ungeschuetzte (_ensure_admin an einer eingespielten
+    # users-Tabelle mit `CHECK (role <> 'admin')`). Wer hier einen Schritt
+    # ergaenzt, setzt ihn in einen eigenen _startschritt() - nicht daneben.
+    #
+    # Der Schemastand wird vorher festgeschrieben: das Zurueckrollen eines
+    # gescheiterten Schritts soll nur dessen eigene Arbeit treffen.
+    conn.commit()
+
     # Sicherheit (Befund I8): Bootstrap-Passwort ist ein Einmalpasswort.
     # Der INSERT oben kann das Flag nicht selbst setzen - bei einer frischen
     # Datenbank existiert die Spalte `must_change_password` zu dem Zeitpunkt
@@ -848,50 +929,76 @@ def init_db():
     # Deshalb hier, direkt nach der Migration und nur fuer genau die Zeile,
     # die dieser Lauf angelegt hat.
     if _bootstrap_admin_id is not None:
-        conn.execute('UPDATE users SET must_change_password=1 WHERE id=?',
-                     (_bootstrap_admin_id,))
-        log.info("Bootstrap-Admin id=%s angelegt - Passwortwechsel beim ersten "
-                 "Login erzwungen.", _bootstrap_admin_id)
+        with _startschritt(conn, 'Einmalpasswort des Bootstrap-Admins markieren',
+                           'der erste Login erzwingt KEINEN Passwortwechsel, das '
+                           'geprotokollierte Initialpasswort bleibt gueltig - '
+                           'bitte sofort von Hand aendern'):
+            conn.execute('UPDATE users SET must_change_password=1 WHERE id=?',
+                         (_bootstrap_admin_id,))
+            log.info("Bootstrap-Admin id=%s angelegt - Passwortwechsel beim ersten "
+                     "Login erzwungen.", _bootstrap_admin_id)
 
     # 1:1-Verknuepfung Benutzer <-> Person; beide Seiten bleiben optional.
     #
-    # Der try/except ist NICHT kosmetisch: `CREATE INDEX IF NOT EXISTS` ist
-    # nur dann ein stilles Nichts, wenn unter dem Namen bereits ein INDEX
-    # liegt. Lag dort eine TABELLE (eine eingespielte Datei mit einer Tabelle
+    # Der Anlass fuer die Regel oben: `CREATE INDEX IF NOT EXISTS` ist nur
+    # dann ein stilles Nichts, wenn unter dem Namen bereits ein INDEX liegt.
+    # Lag dort eine TABELLE (eine eingespielte Datei mit einer Tabelle
     # `idx_users_person`), warf die Anweisung "there is already a table named
-    # idx_users_person" - mitten in init_db(), und init_db() laeuft in
-    # create_app(). Die Anwendung startete danach ueberhaupt nicht mehr, bei
-    # `restart: unless-stopped` eine endlose Neustartschleife. Nichts in
-    # init_db() darf den Start verhindern koennen; der fehlende Index kostet
-    # hoechstens die Eindeutigkeit der 1:1-Verknuepfung.
-    try:
+    # idx_users_person" - und die Anwendung startete nie wieder.
+    with _startschritt(conn, 'Index idx_users_person anlegen',
+                       'die Eindeutigkeit der 1:1-Verknuepfung Benutzer <-> '
+                       'Person wird nicht von der Datenbank erzwungen'):
         conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person'
                      ' ON users(person_id) WHERE person_id IS NOT NULL')
-    except Exception as _exc:
-        log.warning("Index idx_users_person konnte nicht angelegt werden (%s) - "
-                    "der Start laeuft trotzdem weiter.", _exc)
+
     # app_meta wird bewusst NICHT mit `CREATE TABLE IF NOT EXISTS` angelegt:
     # das haette die (moeglicherweise aus einer eingespielten Datei
     # stammende) vorhandene Tabelle samt ihrer Form stehen lassen.
     # _app_meta_sicherstellen() legt sie an bzw. baut sie neu auf.
-    _ensure_instanz_id(conn)
+    # _ensure_instanz_id() faengt sqlite3.Error schon selbst ab; der Rahmen
+    # (Regel oben) nimmt alles andere. Fehlt die Kennung danach, faellt der
+    # Restore zu (srv.restore_kein_eigener_nachweis) - nicht auf.
+    with _startschritt(conn, 'Instanzkennung sicherstellen (_ensure_instanz_id)',
+                       'ohne lesbare Instanzkennung wird jeder Restore abgelehnt'):
+        _ensure_instanz_id(conn)
 
-    _ensure_admin(conn)
-    _autolink_single_person(conn)
+    # Beide schreiben auf users - nach einem Restore eine Tabelle aus der
+    # hochgeladenen Datei, samt CHECK-Bedingungen und generierten Spalten.
+    # Regel: siehe oben. Getrennte Schritte, damit das Protokoll zeigt,
+    # welcher von beiden ausgefallen ist.
+    with _startschritt(conn, 'aktiven Admin sicherstellen (_ensure_admin)',
+                       'es gibt moeglicherweise keinen aktiven Admin; die '
+                       'Benutzerverwaltung ist dann nicht erreichbar'):
+        _ensure_admin(conn)
+    with _startschritt(conn, 'Benutzer und Person verknuepfen '
+                             '(_autolink_single_person)',
+                       'der einzige Benutzer ist keiner Person zugeordnet und '
+                       'muss von Hand verknuepft werden'):
+        _autolink_single_person(conn)
 
     # ── Performance: Indices für häufig gefilterte Spalten ──────────────────
-    for idx_sql in [
-        'CREATE INDEX IF NOT EXISTS idx_expenses_year_month ON expenses(year, month)',
-        'CREATE INDEX IF NOT EXISTS idx_expenses_person_id ON expenses(person_id)',
-        'CREATE INDEX IF NOT EXISTS idx_expenses_category_id ON expenses(category_id)',
-        'CREATE INDEX IF NOT EXISTS idx_income_year_month ON income(year, month)',
-        'CREATE INDEX IF NOT EXISTS idx_income_person_id ON income(person_id)',
-        'CREATE INDEX IF NOT EXISTS idx_month_status_ym ON month_status(year, month)',
-    ]:
-        try:
-            conn.execute(idx_sql)
-        except Exception:
-            pass
+    # Regel: siehe oben. Jeder Index einzeln, damit einer, der scheitert,
+    # die uebrigen nicht mitnimmt; der Rahmen faengt, was ausserhalb der
+    # einzelnen Anweisungen passiert (z.B. beim COMMIT).
+    with _startschritt(conn, 'Performance-Indizes anlegen',
+                       'Abfragen koennen langsamer sein, das Ergebnis ist '
+                       'dasselbe'):
+        for idx_sql in [
+            'CREATE INDEX IF NOT EXISTS idx_expenses_year_month ON expenses(year, month)',
+            'CREATE INDEX IF NOT EXISTS idx_expenses_person_id ON expenses(person_id)',
+            'CREATE INDEX IF NOT EXISTS idx_expenses_category_id ON expenses(category_id)',
+            'CREATE INDEX IF NOT EXISTS idx_income_year_month ON income(year, month)',
+            'CREATE INDEX IF NOT EXISTS idx_income_person_id ON income(person_id)',
+            'CREATE INDEX IF NOT EXISTS idx_month_status_ym ON month_status(year, month)',
+        ]:
+            try:
+                conn.execute(idx_sql)
+            except Exception as _exc:
+                # Frueher ein stilles `pass`. `IF NOT EXISTS` wirft bei einem
+                # vorhandenen Index gar nicht erst - ein Fehler hier ist also
+                # immer ein echter und gehoert ins Protokoll.
+                log.warning("Performance-Index nicht angelegt (%s): %s - der "
+                            "Start laeuft weiter.", _exc, idx_sql)
 
     conn.commit(); conn.close()
     # init_db() darf innerhalb desselben App-Context mehrfach laufen (Idempotenz-
@@ -3200,9 +3307,16 @@ def _objekt_ist_eigenes(typ, name) -> bool:
     Bezeichner sind in SQLite nicht gross-/kleinschreibungsempfindlich:
     ein Index `APP_META` kollidiert mit der Tabelle `app_meta` genauso.
     Der Vergleich laeuft deshalb ueber die Kleinschreibung.
+
+    Bewusst OHNE .strip() - und genauso im app_meta-Wortlautvergleich in
+    _pruefe_sicherung(), damit beide Stellen denselben Namen meinen.
+    Leerzeichen sind in einem (gequoteten) SQLite-Bezeichner Teil des Namens:
+    `"users "` ist eine ANDERE Tabelle als `users`. Kein Objekt, das diese
+    Anwendung anlegt, hat Leerzeichen am Rand; mit .strip() liefe eine solche
+    fremde Tabelle als eigenes Objekt durch die Positivliste.
     """
-    typ_klein = str(typ or '').strip().lower()
-    name_klein = str(name or '').strip().lower()
+    typ_klein = str(typ or '').lower()
+    name_klein = str(name or '').lower()
     if typ_klein == 'table':
         return name_klein in _EIGENE_TABELLEN or name_klein in _SQLITE_EIGENE_TABELLEN
     if typ_klein == 'index':
@@ -3240,6 +3354,58 @@ _PFLICHT_TABELLEN = {
     'recurring_expenses': {'id', 'description', 'amount'},
     'category_splits':    {'category_id', 'person_id', 'share'},
 }
+
+
+# ── Zweiter Riegel vor init_db() (vierte Nachpruefung) ──────────────────────
+#
+# Die beiden folgenden Pruefungen weisen Formen ab, die eine echte Sicherung
+# nie haben kann, an denen init_db() nach dem Tausch aber gescheitert ist.
+# Sie sind ausdruecklich NICHT die Behebung: die steht in init_db()
+# (_startschritt), weil keine Liste an dieser Stelle je vollstaendig sein
+# kann - genau das haben vier Pruefrunden gezeigt. Beispiel: ein
+# password_hash 'x$y$z' ist ein nicht leerer Text, kommt hier also durch,
+# und laesst check_password_hash trotzdem mit ValueError scheitern.
+
+def _hat_ungueltige_passwort_hashes(con) -> bool:
+    """Wahr, wenn irgendeine users-Zeile keinen nicht leeren Text als Hash hat.
+
+    password_hash ist in jeder Fassung von init_db() `TEXT NOT NULL`, und
+    die Anwendung schreibt dort nur Ergebnisse von generate_password_hash().
+    NULL, eine Zahl, ein BLOB oder ein leerer Text koennen deshalb nur aus
+    einer gebastelten Datei stammen - und liessen check_password_hash in
+    init_db() (und bei jedem Login) mit AttributeError/TypeError scheitern.
+    """
+    zeile = con.execute(
+        "SELECT COUNT(*) FROM users "
+        "WHERE typeof(password_hash) <> 'text' OR length(password_hash) = 0"
+    ).fetchone()
+    return bool(zeile and zeile[0])
+
+
+def _generierte_spalten(con, tabellen) -> list:
+    """Liefert 'tabelle.spalte' fuer jede generierte (oder versteckte) Spalte.
+
+    PRAGMA table_xinfo meldet in der Spalte `hidden` 0 fuer eine gewoehnliche
+    Spalte, 2/3 fuer eine generierte (VIRTUAL/STORED) und 1 fuer eine
+    versteckte Spalte einer virtuellen Tabelle. init_db() legt nie etwas
+    anderes als 0 an. Eine generierte `is_active` oder `person_id` in users
+    liess die UPDATEs in _ensure_admin()/_autolink_single_person() mit
+    "cannot UPDATE generated column" scheitern.
+
+    Geprueft werden alle uebergebenen Tabellen, nicht nur die Pflichttabellen:
+    eine echte Sicherung hat nirgends eine generierte Spalte. Kennt die
+    SQLite-Fassung table_xinfo nicht, liefert das PRAGMA nichts - dann bleibt
+    es beim Rahmen in init_db().
+    """
+    gefunden = []
+    for tabelle in sorted(tabellen):
+        # Der Name stammt aus sqlite_master der Datei und hat die Positivliste
+        # bereits passiert (_objekt_ist_eigenes) - er ist also einer der
+        # eigenen, festen Tabellennamen.
+        for spalte in con.execute(f'PRAGMA table_xinfo("{tabelle}")'):
+            if spalte[6]:
+                gefunden.append(f'{tabelle}.{spalte[1]}')
+    return gefunden
 
 
 def _oeffne_sicherung(pfad: str):
@@ -3338,6 +3504,8 @@ def _pruefe_sicherung(pfad: str, admin_username: str,
         # dem verglichen, den diese Anwendung selbst schreibt. Fehlt app_meta
         # ganz, ist das der normale Fall einer alten Sicherung - dann greift
         # weiter unten der Zweig 'keine Instanzkennung'.
+        # Namensvergleich wie in _objekt_ist_eigenes(): Kleinschreibung, aber
+        # bewusst ohne .strip() (Begruendung dort).
         for zeile in objekte:
             if str(zeile[0] or '').lower() == 'table' \
                     and str(zeile[1] or '').lower() == 'app_meta' \
@@ -3358,6 +3526,13 @@ def _pruefe_sicherung(pfad: str, admin_username: str,
             raise _SicherungAbgelehnt('srv.restore_missing_tables',
                                       fehlend=', '.join(fehlend))
 
+        # Zweiter Riegel (siehe _generierte_spalten): nicht uebersteuerbar,
+        # denn eine echte Sicherung hat nie eine generierte Spalte.
+        generiert = _generierte_spalten(con, tabellen)
+        if generiert:
+            raise _SicherungAbgelehnt('srv.restore_generated_column',
+                                      spalten=', '.join(generiert[:5]))
+
         ergebnis = con.execute('PRAGMA integrity_check').fetchone()
         if not ergebnis or str(ergebnis[0]).lower() != 'ok':
             raise _SicherungAbgelehnt('srv.restore_integrity')
@@ -3365,6 +3540,11 @@ def _pruefe_sicherung(pfad: str, admin_username: str,
         anzahl = con.execute('SELECT COUNT(*) FROM users').fetchone()[0]
         if not anzahl:
             raise _SicherungAbgelehnt('srv.restore_no_users')
+
+        # Zweiter Riegel (siehe _hat_ungueltige_passwort_hashes): ebenfalls
+        # nicht uebersteuerbar - diese Form kann keine echte Sicherung haben.
+        if _hat_ungueltige_passwort_hashes(con):
+            raise _SicherungAbgelehnt('srv.restore_password_hash')
 
         # ── Herkunftsnachweis (Blocker 1) ────────────────────────────────
         # Die Instanzkennung steht in der Datenbank, also auch in jeder

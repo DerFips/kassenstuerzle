@@ -924,7 +924,7 @@ def test_fehlertext_verspricht_keinen_neustart_als_heilmittel():
 
 
 def test_echte_dateikopie_der_laufenden_datenbank_restauriert_ohne_bestaetigung(
-        app, auth_client, csrf, sauberes_backupverzeichnis):
+        app, auth_client, csrf, sauberes_backupverzeichnis, caplog):
     """Die Gegenprobe zur verschaerften Positivliste.
 
     Eine echte Sicherung ist keine nachgebaute Testdatei, sondern eine
@@ -950,11 +950,21 @@ def test_echte_dateikopie_der_laufenden_datenbank_restauriert_ohne_bestaetigung(
     assert any(t_ == 'index' and n.startswith('sqlite_autoindex_')
                for t_, n in objekte)
 
-    res = _hochladen(auth_client, csrf, kopie)   # bewusst ohne Bestaetigung
+    with caplog.at_level('WARNING', logger=m.log.name):
+        res = _hochladen(auth_client, csrf, kopie)   # bewusst ohne Bestaetigung
     assert res.status_code == 200, (
         'Eine echte Sicherung dieser Installation wurde abgelehnt: '
         + res.get_data(as_text=True))
     assert res.get_json() == {'success': True}
+    # Die Kehrseite von _startschritt(): der Rahmen darf nur bei einer
+    # feindlichen Datei anspringen. Meldet er bei der eigenen Sicherung einen
+    # ausgefallenen Schritt, laeuft die Anwendung im Normalbetrieb still mit
+    # eingeschraenkten Garantien - und niemand merkt es.
+    ausgefallen = [r.getMessage() for r in caplog.records
+                   if 'Start-Schritt' in r.getMessage()
+                   or 'Performance-Index nicht angelegt' in r.getMessage()]
+    assert ausgefallen == [], (
+        f'Bei einer echten Sicherung ist ein Start-Schritt ausgefallen: {ausgefallen}')
 
 
 def test_erlaubte_objekte_bleiben_mit_init_db_im_gleichlauf(tmp_path):
@@ -1240,3 +1250,319 @@ def test_echte_sicherung_wird_weiterhin_eingespielt(app, auth_client, csrf,
         backup_dir = Path(os.path.dirname(m.DB_PATH)) / 'backups'
         for f in backup_dir.glob('kassenstuerzle_*.db'):
             f.unlink()
+
+
+# ── Vierte Nachpruefung: die Regel "init_db() darf den Start nicht verhindern"
+#
+# Runde drei hatte genau die EINE Anweisung abgesichert, die sie gefunden hatte
+# (CREATE UNIQUE INDEX idx_users_person). Runde vier fand zwei weitere, beide
+# nach einem bestaetigten Altrestore erreichbar:
+#   * check_password_hash() auf einem password_hash = NULL / Zahl / 'x$y$z'
+#   * das UPDATE in _ensure_admin() an einer users-Tabelle mit
+#     CHECK (role <> 'admin') bzw. einer generierten Spalte
+# Beides liess create_app() fuer immer scheitern. Die Tests hier bewachen die
+# Einzelfaelle UND - entscheidend - die allgemeine Regel: ein Fehler, den sich
+# niemand ausgedacht hat, darf den Start genauso wenig verhindern.
+
+
+@pytest.fixture()
+def datenbank_zuruecksetzen(app, sauberes_backupverzeichnis, tmp_path):
+    """Stellt die Datenbank der Testsession nach dem Test Byte fuer Byte wieder her.
+
+    Diese Tests spielen WIRKLICH eine feindlich geformte users-Tabelle ein -
+    danach gibt es z.B. keinen Admin mehr. init_db() allein repariert das
+    nicht (genau das ist ja der Punkt), also wird der vorherige Stand ueber
+    die SQLite-Backup-Schnittstelle zurueckgeschrieben.
+    """
+    kopie = tmp_path / 'vorher.db'
+    quelle = _sqlite3.connect(m.DB_PATH)
+    ziel = _sqlite3.connect(str(kopie))
+    try:
+        quelle.backup(ziel)
+    finally:
+        ziel.close()
+        quelle.close()
+    yield
+    quelle = _sqlite3.connect(str(kopie))
+    ziel = _sqlite3.connect(m.DB_PATH)
+    try:
+        quelle.backup(ziel)
+    finally:
+        ziel.close()
+        quelle.close()
+    with app.app_context():
+        m.init_db()
+
+
+def _users_umbauen(pfad, users_sql, spalten, werte_sql):
+    """Ersetzt die users-Tabelle einer gebauten Sicherung durch `users_sql`.
+
+    `spalten`/`werte_sql` bestimmen, was aus der alten Tabelle uebernommen
+    wird - so bleibt z.B. der echte Passwort-Hash erhalten, waehrend die
+    Rolle auf 'member' gesetzt wird.
+    """
+    con = _sqlite3.connect(str(pfad))
+    try:
+        con.execute('ALTER TABLE users RENAME TO users_alt')
+        con.execute(users_sql)
+        con.execute(f'INSERT INTO users ({spalten}) SELECT {werte_sql} FROM users_alt')
+        con.execute('DROP TABLE users_alt')
+        con.commit()
+    finally:
+        con.close()
+
+
+def _startschritt_warnungen(caplog):
+    return [r.getMessage() for r in caplog.records
+            if r.levelname == 'WARNING' and 'Start-Schritt' in r.getMessage()]
+
+
+_USERS_FEINDLICH = """CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
+        person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL,
+        role TEXT NOT NULL DEFAULT 'member' {role_zusatz},
+        is_active INTEGER {is_active_art},
+        must_change_password INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT, last_login TEXT,
+        session_epoch INTEGER NOT NULL DEFAULT 0)"""
+
+
+@pytest.mark.parametrize('bezeichnung, users_sql, riegel_aus, person_dazu', [
+    # Der Fall aus dem Bericht: kommt ohne jede Hilfe durch das Tor. Keine
+    # Liste der Restore-Pruefung erkennt ihn - nur der Rahmen in init_db().
+    ('check_gegen_admin',
+     _USERS_FEINDLICH.format(role_zusatz="CHECK (role <> 'admin')",
+                             is_active_art='NOT NULL DEFAULT 1'),
+     False, False),
+    # Generierte Spalten: die Restore-Pruefung weist sie inzwischen ab (siehe
+    # test_restore_lehnt_generierte_spalte_ab). Hier wird dieser Riegel
+    # abgeschaltet, damit der Test den Rahmen in init_db() bewacht - so, als
+    # waere die Datei auf anderem Weg ins Volume gelangt.
+    ('generiertes_is_active',
+     _USERS_FEINDLICH.format(role_zusatz='',
+                             is_active_art='GENERATED ALWAYS AS (0) VIRTUAL'),
+     True, False),
+    # Dasselbe fuer _autolink_single_person: genau ein Benutzer, genau eine
+    # Person, person_id generiert -> 'cannot UPDATE generated column'.
+    ('generierte_person_id',
+     _USERS_FEINDLICH.replace(
+         'person_id INTEGER REFERENCES persons(id) ON DELETE SET NULL',
+         'person_id INTEGER GENERATED ALWAYS AS (NULL) VIRTUAL').format(
+             role_zusatz='', is_active_art='NOT NULL DEFAULT 1'),
+     True, True),
+])
+def test_create_app_startet_nach_restore_mit_users_die_ensure_admin_sprengt(
+        app, auth_client, csrf, sicherung_bauen, datenbank_zuruecksetzen,
+        monkeypatch, caplog, bezeichnung, users_sql, riegel_aus, person_dazu):
+    """Vierte Nachpruefung, Fundstelle 2: _ensure_admin/_autolink_single_person.
+
+    Eine "Altsicherung" ohne Instanzkennung, deren einziger Admin die Rolle
+    'member' traegt, und eine users-Tabelle, die das Befoerdern verbietet.
+    Der Admin bestaetigt den gewohnten Altsicherungs-Dialog - danach warf das
+    UPDATE in _ensure_admin() IntegrityError bzw. OperationalError, mitten in
+    init_db(). Der Restore endete mit 500 bei schon getauschter Datei, und
+    create_app() scheiterte ab da bei JEDEM Start.
+    """
+    from app import create_app
+
+    if riegel_aus:
+        monkeypatch.setattr(m, '_generierte_spalten', lambda con, tabellen: [])
+    kennung_vorher = m._eigene_instanz_id()
+    assert kennung_vorher
+
+    datei = sicherung_bauen(f'{bezeichnung}.db', instanz_id=None,
+                            benutzer=(('admin', 'test-password-123', 'member'),))
+    spalten = ('id, username, password_hash, role'
+               + ('' if 'is_active INTEGER GENERATED' in users_sql else ', is_active'))
+    werte = spalten.replace('role', "'member'")
+    _users_umbauen(datei, users_sql, spalten, werte)
+    if person_dazu:
+        con = _sqlite3.connect(str(datei))
+        con.execute("INSERT INTO persons (name) VALUES ('Einzige Person')")
+        con.commit()
+        con.close()
+
+    with caplog.at_level('WARNING', logger=m.log.name):
+        antwort = _hochladen(auth_client, csrf, datei, bestaetigt=True)
+    assert antwort.status_code == 200, antwort.get_data(as_text=True)
+
+    warnungen = _startschritt_warnungen(caplog)
+    erwarteter_schritt = ('_autolink_single_person' if person_dazu
+                          else '_ensure_admin')
+    assert any(erwarteter_schritt in w for w in warnungen), (
+        f'Keine Warnung, die den Schritt {erwarteter_schritt} benennt: {warnungen}')
+
+    zweite = create_app()      # darf nicht an der users-Tabelle sterben
+    assert zweite.test_client().get('/login').status_code == 200
+    assert m._eigene_instanz_id() == kennung_vorher, (
+        'Die Instanzkennung ist nach dem Restore weg oder rotiert')
+
+
+@pytest.mark.parametrize('wert', [None, 42, 'x$y$z'], ids=['null', 'zahl', 'text_ohne_verfahren'])
+def test_create_app_startet_nach_restore_mit_unbrauchbarem_passwort_hash(
+        app, auth_client, csrf, sicherung_bauen, datenbank_zuruecksetzen,
+        monkeypatch, caplog, wert):
+    """Vierte Nachpruefung, Fundstelle 1: check_password_hash in init_db().
+
+    werkzeug ruft darin `pwhash.split('$', 2)` auf. NULL oder eine Zahl
+    werfen AttributeError, ein Text wie 'x$y$z' ValueError ('Invalid hash
+    method') - beides frueher ungefangen, beides in create_app().
+
+    NULL und Zahl weist die Restore-Pruefung inzwischen ab (siehe
+    test_restore_lehnt_unbrauchbaren_passwort_hash_ab); dieser Riegel wird
+    hier abgeschaltet. 'x$y$z' dagegen ist ein nicht leerer Text und kommt
+    auch MIT Riegel durch - der Beleg dafuer, dass nur der Rahmen in
+    init_db() die Luecke wirklich schliesst.
+    """
+    from app import create_app
+
+    if not isinstance(wert, str):
+        monkeypatch.setattr(m, '_hat_ungueltige_passwort_hashes', lambda con: False)
+    kennung_vorher = m._eigene_instanz_id()
+    assert kennung_vorher
+
+    datei = sicherung_bauen('kaputter_hash.db', instanz_id=None)
+    _users_umbauen(datei, _USERS_FEINDLICH.replace(
+        'password_hash TEXT NOT NULL', 'password_hash').format(
+            role_zusatz='', is_active_art='NOT NULL DEFAULT 1'),
+        'id, username, password_hash, role, is_active',
+        'id, username, password_hash, role, is_active')
+    con = _sqlite3.connect(str(datei))
+    con.execute("UPDATE users SET password_hash=? WHERE username='admin'", (wert,))
+    con.commit()
+    con.close()
+
+    with caplog.at_level('WARNING', logger=m.log.name):
+        antwort = _hochladen(auth_client, csrf, datei, bestaetigt=True)
+    assert antwort.status_code == 200, antwort.get_data(as_text=True)
+    assert any('Standardpasswort' in w for w in _startschritt_warnungen(caplog)), (
+        'Keine Warnung, die die Standardpasswort-Pruefung als ausgefallen benennt')
+
+    zweite = create_app()      # darf nicht an check_password_hash sterben
+    assert zweite.test_client().get('/login').status_code == 200
+    assert m._eigene_instanz_id() == kennung_vorher
+
+
+@pytest.mark.parametrize('ziel', [
+    '_ensure_instanz_id', '_ensure_admin', '_autolink_single_person',
+    'check_password_hash',
+])
+def test_unvorhergesehener_fehler_in_einem_startschritt_verhindert_den_start_nicht(
+        app, monkeypatch, caplog, ziel):
+    """Der eigentliche Waechter ueber die STRUKTUR der Behebung.
+
+    Die beiden Tests darueber wuerden auch dann gruen, wenn jemand nur die
+    zwei bekannten Aufrufe einzeln in try/except setzt - genau das Muster,
+    das vier Pruefrunden hervorgebracht hat. Dieser hier wirft einen Fehler,
+    den sich niemand ausgedacht hat, und verlangt dreierlei:
+      1. create_app() startet trotzdem,
+      2. die Warnung benennt den ausgefallenen Schritt,
+      3. die UEBRIGEN Schritte laufen weiter (kein grosses try um alles, das
+         nach dem ersten Fehler still aufhoert).
+    """
+    import werkzeug.security
+    from app import create_app
+
+    kennung_vorher = m._eigene_instanz_id()
+    assert kennung_vorher
+
+    gelaufen = []
+
+    def mitschreiben(name, echt):
+        def _huelle(*args, **kwargs):
+            gelaufen.append(name)
+            return echt(*args, **kwargs)
+        return _huelle
+
+    def unvorhergesehen(*args, **kwargs):
+        raise RuntimeError('irgendwas Unvorhergesehenes')
+
+    beobachtet = ('_ensure_instanz_id', '_ensure_admin', '_autolink_single_person')
+    for name in beobachtet:
+        if name != ziel:
+            monkeypatch.setattr(m, name, mitschreiben(name, getattr(m, name)))
+    if ziel == 'check_password_hash':
+        # init_db() importiert die Funktion lokal aus werkzeug.security.
+        monkeypatch.setattr(werkzeug.security, 'check_password_hash', unvorhergesehen)
+    else:
+        monkeypatch.setattr(m, ziel, unvorhergesehen)
+
+    with caplog.at_level('WARNING', logger=m.log.name):
+        zweite = create_app()
+    assert zweite.test_client().get('/login').status_code == 200
+
+    warnungen = _startschritt_warnungen(caplog)
+    assert any('irgendwas Unvorhergesehenes' in w for w in warnungen), (
+        f'Der Fehler wurde nicht als ausgefallener Start-Schritt gemeldet: {warnungen}')
+    if ziel != 'check_password_hash':
+        assert any(ziel in w for w in warnungen), (
+            f'Die Warnung benennt den Schritt {ziel} nicht: {warnungen}')
+
+    uebrige = [n for n in beobachtet if n != ziel]
+    assert all(n in gelaufen for n in uebrige), (
+        f'Nach dem Ausfall von {ziel} liefen nicht mehr alle uebrigen Schritte: '
+        f'gelaufen={gelaufen}, erwartet={uebrige}')
+    assert m._eigene_instanz_id() == kennung_vorher
+
+
+@pytest.mark.parametrize('wert', [None, 42, ''], ids=['null', 'zahl', 'leer'])
+def test_restore_lehnt_unbrauchbaren_passwort_hash_ab(
+        auth_client, csrf, sicherung_bauen, kein_dateitausch, wert):
+    """Zweiter Riegel am Tor: password_hash ist in jeder Fassung von init_db()
+    `TEXT NOT NULL` und stammt immer aus generate_password_hash(). Eine Zeile
+    ohne nicht leeren Text kann keine echte Sicherung sein - und ist durch
+    keine Bestaetigung zu retten."""
+    datei = sicherung_bauen('hash.db', instanz_id=None)
+    _users_umbauen(datei, _USERS_FEINDLICH.replace(
+        'password_hash TEXT NOT NULL', 'password_hash').format(
+            role_zusatz='', is_active_art='NOT NULL DEFAULT 1'),
+        'id, username, password_hash, role, is_active',
+        'id, username, password_hash, role, is_active')
+    con = _sqlite3.connect(str(datei))
+    con.execute("INSERT INTO users (username, password_hash) VALUES ('zweiter', ?)",
+                (wert,))
+    con.commit()
+    con.close()
+
+    for bestaetigt in (False, True):
+        res = _hochladen(auth_client, csrf, datei, bestaetigt=bestaetigt)
+        assert res.status_code == 400, res.get_data(as_text=True)
+        assert res.get_json()['grund'] == 'srv.restore_password_hash'
+        assert res.get_json()['error'] == translate('de', 'srv.restore_password_hash')
+    assert kein_dateitausch == []
+
+
+def test_restore_lehnt_generierte_spalte_ab(auth_client, csrf, sicherung_bauen,
+                                           kein_dateitausch):
+    """Zweiter Riegel am Tor: init_db() legt nie eine generierte Spalte an."""
+    datei = sicherung_bauen('generiert.db', instanz_id=None)
+    _users_umbauen(datei, _USERS_FEINDLICH.format(
+        role_zusatz='', is_active_art='GENERATED ALWAYS AS (0) VIRTUAL'),
+        'id, username, password_hash, role', 'id, username, password_hash, role')
+
+    for bestaetigt in (False, True):
+        res = _hochladen(auth_client, csrf, datei, bestaetigt=bestaetigt)
+        assert res.status_code == 400, res.get_data(as_text=True)
+        assert res.get_json()['grund'] == 'srv.restore_generated_column'
+        assert 'users.is_active' in res.get_json()['error']
+    assert kein_dateitausch == []
+
+
+def test_neue_ablehnungsgruende_sind_uebersetzt():
+    for schluessel in ('srv.restore_password_hash', 'srv.restore_generated_column'):
+        de = translate('de', schluessel, spalten='x')
+        en = translate('en', schluessel, spalten='x')
+        assert de != schluessel and en != schluessel and de != en
+
+
+@pytest.mark.parametrize('typ, name', [
+    ('table', 'users '), ('table', ' app_meta'), ('index', 'idx_users_person '),
+])
+def test_positivliste_haelt_namen_mit_randleerzeichen_fuer_fremd(typ, name):
+    """Nit aus der vierten Nachpruefung: _objekt_ist_eigenes() normalisierte
+    mit .strip().lower(), der app_meta-Wortlautvergleich nur mit .lower().
+    `"users "` ist in SQLite eine ANDERE Tabelle als `users` - und lief mit
+    .strip() als eigenes Objekt durch die Positivliste."""
+    assert not m._objekt_ist_eigenes(typ, name)
+    assert m._objekt_ist_eigenes(typ, name.strip())
