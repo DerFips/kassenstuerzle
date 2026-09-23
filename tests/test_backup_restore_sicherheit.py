@@ -1699,3 +1699,49 @@ def test_init_db_ruft_keine_passwort_kdf_auf(app, tmp_path, monkeypatch):
         m.init_db()
     assert aufrufe == [], f'init_db() hat check_password_hash aufgerufen: {aufrufe}'
 
+
+def test_zwei_schutzkopien_derselben_sekunde_ueberschreiben_sich_nicht(
+        app, sauberes_backupverzeichnis, monkeypatch):
+    """Fuenfte Nachpruefung: der Zeitstempel war minutengenau. Zwei Restores
+    in derselben Minute schrieben 'pre-restore' unter demselben Namen - die
+    zweite Schutzkopie ueberschrieb die erste und damit den Rueckweg aus dem
+    ersten Restore.
+
+    Die Uhr wird angehalten, beide Aufrufe fallen also sogar in dieselbe
+    SEKUNDE - der schaerfere Fall. Zwischen den Aufrufen aendert sich der
+    Datenbestand, damit sich beide Kopien am Inhalt unterscheiden lassen."""
+    import datetime as _dt
+
+    class _FesteZeit(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 23, 12, 0, 0)
+
+    def personen(pfad):
+        con = _sqlite3.connect(str(pfad))
+        try:
+            return {r[0] for r in con.execute('SELECT name FROM persons')}
+        finally:
+            con.close()
+
+    conn = m._open_db(m.DB_PATH)
+    try:
+        with monkeypatch.context() as mp:
+            mp.setattr(_dt, 'datetime', _FesteZeit)
+            erste = m.create_backup('pre-restore', schutz=True)
+            conn.execute("INSERT INTO persons (name) VALUES ('VorDemRestore')")
+            conn.commit()
+            zweite = m.create_backup('pre-restore', schutz=True)
+    finally:
+        conn.execute("DELETE FROM persons WHERE name='VorDemRestore'")
+        conn.commit()
+        conn.close()
+
+    assert erste != zweite, f'Beide Schutzkopien heissen {erste.name}'
+    assert erste.exists() and zweite.exists()
+    assert 'VorDemRestore' not in personen(erste), (
+        'Die erste Schutzkopie wurde vom zweiten Aufruf ueberschrieben')
+    assert 'VorDemRestore' in personen(zweite)
+    assert m._ist_schutzkopie(erste.name) and m._ist_schutzkopie(zweite.name)
+    assert (erste.stat().st_mode & 0o777) == 0o600
+    assert (zweite.stat().st_mode & 0o777) == 0o600

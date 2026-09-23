@@ -3230,14 +3230,33 @@ def create_backup(label: str = "", schutz: bool = False) -> Path:
     erzeugen.
     """
     from datetime import datetime
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    # Fuenfte Nachpruefung: der Zeitstempel war nur minutengenau. Zwei
+    # Restores in derselben Minute schrieben beide 'pre-restore' unter
+    # DEMSELBEN Namen - die zweite Schutzkopie ueberschrieb die erste, und
+    # der Rueckweg aus dem ersten (vielleicht schon misslungenen) Restore war
+    # weg, bevor ihn jemand nutzen konnte. Jetzt sekundengenau, und fuer den
+    # Fall derselben Sekunde ein Zaehler. Der Name wird mit O_EXCL belegt:
+    # "existiert schon" entscheidet das Dateisystem atomar, auch bei zwei
+    # gleichzeitigen Anfragen. Der Zaehler steht VOR dem Label, damit
+    # _ist_schutzkopie() (prueft das Namensende) unveraendert greift.
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if not schutz:
         label = _entschaerfe_label(label)
     suffix = f"_{label}" if label else ""
     db_path = DB_PATH
     backup_dir = Path(os.path.dirname(db_path)) / 'backups'
     backup_dir.mkdir(exist_ok=True)
-    dest = backup_dir / f"kassenstuerzle_{ts}{suffix}.db"
+    for zaehler in range(1, 1000):
+        teil = ts if zaehler == 1 else f"{ts}-{zaehler}"
+        dest = backup_dir / f"kassenstuerzle_{teil}{suffix}.db"
+        try:
+            # Gleich mit 0600 anlegen (Befund I2), nicht erst nachtraeglich.
+            os.close(os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise FileExistsError(f"Kein freier Sicherungsname fuer {ts}{suffix}")
     src = _open_db(db_path)
     bak = sqlite3.connect(str(dest))
     if _SQLCIPHER_AVAILABLE and _DB_KEY:
@@ -3304,8 +3323,9 @@ def _rotiere(backup_dir: Path, schutzkopie: bool, limit: int) -> None:
     """Behaelt die juengsten `limit` Sicherungen der jeweiligen Art.
 
     Sortiert nach Aenderungszeit, nicht nach Dateiname: der Zeitstempel im
-    Namen ist minutengenau, mehrere Sicherungen derselben Minute liessen sich
-    ueber den Namen nicht in eine verlaessliche Reihenfolge bringen.
+    Namen ist nur sekundengenau (aeltere Dateien sogar nur minutengenau),
+    mehrere Sicherungen derselben Sekunde liessen sich ueber den Namen nicht
+    in eine verlaessliche Reihenfolge bringen.
     """
     vorhanden = [p for p in backup_dir.glob("kassenstuerzle_*.db")
                  if _ist_schutzkopie(p.name) == schutzkopie]

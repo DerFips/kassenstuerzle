@@ -136,9 +136,11 @@ def test_restore_einer_vor_phase_b_datenbank_bleibt_benutzbar(app, auth_client, 
 def _schreibe_backup_datei(backup_dir, name, mtime):
     """Legt eine Sicherungsdatei mit definierter Aenderungszeit an.
 
-    create_backup() taugt hier nicht zum Befuellen: der Zeitstempel im
-    Dateinamen ist minutengenau, zwei Sicherungen mit demselben Label
-    innerhalb einer Minute wuerden sich gegenseitig ueberschreiben.
+    create_backup() taugt hier nicht zum Befuellen: die Rotation sortiert
+    nach Aenderungszeit, und die laesst sich nur so gezielt setzen. (Frueher
+    kam hinzu, dass der Zeitstempel im Namen minutengenau war und sich
+    Sicherungen derselben Minute ueberschrieben - das ist behoben, siehe
+    test_zwei_schutzkopien_derselben_sekunde_ueberschreiben_sich_nicht.)
     """
     pfad = backup_dir / name
     pfad.write_bytes(b'nicht wirklich sqlite')
