@@ -2885,6 +2885,42 @@ def overview():
         person_totals_by_year=daten['person_totals_by_year'])
 
 
+@main_bp.route('/profile')
+@login_required
+def profile():
+    conn = get_db()
+    person_id = g.current_user['person_id']
+    if person_id is None:
+        conn.close()
+        return render_template('profile.html', active='profile', unlinked=True)
+
+    person = conn.execute('SELECT * FROM persons WHERE id=?', (person_id,)).fetchone()
+    if person is None:
+        # Verknuepfte Person existiert nicht mehr (ON DELETE SET NULL sollte
+        # das eigentlich verhindern) - Schutz gegen einen inkonsistenten
+        # Zwischenstand statt eines 500ers.
+        conn.close()
+        return render_template('profile.html', active='profile', unlinked=True)
+
+    daten = _overview_daten(conn)
+    pn = person['name']
+
+    eigene_kategorien = daten['structured'].get(pn, {})
+    eigene_jahre = daten['person_totals_by_year'].get(pn, {})
+    eigene_totale = daten['person_totals'].get(pn, {'inc': 0, 'exp': 0, 'savings': 0})
+    eigenes_chart_json = {
+        'months': daten['overview_chart_json']['months'],
+        'categories': daten['overview_chart_json']['categories'],
+        'category_by_month': eigene_kategorien,
+    }
+    conn.close()
+
+    return render_template('profile.html', active='profile', unlinked=False,
+        person=person, person_name=pn, month_names=MONTH_NAMES,
+        person_totals=eigene_totale, person_totals_by_year=eigene_jahre,
+        profile_chart_json=eigenes_chart_json)
+
+
 # ── PDF Kontoauszug Import ─────────────────────────────────────────────────────
 
 def parse_german_amount(s):

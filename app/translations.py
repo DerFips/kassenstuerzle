@@ -23,8 +23,19 @@ TRANSLATIONS = {
         'nav.settings': 'Einstellungen',
         'nav.search_placeholder': 'Suchen…',
         'nav.logout': 'Abmelden',
+        'nav.profile': 'Mein Profil',
         'pwa.install_title': 'App installieren?',
         'pwa.install_btn': 'Installieren',
+
+        # ── Profil ───────────────────────────────────────────────────────
+        'profile.title': 'Mein Profil',
+        'profile.unlinked_hint': 'Dein Konto ist noch keiner Person zugeordnet. Bitte wende dich an einen Administrator.',
+        'profile.stat_income': 'Einnahmen gesamt',
+        'profile.stat_expense': 'Ausgaben gesamt',
+        'profile.stat_savings': 'Ersparnis',
+        'profile.categories_title': 'Meine Kategorien',
+        'profile.years_title': 'Nach Jahr',
+        'profile.wallet_title': 'Meine Geldbörse',
 
         # ── Login ────────────────────────────────────────────────────────
         'login.subtitle': 'Bitte melde dich an',
@@ -488,8 +499,19 @@ TRANSLATIONS = {
         'nav.settings': 'Settings',
         'nav.search_placeholder': 'Search…',
         'nav.logout': 'Log out',
+        'nav.profile': 'My Profile',
         'pwa.install_title': 'Install app?',
         'pwa.install_btn': 'Install',
+
+        # ── Profile ──────────────────────────────────────────────────────
+        'profile.title': 'My Profile',
+        'profile.unlinked_hint': 'Your account is not yet linked to a person. Please contact an administrator.',
+        'profile.stat_income': 'Total income',
+        'profile.stat_expense': 'Total expenses',
+        'profile.stat_savings': 'Savings',
+        'profile.categories_title': 'My Categories',
+        'profile.years_title': 'By Year',
+        'profile.wallet_title': 'My Wallet',
 
         # ── Login ────────────────────────────────────────────────────────
         'login.subtitle': 'Please sign in',
