@@ -367,6 +367,7 @@
 const YEAR  = {{ year }};
 const MONTH = {{ month }};
 const PERSONS  = {{ persons | tojson }};
+const CURRENT_USER_PERSON_NAME = {{ current_user_person_name | tojson }};
 const CATS     = {{ categories | tojson }};
 const EXISTING = {{ expenses | tojson }};
 let isSettled            = {{ 'true' if is_settled else 'false' }};
@@ -662,7 +663,7 @@ function addRow(day='', desc='', pid='', cid='', amt='', isCash=false, pfpid='',
   tr.innerHTML = `
     <td><input type="number" class="form-control form-control-sm text-center" name="day" value="${escHtml(day ?? '')}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
     <td><input type="text" class="form-control form-control-sm" name="description" value="${escHtml(desc ?? '')}" placeholder="${t('month.description_placeholder')}"></td>
-    <td><select class="form-select form-select-sm" name="person_id"></select></td>
+    <td class="wer-zelle text-nowrap"></td>
     <td><select class="form-select form-select-sm" name="paid_for_person_id"></select></td>
     <td><select class="form-select form-select-sm cat-select" name="category_id"></select></td>
     <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="" placeholder="${t('month.amount_placeholder')}"></td>
@@ -673,7 +674,11 @@ function addRow(day='', desc='', pid='', cid='', amt='', isCash=false, pfpid='',
       <div class="receipt-preview" style="display:none"></div>
     </td>
     <td><button type="button" class="btn btn-sm btn-outline-danger px-2 js-row-remove"><i class="fas fa-times"></i></button></td>`;
-  fillPersonSelect(tr.querySelector('[name=person_id]'), pid);
+  // "Wer" ist serverseitig gesperrt (Task 3): nur noch Anzeige, keine Auswahl.
+  // Bestehende Zeile -> ihre gespeicherte Person; neue Zeile -> die eigene.
+  tr.dataset.personId = pid || '';
+  tr.querySelector('td.wer-zelle').textContent =
+    pid ? (PERSONS.find(p => String(p.id) === String(pid))?.name || '') : (CURRENT_USER_PERSON_NAME || '');
   fillPersonSelect(tr.querySelector('[name=paid_for_person_id]'), pfpid);
   fillCatSelect(tr.querySelector('[name=category_id]'), cid);
   document.getElementById('expenseBody').appendChild(tr);
@@ -705,11 +710,15 @@ function addIncomeRow(day='', desc='', pid='', cid='', amt='', focusRow=true, ro
   tr.innerHTML = `
     <td><input type="number" class="form-control form-control-sm text-center" name="inc_day" value="${escHtml(day ?? '')}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
     <td><input type="text" class="form-control form-control-sm" name="inc_desc" value="${escHtml(desc ?? '')}" placeholder="${t('month.income_desc_placeholder')}"></td>
-    <td><select class="form-select form-select-sm" name="inc_pid"></select></td>
+    <td class="wer-zelle text-nowrap"></td>
     <td><select class="form-select form-select-sm" name="inc_cid"></select></td>
     <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="" placeholder="${t('month.amount_placeholder')}"></td>
     <td><button type="button" class="btn btn-sm btn-outline-danger px-2 js-row-remove"><i class="fas fa-times"></i></button></td>`;
-  fillPersonSelect(tr.querySelector('[name=inc_pid]'), pid);
+  // "Wer" ist serverseitig gesperrt (Task 3): nur noch Anzeige, keine Auswahl.
+  // Bestehende Zeile -> ihre gespeicherte Person; neue Zeile -> die eigene.
+  tr.dataset.personId = pid || '';
+  tr.querySelector('td.wer-zelle').textContent =
+    pid ? (PERSONS.find(p => String(p.id) === String(pid))?.name || '') : (CURRENT_USER_PERSON_NAME || '');
   fillCatSelect(tr.querySelector('[name=inc_cid]'), cid);
   document.getElementById('incomeBody').appendChild(tr);
 
@@ -796,7 +805,7 @@ function collectRows() {
     ...rowIdentity(r),
     day: r.querySelector('[name=day]').value,
     description: r.querySelector('[name=description]').value,
-    person_id: r.querySelector('[name=person_id]').value,
+    person_id: r.dataset.personId || '',
     paid_for_person_id: r.querySelector('[name=paid_for_person_id]').value || '',
     category_id: r.querySelector('[name=category_id]').value,
     amount: parseAmtVal(r.querySelector('[name=amount]')),
@@ -810,7 +819,7 @@ function getIncomeRows() {
     ...rowIdentity(r),
     day: r.querySelector('[name=inc_day]').value,
     description: r.querySelector('[name=inc_desc]').value,
-    person_id: r.querySelector('[name=inc_pid]').value,
+    person_id: r.dataset.personId || '',
     category_id: r.querySelector('[name=inc_cid]').value,
     amount: parseAmtVal(r.querySelector('[name=amount]'))
   }));
@@ -823,7 +832,7 @@ function sortTable() {
     rowId: tr.dataset.rowId || null,
     day: parseInt(tr.querySelector('[name=day]').value) || 0,
     description: tr.querySelector('[name=description]').value,
-    person_id: tr.querySelector('[name=person_id]').value,
+    person_id: tr.dataset.personId || '',
     paid_for_person_id: tr.querySelector('[name=paid_for_person_id]').value || '',
     category_id: tr.querySelector('[name=category_id]').value,
     amount: tr.querySelector('[name=amount]').dataset.formula || tr.querySelector('[name=amount]').value,
@@ -997,7 +1006,7 @@ function applyExpenseFilter() {
   let visible = 0, total = 0;
   document.querySelectorAll('#expenseBody tr').forEach(tr => {
     total++;
-    const pid = tr.querySelector('[name=person_id]')?.value || '';
+    const pid = tr.dataset.personId || '';
     const cid = tr.querySelector('[name=category_id]')?.value || '';
     const show = (!pv || pid === pv) && (!cv || cid === cv);
     tr.style.display = show ? '' : 'none';
@@ -1018,7 +1027,7 @@ function applyIncomeFilter() {
   let visible = 0, total = 0;
   document.querySelectorAll('#incomeBody tr').forEach(tr => {
     total++;
-    const pid = tr.querySelector('[name=inc_pid]')?.value || '';
+    const pid = tr.dataset.personId || '';
     const show = !pv || pid === pv;
     tr.style.display = show ? '' : 'none';
     if (show) visible++;
@@ -1429,8 +1438,6 @@ function verdrahteAusgabenTabelle() {
   if (!body) return;
 
   body.addEventListener('change', e => {
-    const person = e.target.closest('select[name=person_id]');
-    if (person) { scheduleAutoSaveExpense(); return; }
     const bezahltFuer = e.target.closest('select[name=paid_for_person_id]');
     if (bezahltFuer) { updatePaidForStyle(bezahltFuer); scheduleAutoSaveExpense(); return; }
     const kategorie = e.target.closest('select.cat-select');
@@ -1469,8 +1476,7 @@ function verdrahteEinnahmenTabelle() {
   if (!body) return;
 
   body.addEventListener('change', e => {
-    if (e.target.closest('select[name=inc_pid]') ||
-        e.target.closest('select[name=inc_cid]')) scheduleAutoSaveIncome();
+    if (e.target.closest('select[name=inc_cid]')) scheduleAutoSaveIncome();
   });
 
   body.addEventListener('input', e => {

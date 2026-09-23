@@ -1912,6 +1912,11 @@ def month_view(year, month):
     if is_settled and ov_settlements:
         all_pnames = [p['name'] for p in persons]
         ov_p = apply_settlements_to_ov(ov_p, ov_settlements, all_pnames)
+    eigene_person_row = None
+    if g.current_user['person_id'] is not None:
+        eigene_person_row = conn.execute(
+            'SELECT name FROM persons WHERE id=?', (g.current_user['person_id'],)).fetchone()
+    current_user_person_name = eigene_person_row['name'] if eigene_person_row else None
     conn.close()
     pm = month-1 if month>1 else 12; py = year if month>1 else year-1
     nm = month+1 if month<12 else 1; ny = year if month<12 else year+1
@@ -1929,7 +1934,8 @@ def month_view(year, month):
         ov_settlements=ov_settlements, wallet=wallet, savings_pp=savings_pp,
         is_settled=is_settled, settled_at=settled_at,
         prev_year=py, prev_month=pm, next_year=ny, next_month=nm,
-        activity_scope=_scope, activity_version=activity_version)
+        activity_scope=_scope, activity_version=activity_version,
+        current_user_person_name=current_user_person_name)
 
 @main_bp.route('/api/expenses/save', methods=['POST'])
 @login_required
@@ -1983,7 +1989,6 @@ def save_expenses():
                              (rid, year, month))
             continue
 
-        pid     = int(e['person_id'])          if e.get('person_id')          else None
         cid     = int(e['category_id'])        if e.get('category_id')        else None
         pfpid   = int(e['paid_for_person_id']) if e.get('paid_for_person_id') else None
         is_cash = 1 if e.get('is_cash') else 0
@@ -2002,15 +2007,23 @@ def save_expenses():
             # (z.B. aus einem alten Tab), damit der Beleg von der Platte
             # verschwindet: rfn wird None, die Zeile zeigt auf nichts mehr,
             # und _verwaiste_belege_loeschen() raeumt die Datei weg.
+            #
+            # "Wer" ist nach dem Anlegen unveraenderbar (Nutzerentscheidung) -
+            # person_id fehlt hier deshalb bewusst in der SET-Klausel, ein
+            # vom Client mitgesendeter Wert wird vollstaendig ignoriert.
             _alter_beleg = _beleg_von(rid)
             if _alter_beleg and _alter_beleg != rfn and not _name_abgelehnt:
                 _belegkandidaten.add(_alter_beleg)
             conn.execute(
-                'UPDATE expenses SET day=?, description=?, person_id=?, category_id=?,'
+                'UPDATE expenses SET day=?, description=?, category_id=?,'
                 ' amount=?, is_cash=?, paid_for_person_id=?, receipt_filename=?'
                 ' WHERE id=? AND year=? AND month=?',
-                (day, desc, pid, cid, amt, is_cash, pfpid, rfn, rid, year, month))
+                (day, desc, cid, amt, is_cash, pfpid, rfn, rid, year, month))
         else:
+            # Neue Zeile: "Wer" kommt IMMER aus der Sitzung, nie vom Client -
+            # serverseitig erzwungen, nicht nur im Frontend entfernt (sonst
+            # liesse sich das per direktem API-Aufruf umgehen).
+            pid = g.current_user['person_id']
             cur = conn.execute(
                 'INSERT INTO expenses (year,month,day,description,person_id,category_id,'
                 'amount,is_cash,paid_for_person_id,receipt_filename) VALUES (?,?,?,?,?,?,?,?,?,?)',
@@ -2451,17 +2464,23 @@ def save_income():
                              (rid, year, month))
             continue
 
-        pid  = int(i['person_id'])   if i.get('person_id')   else None
         cid  = int(i['category_id']) if i.get('category_id') else None
         day  = int(i.get('day') or 1)
         desc = i.get('description', '')
 
         if rid is not None:
+            # "Wer" ist nach dem Anlegen unveraenderbar (Nutzerentscheidung) -
+            # person_id fehlt hier deshalb bewusst in der SET-Klausel, ein
+            # vom Client mitgesendeter Wert wird vollstaendig ignoriert.
             conn.execute(
-                'UPDATE income SET day=?, description=?, person_id=?, category_id=?, amount=?'
+                'UPDATE income SET day=?, description=?, category_id=?, amount=?'
                 ' WHERE id=? AND year=? AND month=?',
-                (day, desc, pid, cid, amt, rid, year, month))
+                (day, desc, cid, amt, rid, year, month))
         else:
+            # Neue Zeile: "Wer" kommt IMMER aus der Sitzung, nie vom Client -
+            # serverseitig erzwungen, nicht nur im Frontend entfernt (sonst
+            # liesse sich das per direktem API-Aufruf umgehen).
+            pid = g.current_user['person_id']
             cur = conn.execute(
                 'INSERT INTO income (year,month,day,description,person_id,category_id,amount)'
                 ' VALUES (?,?,?,?,?,?,?)',

@@ -114,3 +114,48 @@ def test_activity_version_increases(auth_client, csrf, db, person):
          'person_id': person, 'amount': 1.0}]).get_json()['activity_version']
     second = _save(auth_client, csrf, rows=[]).get_json()['activity_version']
     assert second == first + 1
+
+
+def test_neue_zeile_bekommt_immer_die_eigene_person(auth_client, csrf, db):
+    """Serverseitig erzwungen: ein Client kann person_id einer NEUEN Zeile
+    nicht selbst bestimmen, egal was er mitschickt."""
+    db.execute("INSERT INTO persons (name) VALUES ('Anna'), ('Ben')")
+    anna = db.execute("SELECT id FROM persons WHERE name='Anna'").fetchone()['id']
+    ben = db.execute("SELECT id FROM persons WHERE name='Ben'").fetchone()['id']
+    db.execute("UPDATE users SET person_id=? WHERE username='admin'", (anna,))
+    db.commit()
+    try:
+        res = auth_client.post('/api/expenses/save', json={
+            'v': 2, 'year': 2026, 'month': 1,
+            'rows': [{'day': 1, 'description': 'Test', 'person_id': ben,
+                     'category_id': None, 'amount': 10}],
+            'deleted_ids': []
+        }, headers={'X-CSRF-Token': csrf})
+        assert res.status_code == 200
+        row = db.execute("SELECT person_id FROM expenses WHERE description='Test'").fetchone()
+        assert row['person_id'] == anna, 'Client-gesendetes person_id wurde uebernommen statt ignoriert'
+    finally:
+        db.execute("UPDATE users SET person_id=NULL WHERE username='admin'")
+        db.commit()
+
+
+def test_bestehende_zeile_behaelt_ihre_person_beim_update(auth_client, csrf, db):
+    """Serverseitig erzwungen: person_id einer BESTEHENDEN Zeile aendert
+    sich nie, auch wenn der Client versucht, sie umzuschreiben."""
+    db.execute("INSERT INTO persons (name) VALUES ('Anna'), ('Ben')")
+    anna = db.execute("SELECT id FROM persons WHERE name='Anna'").fetchone()['id']
+    ben = db.execute("SELECT id FROM persons WHERE name='Ben'").fetchone()['id']
+    cur = db.execute("INSERT INTO expenses (year,month,day,description,person_id,amount)"
+                     " VALUES (2026,1,1,'Alt',?,5)", (anna,))
+    db.commit()
+    rid = cur.lastrowid
+    res = auth_client.post('/api/expenses/save', json={
+        'v': 2, 'year': 2026, 'month': 1,
+        'rows': [{'id': rid, 'day': 1, 'description': 'Alt-geaendert',
+                 'person_id': ben, 'category_id': None, 'amount': 5}],
+        'deleted_ids': []
+    }, headers={'X-CSRF-Token': csrf})
+    assert res.status_code == 200
+    row = db.execute("SELECT person_id, description FROM expenses WHERE id=?", (rid,)).fetchone()
+    assert row['person_id'] == anna, 'person_id einer Bestandszeile wurde veraendert'
+    assert row['description'] == 'Alt-geaendert', 'andere Felder muessen weiterhin aenderbar bleiben'
