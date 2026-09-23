@@ -65,7 +65,7 @@
       <div class="input-group mb-3">
         <input type="file" class="form-control" id="receiptFile" accept="image/*" capture="environment">
       </div>
-      <button class="btn btn-primary w-100" id="receiptScanBtn" onclick="scanReceipt()">
+      <button class="btn btn-primary w-100" id="receiptScanBtn">
         <i class="bi bi-magic me-1"></i>{{ t('month.receipt_scan_btn') }}
       </button>
       <div id="receiptResult" class="mt-3" style="display:none;">
@@ -97,7 +97,7 @@
               <select class="form-select form-select-sm" id="receiptCat"></select>
             </div>
           </div>
-          <button class="btn btn-success w-100" id="receiptApplyBtn" onclick="applyReceiptScan()">
+          <button class="btn btn-success w-100" id="receiptApplyBtn">
             <i class="bi bi-check-lg me-1"></i>{{ t('month.receipt_apply_btn') }}
           </button>
         </div>
@@ -137,17 +137,17 @@
     <h5 class="mb-0"><i class="fas fa-table me-2 text-primary"></i>{{ t('month.expenses') }}</h5>
     <div class="d-flex flex-wrap gap-2">
       <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#receiptModal" title="{{ t('month.receipt_scan') }}"><i class="bi bi-camera me-1"></i><span class="d-none d-sm-inline">{{ t('month.receipt_scan') }}</span></button>
-      <button onclick="clearTable('expenseBody', true)" class="btn btn-sm btn-outline-danger" title="{{ t('month.clear_all_rows') }}"><i class="fas fa-xmark"></i></button>
-      <button onclick="insertRecurring()" class="btn btn-sm btn-outline-info" id="recurBtn" title="{{ t('month.recurring') }}"><i class="fas fa-rotate me-1"></i><span class="d-none d-sm-inline">{{ t('month.recurring') }}</span></button>
-      <button onclick="addRow()" class="btn btn-sm btn-outline-success" title="{{ t('month.row') }}"><i class="fas fa-plus me-1"></i><span class="d-none d-sm-inline">{{ t('month.row') }}</span></button>
-      <button onclick="saveExpenses()" class="btn btn-sm btn-primary" id="saveBtn" title="{{ t('month.save') }}"><i class="fas fa-save me-1"></i><span class="d-none d-sm-inline">{{ t('month.save') }}</span></button>
+      <button id="clearExpensesBtn" class="btn btn-sm btn-outline-danger" title="{{ t('month.clear_all_rows') }}"><i class="fas fa-xmark"></i></button>
+      <button class="btn btn-sm btn-outline-info" id="recurBtn" title="{{ t('month.recurring') }}"><i class="fas fa-rotate me-1"></i><span class="d-none d-sm-inline">{{ t('month.recurring') }}</span></button>
+      <button id="addExpenseRowBtn" class="btn btn-sm btn-outline-success" title="{{ t('month.row') }}"><i class="fas fa-plus me-1"></i><span class="d-none d-sm-inline">{{ t('month.row') }}</span></button>
+      <button class="btn btn-sm btn-primary" id="saveBtn" title="{{ t('month.save') }}"><i class="fas fa-save me-1"></i><span class="d-none d-sm-inline">{{ t('month.save') }}</span></button>
     </div>
   </div>
   <div class="px-3 py-2 border-bottom d-flex flex-wrap align-items-center gap-2" id="expFilterBar">
     <i class="fas fa-filter text-secondary small"></i>
-    <select id="filterPerson" class="form-select form-select-sm" style="width:auto;min-width:120px" onchange="applyExpenseFilter()"><option value="">{{ t('month.all_persons') }}</option></select>
-    <select id="filterCat" class="form-select form-select-sm" style="width:auto;min-width:140px" onchange="applyExpenseFilter()"><option value="">{{ t('month.all_categories') }}</option></select>
-    <button class="btn btn-sm btn-outline-secondary" onclick="resetExpenseFilter()"><i class="fas fa-xmark"></i></button>
+    <select id="filterPerson" class="form-select form-select-sm" style="width:auto;min-width:120px"><option value="">{{ t('month.all_persons') }}</option></select>
+    <select id="filterCat" class="form-select form-select-sm" style="width:auto;min-width:140px"><option value="">{{ t('month.all_categories') }}</option></select>
+    <button id="resetExpenseFilterBtn" class="btn btn-sm btn-outline-secondary"><i class="fas fa-xmark"></i></button>
     <span id="filterInfo" class="text-muted ms-1" style="font-size:.78rem"></span>
   </div>
   <div class="table-responsive">
@@ -180,15 +180,15 @@
   <div class="card-header header-success d-flex flex-wrap justify-content-between align-items-center gap-2 py-3">
     <h5 class="mb-0"><i class="fas fa-circle-dollar-to-slot me-2 text-success"></i>{{ t('month.income') }}</h5>
     <div class="d-flex flex-wrap gap-2">
-      <button onclick="clearTable('incomeBody', false)" class="btn btn-sm btn-outline-danger" title="{{ t('month.clear_all_rows') }}"><i class="fas fa-xmark"></i></button>
-      <button onclick="addIncomeRow()" class="btn btn-sm btn-outline-success" title="{{ t('month.row') }}"><i class="fas fa-plus me-1"></i><span class="d-none d-sm-inline">{{ t('month.row') }}</span></button>
-      <button onclick="saveIncome()" class="btn btn-sm btn-success" id="saveIncomeBtn" title="{{ t('month.save') }}"><i class="fas fa-save me-1"></i><span class="d-none d-sm-inline">{{ t('month.save') }}</span></button>
+      <button id="clearIncomeBtn" class="btn btn-sm btn-outline-danger" title="{{ t('month.clear_all_rows') }}"><i class="fas fa-xmark"></i></button>
+      <button id="addIncomeRowBtn" class="btn btn-sm btn-outline-success" title="{{ t('month.row') }}"><i class="fas fa-plus me-1"></i><span class="d-none d-sm-inline">{{ t('month.row') }}</span></button>
+      <button class="btn btn-sm btn-success" id="saveIncomeBtn" title="{{ t('month.save') }}"><i class="fas fa-save me-1"></i><span class="d-none d-sm-inline">{{ t('month.save') }}</span></button>
     </div>
   </div>
   <div class="px-3 py-2 border-bottom d-flex flex-wrap align-items-center gap-2" id="incFilterBar">
     <i class="fas fa-filter text-secondary small"></i>
-    <select id="incFilterPerson" class="form-select form-select-sm" style="width:auto;min-width:120px" onchange="applyIncomeFilter()"><option value="">{{ t('month.all_persons') }}</option></select>
-    <button class="btn btn-sm btn-outline-secondary" onclick="resetIncomeFilter()"><i class="fas fa-xmark"></i></button>
+    <select id="incFilterPerson" class="form-select form-select-sm" style="width:auto;min-width:120px"><option value="">{{ t('month.all_persons') }}</option></select>
+    <button id="resetIncomeFilterBtn" class="btn btn-sm btn-outline-secondary"><i class="fas fa-xmark"></i></button>
     <span id="incFilterInfo" class="text-muted ms-1" style="font-size:.78rem"></span>
   </div>
   <div class="table-responsive">
@@ -213,7 +213,7 @@
       <div class="d-flex align-items-center gap-3 flex-wrap">
         <small class="text-success" id="settledAtInfo" style="{% if not is_settled %}display:none{% endif %}"><i class="fas fa-clock me-1"></i><span id="settledAtText">{{ t('month.settled_at_prefix', date=settled_at) if is_settled else '' }}</span></small>
         <div class="form-check form-switch mb-0 d-flex align-items-center gap-2">
-          <input class="form-check-input settle-check-input" type="checkbox" role="switch" id="settleCheck" {% if is_settled %}checked{% endif %} onchange="toggleSettle(this.checked)">
+          <input class="form-check-input settle-check-input" type="checkbox" role="switch" id="settleCheck" {% if is_settled %}checked{% endif %}>
           <label class="form-check-label settle-check-label fw-semibold" for="settleCheck" id="settleLabel" style="{% if is_settled %}color:#198754{% endif %}">
             <i class="fas {% if is_settled %}fa-check-circle text-success{% else %}fa-circle-dot text-warning{% endif %} me-1" id="settleLabelIcon"></i>{{ t('month.settle_checkbox') }}
           </label>
@@ -234,7 +234,7 @@
           {% for pn in ps %}{% if ov_p[pn].get(cn) %}{% set rh.v = true %}{% endif %}{% endfor %}
           {% if rh.v %}
           <tr>
-            <td><span class="badge rounded-pill me-1" style="background:{{ col }}">&#8203;</span>{{ cn }}{% if cn in ov_settlements %}<i class="fas fa-scale-balanced ms-1 text-warning" style="font-size:.7em"></i>{% endif %}</td>
+            <td><span class="badge rounded-pill me-1 cat-color-dot" style="background:{{ col }}">&#8203;</span>{{ cn }}{% if cn in ov_settlements %}<i class="fas fa-scale-balanced ms-1 text-warning" style="font-size:.7em"></i>{% endif %}</td>
             {% for pn in ps %}{% set cv = ov_p[pn].get(cn,0) %}{% set rt.v = rt.v+cv %}
               <td class="text-end">{% if cv > 0 %}{{ "%.2f"|format(cv)|replace(".",",") }} €{% elif cv < 0 %}<span class="text-success"><i class="fas fa-arrow-down me-1" style="font-size:.7em"></i>{{ "%.2f"|format(cv*-1)|replace(".",",") }} €</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
             {% endfor %}
@@ -341,7 +341,11 @@
         {% for txn in s.transactions %}
         <div class="d-flex align-items-center gap-2 bg-warning bg-opacity-10 border border-warning rounded px-3 py-2 flex-grow-1">
           <i class="fas fa-arrow-right text-warning"></i>
-          <span>{{ t('month.settlement_owes', payer='<strong>' + txn['from'] + '</strong>', payee='<strong>' + txn.to + '</strong>') | safe }}</span>
+          {# Namen einzeln und maskiert ausgeben. Frueher lief der ganze Satz
+             durch `| safe`, obwohl translate() die Platzhalter ungeschuetzt
+             einsetzt - ein Personenname mit Markup war damit ausfuehrbares
+             HTML beim blossen Oeffnen des Monats (K1). #}
+          <span><strong>{{ txn['from'] }}</strong> {{ t('month.settlement_owes_verb') }} <strong>{{ txn.to }}</strong></span>
           <span class="ms-auto fw-bold text-warning fs-5">{{ "%.2f"|format(txn.amount)|replace(".",",") }} €</span>
         </div>
         {% endfor %}
@@ -353,10 +357,10 @@
 
 {% endblock %}
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce() }}">
 /* ══════════════════════════════════════════════════════════════
    KASSENSTÜRZLE – month.html JavaScript
-   Alle Funktionen in EINEM einzigen <script>-Block.
+   Alle Funktionen in EINEM einzigen Skriptblock.
    ══════════════════════════════════════════════════════════════ */
 
 /* ── Jinja-Daten ──────────────────────────────────────────── */
@@ -626,16 +630,29 @@ function formulaShowErrorIfAny(input) {
   }
 }
 
-/* ── SELECT-OPTIONEN ──────────────────────────────────────── */
-function buildPersonOpts(sel) {
-  let s = '<option value="">—</option>';
-  PERSONS.forEach(x => { s += `<option value="${x.id}"${String(x.id) === String(sel) ? ' selected' : ''}>${x.name}</option>`; });
-  return s;
+/* ── SELECT-OPTIONEN ──────────────────────────────────────────
+ * Optionen werden ueber den DOM gebaut (new Option), nicht als HTML-String:
+ * Namen sind frei waehlbar, und innerHTML auf einem <select> fuehrt Markup
+ * in einem Namen tatsaechlich aus (K1). Muster wie in populateFilterSelects(). */
+function fillPersonSelect(sel, selected) {
+  if (!sel) return;
+  sel.innerHTML = '';
+  sel.appendChild(new Option('—', ''));
+  PERSONS.forEach(x => {
+    const o = new Option(x.name, x.id);
+    if (String(x.id) === String(selected)) o.selected = true;
+    sel.appendChild(o);
+  });
 }
-function buildCatOpts(sel) {
-  let s = '<option value="">—</option>';
-  CATS.forEach(x => { s += `<option value="${x.id}"${String(x.id) === String(sel) ? ' selected' : ''}>${x.name}${x.is_split ? ' ⚖️' : ''}</option>`; });
-  return s;
+function fillCatSelect(sel, selected) {
+  if (!sel) return;
+  sel.innerHTML = '';
+  sel.appendChild(new Option('—', ''));
+  CATS.forEach(x => {
+    const o = new Option(x.name + (x.is_split ? ' ⚖️' : ''), x.id);
+    if (String(x.id) === String(selected)) o.selected = true;
+    sel.appendChild(o);
+  });
 }
 
 /* ── ZEILEN HINZUFÜGEN ────────────────────────────────────── */
@@ -643,24 +660,27 @@ function addRow(day='', desc='', pid='', cid='', amt='', isCash=false, pfpid='',
   const tr = document.createElement('tr');
   if (rowId) tr.dataset.rowId = rowId;
   tr.innerHTML = `
-    <td><input type="number" class="form-control form-control-sm text-center" name="day" value="${day ?? ''}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
-    <td><input type="text" class="form-control form-control-sm" name="description" value="${(desc ?? '').replace(/"/g,'&quot;')}" placeholder="${t('month.description_placeholder')}"></td>
-    <td><select class="form-select form-select-sm" name="person_id" onchange="scheduleAutoSaveExpense()">${buildPersonOpts(pid)}</select></td>
-    <td><select class="form-select form-select-sm" name="paid_for_person_id" onchange="updatePaidForStyle(this); scheduleAutoSaveExpense()">${buildPersonOpts(pfpid)}</select></td>
-    <td><select class="form-select form-select-sm cat-select" name="category_id" onchange="updateRowColor(this); scheduleAutoSaveExpense()">${buildCatOpts(cid)}</select></td>
-    <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="" placeholder="${t('month.amount_placeholder')}"
-         onfocus="formulaFocus(this)" onblur="formulaBlur(this); updateFooter()" oninput="updateFooter()" onkeydown="handleAmountTab(event, this)"></td>
-    <td class="text-center align-middle"><div class="form-check d-flex justify-content-center mb-0"><input class="form-check-input cash-check" type="checkbox" name="is_cash" ${isCash ? 'checked' : ''} onchange="updateFooter(); scheduleAutoSaveExpense()"></div></td>
+    <td><input type="number" class="form-control form-control-sm text-center" name="day" value="${escHtml(day ?? '')}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
+    <td><input type="text" class="form-control form-control-sm" name="description" value="${escHtml(desc ?? '')}" placeholder="${t('month.description_placeholder')}"></td>
+    <td><select class="form-select form-select-sm" name="person_id"></select></td>
+    <td><select class="form-select form-select-sm" name="paid_for_person_id"></select></td>
+    <td><select class="form-select form-select-sm cat-select" name="category_id"></select></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="" placeholder="${t('month.amount_placeholder')}"></td>
+    <td class="text-center align-middle"><div class="form-check d-flex justify-content-center mb-0"><input class="form-check-input cash-check" type="checkbox" name="is_cash" ${isCash ? 'checked' : ''}></div></td>
     <td class="receipt-cell">
-      <button type="button" class="btn btn-sm btn-receipt px-2" title="${t('month.receipt_add')}" onclick="receiptClick(this)"><i class="bi bi-camera"></i></button>
+      <button type="button" class="btn btn-sm btn-receipt px-2" title="${t('month.receipt_add')}"><i class="bi bi-camera"></i></button>
       <input type="hidden" name="receipt_filename" value="">
       <div class="receipt-preview" style="display:none"></div>
     </td>
-    <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="removeExpenseRow(this)"><i class="fas fa-times"></i></button></td>`;
+    <td><button type="button" class="btn btn-sm btn-outline-danger px-2 js-row-remove"><i class="fas fa-times"></i></button></td>`;
+  fillPersonSelect(tr.querySelector('[name=person_id]'), pid);
+  fillPersonSelect(tr.querySelector('[name=paid_for_person_id]'), pfpid);
+  fillCatSelect(tr.querySelector('[name=category_id]'), cid);
   document.getElementById('expenseBody').appendChild(tr);
 
   // Betrag korrekt setzen (Formel oder Zahl)
   const amtInput = tr.querySelector('[name=amount]');
+  verdrahteBetragsfeld(amtInput);
   const amtStr = String(amt ?? '').trim();
   if (amtStr.startsWith('=')) {
     amtInput.dataset.formula = amtStr;
@@ -683,16 +703,18 @@ function addIncomeRow(day='', desc='', pid='', cid='', amt='', focusRow=true, ro
   const tr = document.createElement('tr');
   if (rowId) tr.dataset.rowId = rowId;
   tr.innerHTML = `
-    <td><input type="number" class="form-control form-control-sm text-center" name="inc_day" value="${day ?? ''}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
-    <td><input type="text" class="form-control form-control-sm" name="inc_desc" value="${(desc ?? '').replace(/"/g,'&quot;')}" placeholder="${t('month.income_desc_placeholder')}"></td>
-    <td><select class="form-select form-select-sm" name="inc_pid" onchange="scheduleAutoSaveIncome()">${buildPersonOpts(pid)}</select></td>
-    <td><select class="form-select form-select-sm" name="inc_cid" onchange="scheduleAutoSaveIncome()">${buildCatOpts(cid)}</select></td>
-    <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="" placeholder="${t('month.amount_placeholder')}"
-         onfocus="formulaFocus(this)" onblur="formulaBlur(this); updateFooter()" oninput="updateIncomeFooter()" onkeydown="handleAmountTab(event, this)"></td>
-    <td><button type="button" class="btn btn-sm btn-outline-danger px-2" onclick="removeIncomeRow(this)"><i class="fas fa-times"></i></button></td>`;
+    <td><input type="number" class="form-control form-control-sm text-center" name="inc_day" value="${escHtml(day ?? '')}" min="1" max="31" placeholder="${t('month.day_placeholder')}"></td>
+    <td><input type="text" class="form-control form-control-sm" name="inc_desc" value="${escHtml(desc ?? '')}" placeholder="${t('month.income_desc_placeholder')}"></td>
+    <td><select class="form-select form-select-sm" name="inc_pid"></select></td>
+    <td><select class="form-select form-select-sm" name="inc_cid"></select></td>
+    <td><input type="text" inputmode="decimal" class="form-control form-control-sm text-end formula-amount" name="amount" value="" placeholder="${t('month.amount_placeholder')}"></td>
+    <td><button type="button" class="btn btn-sm btn-outline-danger px-2 js-row-remove"><i class="fas fa-times"></i></button></td>`;
+  fillPersonSelect(tr.querySelector('[name=inc_pid]'), pid);
+  fillCatSelect(tr.querySelector('[name=inc_cid]'), cid);
   document.getElementById('incomeBody').appendChild(tr);
 
   const amtInput = tr.querySelector('[name=amount]');
+  verdrahteBetragsfeld(amtInput);
   const amtStr = String(amt ?? '').trim();
   if (amtStr.startsWith('=')) {
     amtInput.dataset.formula = amtStr;
@@ -736,7 +758,7 @@ function updateRowColor(sel) {
   const tr = sel?.closest('tr');
   if (!tr) return;
   const cat = CATS.find(c => String(c.id) === String(sel.value));
-  tr.style.borderLeft = cat ? `4px solid ${cat.color}` : '4px solid transparent';
+  tr.style.borderLeft = cat ? `4px solid ${safeColor(cat.color)}` : '4px solid transparent';
 }
 
 /* ── FOOTER-SUMMEN ────────────────────────────────────────── */
@@ -1035,7 +1057,7 @@ function renderSavings(spp) {
   const body = document.getElementById('savingsPerPersonBody');
   if (!body) return;
   if (!spp || !spp.length) { body.innerHTML = `<div class="text-center text-muted py-4"><i class="fas fa-piggy-bank fa-2x mb-2 d-block"></i>${t('month.no_data_short')}</div>`; return; }
-  const rows = spp.map(r => `<tr><td class="fw-semibold">${r.name}</td><td class="text-end text-success">+${fmt(r.income)} €</td><td class="text-end text-danger">${fmt(r.expenses)} €</td><td class="text-end fw-bold ${r.savings >= 0 ? 'text-success' : 'text-danger'}">${r.savings >= 0 ? '+' : ''}${fmt(r.savings)} €</td></tr>`).join('');
+  const rows = spp.map(r => `<tr><td class="fw-semibold">${escHtml(r.name)}</td><td class="text-end text-success">+${fmt(r.income)} €</td><td class="text-end text-danger">${fmt(r.expenses)} €</td><td class="text-end fw-bold ${r.savings >= 0 ? 'text-success' : 'text-danger'}">${r.savings >= 0 ? '+' : ''}${fmt(r.savings)} €</td></tr>`).join('');
   body.innerHTML = `<div class="table-responsive"><table class="table table-sm table-hover mb-0"><thead class="table-secondary"><tr><th>${t('month.person')}</th><th class="text-end text-success">${t('month.income')}</th><th class="text-end text-danger">${t('month.expenses')}</th><th class="text-end">${t('month.savings_label')}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
@@ -1044,7 +1066,7 @@ function renderWallet(wallet) {
   if (!card) return;
   if (!wallet || !wallet.length) { card.innerHTML = `<p class="text-muted text-center py-4 mb-0"><i class="fas fa-info-circle me-1"></i>${t('month.wallet_empty')}</p>`; return; }
   let html = `<div class="table-responsive"><table class="table table-sm table-hover mb-0"><thead class="table-secondary"><tr><th>${t('month.person')}</th><th class="text-end">${t('month.wallet_start')}</th><th class="text-end text-danger">${t('month.wallet_cash_exp')}</th><th class="text-end">${t('month.wallet_end')}</th></tr></thead><tbody>`;
-  wallet.forEach(w => { html += `<tr><td><i class="fas fa-user me-2 text-muted"></i><strong>${w.name}</strong></td><td class="text-end">${fmt(w.start_balance)} €</td><td class="text-end text-danger">${w.cash_expenses > 0 ? '–' + fmt(w.cash_expenses) + ' €' : '<span class="text-muted">—</span>'}</td><td class="text-end fw-bold ${w.end_balance >= 0 ? 'text-success' : 'text-danger'}">${fmt(w.end_balance)} €</td></tr>`; });
+  wallet.forEach(w => { html += `<tr><td><i class="fas fa-user me-2 text-muted"></i><strong>${escHtml(w.name)}</strong></td><td class="text-end">${fmt(w.start_balance)} €</td><td class="text-end text-danger">${w.cash_expenses > 0 ? '–' + fmt(w.cash_expenses) + ' €' : '<span class="text-muted">—</span>'}</td><td class="text-end fw-bold ${w.end_balance >= 0 ? 'text-success' : 'text-danger'}">${fmt(w.end_balance)} €</td></tr>`; });
   html += `</tbody></table></div><div class="px-3 py-2 text-muted small border-top bg-light rounded-bottom"><i class="fas fa-info-circle me-1"></i>${t('month.wallet_hint')}</div>`;
   card.innerHTML = html;
 }
@@ -1056,7 +1078,7 @@ function renderSettlement(s) {
   if (s.is_settled) { card.innerHTML = `<div class="text-center py-4 px-3"><div class="text-success mb-2" style="font-size:2.5rem"><i class="fas fa-circle-check"></i></div><div class="fw-bold text-success fs-5 mb-1">${t('month.settlement_all_settled')}</div><div class="text-muted small">${t('month.settled_at_prefix', {date: s.settled_at || '–'})}</div></div>`; return; }
   if (!s.transactions || !s.transactions.length) { card.innerHTML = `<p class="text-success text-center py-4 mb-0"><i class="fas fa-check-circle me-1"></i>${t('month.settlement_all_balanced')}</p>`; return; }
   let html = '<div class="p-3 d-flex flex-wrap gap-2">';
-  s.transactions.forEach(txn => { html += `<div class="d-flex align-items-center gap-2 bg-warning bg-opacity-10 border border-warning rounded px-3 py-2 flex-grow-1"><i class="fas fa-arrow-right text-warning"></i><span>${t('month.settlement_owes', {payer: '<strong>' + txn.from + '</strong>', payee: '<strong>' + txn.to + '</strong>'})}</span><span class="ms-auto fw-bold text-warning fs-5">${fmt(txn.amount)} €</span></div>`; });
+  s.transactions.forEach(txn => { html += `<div class="d-flex align-items-center gap-2 bg-warning bg-opacity-10 border border-warning rounded px-3 py-2 flex-grow-1"><i class="fas fa-arrow-right text-warning"></i><span><strong>${escHtml(txn.from)}</strong> ${t('month.settlement_owes_verb')} <strong>${escHtml(txn.to)}</strong></span><span class="ms-auto fw-bold text-warning fs-5">${fmt(txn.amount)} €</span></div>`; });
   html += `</div><div class="px-3 pb-3 text-muted small"><i class="fas fa-circle-info me-1"></i>${t('month.settlement_details_hint_short')}</div>`;
   card.innerHTML = html;
 }
@@ -1080,12 +1102,16 @@ function renderOverview(ovp, ovc, ovs, settled) {
   }
 
   const thead = `<tr><th>${t('month.category')}</th>` +
-    ps.map(pn => `<th class="text-end">${pn}</th>`).join('') +
+    ps.map(pn => `<th class="text-end">${escHtml(pn)}</th>`).join('') +
     `<th class="text-end fw-bold">${t('month.total')}</th></tr>`;
 
   const grandByPerson = {}; ps.forEach(p => { grandByPerson[p] = 0; });
   let grandTotal = 0;
   let body = '';
+  // Farben werden NACH dem innerHTML gesetzt (siehe unten), nicht in ein
+  // style-Attribut interpoliert - sonst bricht eine Farbe mit
+  // Anfuehrungszeichen aus dem Attribut aus (K1).
+  const dotColors = [];
 
   (ovc || []).forEach(([cn, col]) => {
     const hasData = ps.some(pn => (ovp[pn] && ovp[pn][cn]) ? true : false);
@@ -1103,8 +1129,9 @@ function renderOverview(ovp, ovc, ovs, settled) {
     grandTotal += rowTotal;
 
     const isSplitCat = Object.prototype.hasOwnProperty.call(ovs, cn);
+    dotColors.push(col);
     body += `<tr>
-      <td><span class="badge rounded-pill me-1" style="background:${col}">&#8203;</span>${cn}${isSplitCat ? ' <i class="fas fa-scale-balanced ms-1 text-warning" style="font-size:.7em"></i>' : ''}</td>
+      <td><span class="badge rounded-pill me-1 cat-color-dot">&#8203;</span>${escHtml(cn)}${isSplitCat ? ' <i class="fas fa-scale-balanced ms-1 text-warning" style="font-size:.7em"></i>' : ''}</td>
       ${cells}
       <td class="text-end fw-bold">${fmt(rowTotal)} €</td>
     </tr>`;
@@ -1142,6 +1169,10 @@ function renderOverview(ovp, ovc, ovs, settled) {
       <tbody>${body}</tbody>
       <tfoot class="table-dark fw-bold"><tr><td>${t('month.total')}</td>${footCells}<td class="text-end">${fmt(grandTotal)} €</td></tr></tfoot>
     </table></div>${legend}`;
+  // Reihenfolge der Punkte entspricht der Reihenfolge von dotColors.
+  wrap.querySelectorAll('.cat-color-dot').forEach((el, i) => {
+    el.style.background = safeColor(dotColors[i]);
+  });
 }
 
 /* ── TOAST & AUTO-SAVE BADGE ──────────────────────────────── */
@@ -1149,7 +1180,10 @@ function showToast(msg, type='success') {
   const div = document.createElement('div');
   div.className = `toast align-items-center text-bg-${type} border-0 show position-fixed bottom-0 end-0 m-3`;
   div.style.zIndex = 2000;
-  div.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button type="button" class="btn-close btn-close-white me-2 m-auto" onclick="this.closest('.toast').remove()"></button></div>`;
+  div.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button type="button" class="btn-close btn-close-white me-2 m-auto"></button></div>`;
+  // Frueher ein onclick-Attribut mit this.closest('.toast').remove(): `this`
+  // war der Knopf, sein naechstes .toast ist genau dieses div (I6).
+  div.querySelector('.btn-close').addEventListener('click', () => div.remove());
   document.body.appendChild(div);
   setTimeout(() => div.remove(), 3000);
 }
@@ -1180,12 +1214,19 @@ function setReceiptOnRow(tr, filename) {
   btn.classList.add('has-receipt');
   btn.title = t('month.receipt_view_delete');
   if (preview) {
+    // Befund K1: der Dateiname ging roh in innerHTML - auch in die
+    // Attributpositionen src="..." und href="...". Ein Name, der ein
+    // Anfuehrungszeichen enthaelt, brach dort aus dem Attribut aus und
+    // konnte ein eigenes Ereignisattribut anhaengen. Zwei
+    // verschiedene Kontexte, also zwei verschiedene Kodierungen:
+    // escHtml fuer den Textinhalt, encodeURIComponent fuer den URL-Teil
+    // (das Ergebnis enthaelt danach weder " noch < oder >).
     const ext = (filename || '').split('.').pop().toLowerCase();
-    const url = `/api/receipt/${filename}`;
+    const url = `/api/receipt/${encodeURIComponent(filename || '')}`;
     preview.innerHTML = ext === 'pdf'
-      ? `<div class="receipt-pdf-icon"><i class="bi bi-file-earmark-pdf-fill"></i></div><div class="text-center text-muted" style="font-size:.75rem">${filename}</div>`
+      ? `<div class="receipt-pdf-icon"><i class="bi bi-file-earmark-pdf-fill"></i></div><div class="text-center text-muted" style="font-size:.75rem">${escHtml(filename || '')}</div>`
       : `<img src="${url}" alt="${t('month.receipt_add')}" loading="lazy">`;
-    preview.innerHTML += `<div class="receipt-actions"><a href="${url}" target="_blank" class="btn btn-sm btn-outline-secondary"><i class="bi bi-eye me-1"></i>${t('month.receipt_open')}</a><button class="btn btn-sm btn-outline-danger" onclick="deleteReceipt(this)"><i class="bi bi-trash me-1"></i>${t('month.receipt_delete')}</button></div>`;
+    preview.innerHTML += `<div class="receipt-actions"><a href="${url}" target="_blank" class="btn btn-sm btn-outline-secondary"><i class="bi bi-eye me-1"></i>${t('month.receipt_open')}</a><button class="btn btn-sm btn-outline-danger js-receipt-delete"><i class="bi bi-trash me-1"></i>${t('month.receipt_delete')}</button></div>`;
   }
 }
 function receiptClick(btn) {
@@ -1247,8 +1288,8 @@ async function scanReceipt() {
       document.getElementById('receiptDay').value = d.day || '';
       document.getElementById('receiptAmount').value = d.amount != null ? fmt(d.amount) : '';
       document.getElementById('receiptDesc').value = d.description || '';
-      document.getElementById('receiptPerson').innerHTML = buildPersonOpts('');
-      document.getElementById('receiptCat').innerHTML = buildCatOpts('');
+      fillPersonSelect(document.getElementById('receiptPerson'), '');
+      fillCatSelect(document.getElementById('receiptCat'), '');
       fieldsEl.style.display = 'block';
     }
   } catch (e) {
@@ -1347,8 +1388,140 @@ function handleAmountTab(e, input) {
   });
 }
 
+/* ── EREIGNISSE STATT on...=-ATTRIBUTEN (I6) ──────────────────
+ * Die CSP wird auf Nonces in script-src umgestellt. Sobald dort eine Nonce
+ * steht, ignoriert der Browser 'unsafe-inline' - und ein on...=-Attribut kann
+ * gar keine Nonce tragen. Jeder Handler haengt deshalb an addEventListener.
+ *
+ * Zwei Mechanismen, und die Wahl ist jeweils Absicht:
+ *
+ * a) DELEGATION am stabilen <tbody> fuer click, change, input und keydown.
+ *    Die Zeilen beider Tabellen entstehen erst zur Laufzeit (addRow /
+ *    addIncomeRow) und werden von sortTable()/clearTable() komplett neu
+ *    gebaut; ein Listener pro Zeile muesste bei jedem Neuaufbau erneut
+ *    gesetzt werden. Der <tbody> selbst ueberlebt jedes innerHTML='' - ein
+ *    einziger Listener, der sich nicht stapeln kann.
+ *
+ * b) DIREKT AM ELEMENT fuer focus und blur des Betragsfelds. Diese beiden
+ *    Ereignisse steigen nicht auf, per Delegation ginge nur focusin/focusout.
+ *    Das waere hier aber NICHT verhaltensgleich: am <tbody> haengt bereits ein
+ *    focusout-Listener fuer den Autosave, und die Reihenfolge von blur und
+ *    focusout untereinander legt der Browser fest, nicht die
+ *    Registrierreihenfolge. Bleibt blur ein blur, bleibt diese Reihenfolge
+ *    genau die alte. Gestapelt werden kann nichts: jedes <tr> wird frisch
+ *    erzeugt, der Listener haengt also genau einmal pro Eingabefeld.
+ */
+
+/** focus/blur des Betragsfelds - ersetzt onfocus/onblur aus der Zeilenvorlage. */
+function verdrahteBetragsfeld(input) {
+  if (!input) return;
+  input.addEventListener('focus', () => formulaFocus(input));
+  // updateFooter() bewusst auch in der Einnahmen-Tabelle: so stand es im alten
+  // onblur beider Zeilenvorlagen (die Einnahmen-Zeile rief bei "input"
+  // updateIncomeFooter(), bei "blur" aber updateFooter()). Eigenheit
+  // uebernommen - dieser Schritt aendert kein Verhalten.
+  input.addEventListener('blur', () => { formulaBlur(input); updateFooter(); });
+}
+
+/** Delegierte Handler der Ausgaben-Tabelle. */
+function verdrahteAusgabenTabelle() {
+  const body = document.getElementById('expenseBody');
+  if (!body) return;
+
+  body.addEventListener('change', e => {
+    const person = e.target.closest('select[name=person_id]');
+    if (person) { scheduleAutoSaveExpense(); return; }
+    const bezahltFuer = e.target.closest('select[name=paid_for_person_id]');
+    if (bezahltFuer) { updatePaidForStyle(bezahltFuer); scheduleAutoSaveExpense(); return; }
+    const kategorie = e.target.closest('select.cat-select');
+    if (kategorie) { updateRowColor(kategorie); scheduleAutoSaveExpense(); return; }
+    const bargeld = e.target.closest('input.cash-check');
+    if (bargeld) { updateFooter(); scheduleAutoSaveExpense(); }
+    // Kein Sammelfall: Tag-, Beschreibungs- und Betragsfeld feuern ebenfalls
+    // "change", hatten aber nie einen Handler. Ein Fallback wuerde die Tabelle
+    // haeufiger speichern als vorher.
+  });
+
+  body.addEventListener('input', e => {
+    if (e.target.closest('input.formula-amount')) updateFooter();
+  });
+
+  // preventDefault() wirkt auch aus der Bubble-Phase: die Standardaktion laeuft
+  // erst nach abgeschlossener Ausbreitung.
+  body.addEventListener('keydown', e => {
+    const betrag = e.target.closest('input.formula-amount');
+    if (betrag) handleAmountTab(e, betrag);
+  });
+
+  body.addEventListener('click', e => {
+    const belegKnopf = e.target.closest('button.btn-receipt');
+    if (belegKnopf) { receiptClick(belegKnopf); return; }
+    const belegLoeschen = e.target.closest('button.js-receipt-delete');
+    if (belegLoeschen) { deleteReceipt(belegLoeschen); return; }
+    const zeileLoeschen = e.target.closest('button.js-row-remove');
+    if (zeileLoeschen) removeExpenseRow(zeileLoeschen);
+  });
+}
+
+/** Delegierte Handler der Einnahmen-Tabelle. */
+function verdrahteEinnahmenTabelle() {
+  const body = document.getElementById('incomeBody');
+  if (!body) return;
+
+  body.addEventListener('change', e => {
+    if (e.target.closest('select[name=inc_pid]') ||
+        e.target.closest('select[name=inc_cid]')) scheduleAutoSaveIncome();
+  });
+
+  body.addEventListener('input', e => {
+    if (e.target.closest('input.formula-amount')) updateIncomeFooter();
+  });
+
+  body.addEventListener('keydown', e => {
+    const betrag = e.target.closest('input.formula-amount');
+    if (betrag) handleAmountTab(e, betrag);
+  });
+
+  body.addEventListener('click', e => {
+    const zeileLoeschen = e.target.closest('button.js-row-remove');
+    if (zeileLoeschen) removeIncomeRow(zeileLoeschen);
+  });
+}
+
+/** Servergerenderte Schalter, Filter und die Abrechnungs-Checkbox. */
+function verdrahteStatischeBedienelemente() {
+  const an = (id, ereignis, fn) => document.getElementById(id)?.addEventListener(ereignis, fn);
+  // Durchweg Pfeilfunktionen: wer die Funktion direkt uebergibt, reicht ihr
+  // das Event als erstes Argument - addRow(day) und saveExpenses(silent)
+  // wuerden damit still etwas anderes tun als vorher.
+  an('receiptScanBtn',        'click',  () => scanReceipt());
+  an('receiptApplyBtn',       'click',  () => applyReceiptScan());
+  an('clearExpensesBtn',      'click',  () => clearTable('expenseBody', true));
+  an('recurBtn',              'click',  () => insertRecurring());
+  an('addExpenseRowBtn',      'click',  () => addRow());
+  an('saveBtn',               'click',  () => saveExpenses());
+  an('filterPerson',          'change', () => applyExpenseFilter());
+  an('filterCat',             'change', () => applyExpenseFilter());
+  an('resetExpenseFilterBtn', 'click',  () => resetExpenseFilter());
+  an('clearIncomeBtn',        'click',  () => clearTable('incomeBody', false));
+  an('addIncomeRowBtn',       'click',  () => addIncomeRow());
+  an('saveIncomeBtn',         'click',  () => saveIncome());
+  an('incFilterPerson',       'change', () => applyIncomeFilter());
+  an('resetIncomeFilterBtn',  'click',  () => resetIncomeFilter());
+  const abrechnung = document.getElementById('settleCheck');
+  // Frueher toggleSettle(this.checked) - `this` war die Checkbox selbst.
+  if (abrechnung) abrechnung.addEventListener('change', () => toggleSettle(abrechnung.checked));
+}
+
 /* ── INITIALISIERUNG ──────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', function () {
+  // Zuerst verdrahten, dann Zeilen erzeugen: die delegierten Listener sollen
+  // vor dem focusout-Autosave weiter unten registriert sein, damit sie in
+  // derselben Reihenfolge laufen wie frueher die Attribut-Handler.
+  verdrahteStatischeBedienelemente();
+  verdrahteAusgabenTabelle();
+  verdrahteEinnahmenTabelle();
+
   populateFilterSelects();
   EXISTING.forEach(e => addRow(e.day, e.description, e.person_id, e.category_id, e.amount, !!e.is_cash, e.paid_for_person_id || '', e.receipt_filename || '', false, e.id));
   INCOME_INIT.forEach(i => addIncomeRow(i.day, i.description, i.person_id, i.category_id, i.amount, false, i.id));

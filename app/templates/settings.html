@@ -55,7 +55,7 @@
               <input type="text" class="form-control cat-name" value="{{ c.name }}" placeholder="{{ t('settings.category_name_placeholder') }}">
               <div class="input-group-text" title="{{ t('settings.split_category') }}">
                 <input class="form-check-input mt-0 cat-split" type="checkbox"
-                       {% if c.is_split %}checked{% endif %} onchange="toggleCatSplitPanel(this)"> &nbsp;Split
+                       {% if c.is_split %}checked{% endif %}> &nbsp;Split
               </div>
               <button class="btn btn-outline-danger remove-cat-btn" type="button"><i class="bi bi-trash"></i></button>
             </div>
@@ -258,7 +258,7 @@
               <i class="bi bi-calendar-download me-1"></i>{{ t('settings.calendar_export') }}
             </a>
 
-            <button class="btn btn-outline-secondary" id="enablePushBtn" onclick="enablePush()">
+            <button class="btn btn-outline-secondary" id="enablePushBtn">
               <i class="bi bi-bell-fill me-1"></i>{{ t('settings.push_enable') }}
             </button>
         </div>
@@ -347,7 +347,7 @@
             <div class="flex-grow-1">
                 <input type="text" id="backupLabel" class="form-control form-control-sm" placeholder="{{ t('settings.backup_label_placeholder') }}">
             </div>
-            <button class="btn btn-info text-white btn-sm text-nowrap" onclick="createBackup()">
+            <button class="btn btn-info text-white btn-sm text-nowrap" id="createBackupBtn">
                 <i class="bi bi-plus-circle me-1"></i>{{ t('settings.backup_create') }}
             </button>
         </div>
@@ -372,7 +372,7 @@
         <h6 class="mt-3">{{ t('settings.backup_restore_title') }}</h6>
         <div class="d-flex flex-column flex-sm-row gap-2">
             <input type="file" class="form-control form-control-sm" id="restoreFile" accept=".db">
-            <button class="btn btn-sm btn-outline-danger text-nowrap" onclick="restoreBackup()">
+            <button class="btn btn-sm btn-outline-danger text-nowrap" id="restoreBackupBtn">
                 <i class="bi bi-arrow-counterclockwise"></i> {{ t('settings.backup_restore_btn') }}
             </button>
         </div>
@@ -382,9 +382,15 @@
   </div>
 </div>
 
-<script>
+<script nonce="{{ csp_nonce() }}">
 // ── Backup Manager ───────────────────────────────────────────────────────────
 document.getElementById('backupModal').addEventListener('show.bs.modal', loadBackups);
+
+// Frueher onclick-Attribute im Markup - unter der kuenftigen strikten CSP
+// (Nonce statt 'unsafe-inline', Befund I6) waeren die wirkungslos.
+document.getElementById('createBackupBtn')?.addEventListener('click', () => createBackup());
+document.getElementById('restoreBackupBtn')?.addEventListener('click', () => restoreBackup());
+document.getElementById('enablePushBtn')?.addEventListener('click', () => enablePush());
 
 async function loadBackups() {
     try {
@@ -401,15 +407,24 @@ async function loadBackups() {
         data.backups.forEach(b => {
             tbody.innerHTML += `
                 <tr>
-                    <td>${b.created_at}</td>
-                    <td class="text-break"><small>${b.filename}</small></td>
-                    <td class="text-end">${b.size_kb} KB</td>
+                    <td>${escHtml(b.created_at)}</td>
+                    <td class="text-break"><small>${escHtml(b.filename)}</small></td>
+                    <td class="text-end">${escHtml(b.size_kb)} KB</td>
                     <td class="text-end">
-                        <a href="/api/backup/download/${b.filename}" class="btn btn-sm btn-outline-success" title="Download"><i class="bi bi-download"></i></a>
-                        <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteBackup('${b.filename}')" title="${t('month.receipt_delete')}"><i class="bi bi-trash"></i></button>
+                        <a href="/api/backup/download/${encodeURIComponent(b.filename)}" class="btn btn-sm btn-outline-success" title="Download"><i class="bi bi-download"></i></a>
+                        <button class="btn btn-sm btn-outline-danger ms-1 js-backup-delete" title="${t('month.receipt_delete')}"><i class="bi bi-trash"></i></button>
                     </td>
                 </tr>
             `;
+        });
+
+        // Erst NACH der Schleife verdrahten: jedes `innerHTML +=` parst den
+        // gesamten Tabellenkoerper neu und wuerde vorher gesetzte Listener
+        // wieder wegwerfen. Der Dateiname kommt ueber den Index aus den Daten,
+        // nicht aus einem Attribut - so entsteht kein neuer Umweg ueber Markup.
+        tbody.querySelectorAll('.js-backup-delete').forEach((btn, i) => {
+            const dateiname = data.backups[i].filename;
+            btn.addEventListener('click', () => deleteBackup(dateiname));
         });
     } catch (e) {
         alert(t('settings.backup_load_error'));
@@ -429,6 +444,9 @@ async function createBackup() {
             document.getElementById('backupLabel').value = '';
             loadBackups();
             showToast(t('settings.backup_created'), 'success');
+        } else {
+            // z.B. reserviertes Label (Befund M2) - sonst bliebe der Klick stumm.
+            alert(data.error || t('settings.backup_create_error'));
         }
     } catch (e) {
         alert(t('settings.backup_create_error'));
@@ -443,21 +461,35 @@ async function deleteBackup(filename) {
     } catch (e) {}
 }
 
+// Blocker 1: Der Server weist eine Datei ohne Instanzkennung zuerst ab. Erst
+// wenn der Admin die zweite, deutliche Rueckfrage bejaht, geht derselbe Upload
+// mit dem Uebersteuerungs-Kennzeichen erneut raus. Genau diese Rueckfrage ist
+// der Schutz: sie zwingt zum Nachdenken, bevor alle Konten ersetzt werden.
+async function _restoreSenden(file, bestaetigt) {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (bestaetigt) formData.append('fremde_instanz_bestaetigt', 'true');
+    const res = await fetch('/api/backup/restore', {
+        method: 'POST',
+        body: formData
+    });
+    return await res.json();
+}
+
 async function restoreBackup() {
     const file = document.getElementById('restoreFile').files[0];
     if (!file) return;
 
     if (!confirm(t('settings.backup_restore_confirm'))) return;
 
-    const formData = new FormData();
-    formData.append('file', file);
-
     try {
-        const res = await fetch('/api/backup/restore', {
-            method: 'POST',
-            body: formData
-        });
-        const data = await res.json();
+        let data = await _restoreSenden(file, false);
+        // Der Grund kommt als stabiler Schluessel, nicht als Fehlertext -
+        // ein Textvergleich waere je nach Sprache falsch.
+        if (!data.success && data.grund === 'srv.restore_keine_instanz_id') {
+            if (!confirm(t('settings.backup_restore_fremde_instanz_confirm'))) return;
+            data = await _restoreSenden(file, true);
+        }
         if (data.success) {
             alert(t('settings.backup_restore_success'));
             window.location.href = '/';
@@ -498,7 +530,7 @@ document.getElementById('changePasswordForm').addEventListener('submit', async f
             document.getElementById('changePasswordForm').reset();
             setTimeout(() => fb.innerHTML = '', 4000);
         } else {
-            fb.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>${data.error}</span>`;
+            fb.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>${escHtml(data.error)}</span>`;
         }
     } catch(err) {
         fb.innerHTML = `<span class="text-danger">${t('settings.pw_save_error')}</span>`;
@@ -558,7 +590,7 @@ function urlBase64ToUint8Array(base64String) {
 {% endblock %}
 
 {% block extra_script %}
-<script>
+<script nonce="{{ csp_nonce() }}">
 const PERSONS_FOR_SPLITS = {{ persons | tojson }};
 const ACTIVITY_VERSION = {{ activity_version | tojson }};
 let _pendingPersonDeletes = [];
@@ -630,11 +662,26 @@ function toggleCatSplitPanel(cb) {
   const wrap = cb.closest('.cat-row-wrap');
   wrap.querySelector('.cat-split-panel').classList.toggle('d-none', !cb.checked);
 }
+// Frueher onchange="toggleCatSplitPanel(this)" - und zwar an zwei Stellen: an
+// den servergerenderten Zeilen und an den per add-cat-btn nachgebauten. Ein
+// delegierter Listener auf der Liste deckt beide Faelle ab; e.target ist genau
+// die Checkbox, die das alte `this` uebergeben hat.
+document.getElementById('categories-list').addEventListener('change', e => {
+  const cb = e.target.closest('.cat-split');
+  if (cb) toggleCatSplitPanel(cb);
+});
+// Befund K1: der Personenname ging hier roh in innerHTML. Die
+// servergerenderte Zwillingsstelle weiter oben (die Jinja-Schleife ueber
+// `persons` im Markup) escaped ihn - die beiden Pfade widersprachen sich
+// also, und der ungesicherte feuerte bei jedem Klick auf
+// "Kategorie hinzufuegen". escHtml kommt aus base.html.
+// ACHTUNG: in diesem Kommentar keine doppelten geschweiften Klammern
+// verwenden - Jinja wertet sie auch innerhalb eines Skriptblocks aus.
 function buildSplitPanelHtml() {
   const inputs = PERSONS_FOR_SPLITS.map(p => `
     <div class="input-group input-group-sm" style="max-width:150px">
-      <span class="input-group-text">${p.name}</span>
-      <input type="number" min="0" step="0.1" class="form-control cat-split-share" data-person-id="${p.id}" value="1">
+      <span class="input-group-text">${escHtml(p.name)}</span>
+      <input type="number" min="0" step="0.1" class="form-control cat-split-share" data-person-id="${escHtml(String(p.id))}" value="1">
     </div>`).join('');
   return `<small class="text-muted d-block mb-1">${t('settings.split_ratio_hint')}</small>
     <div class="d-flex flex-wrap gap-2">${inputs}</div>`;
@@ -646,7 +693,7 @@ document.getElementById('add-cat-btn').addEventListener('click', () => {
     <div class="input-group">
       <input type="color" class="form-control form-control-color cat-color" value="#6c757d" style="max-width:50px">
       <input type="text" class="form-control cat-name" placeholder="${t('settings.category_name_placeholder')}">
-      <div class="input-group-text"><input class="form-check-input mt-0 cat-split" type="checkbox" onchange="toggleCatSplitPanel(this)"> &nbsp;Split</div>
+      <div class="input-group-text"><input class="form-check-input mt-0 cat-split" type="checkbox"> &nbsp;Split</div>
       <button class="btn btn-outline-danger remove-cat-btn" type="button"><i class="bi bi-trash"></i></button>
     </div>
     <div class="cat-split-panel ps-1 pt-1 d-none">${buildSplitPanelHtml()}</div>`;
@@ -695,22 +742,34 @@ document.getElementById('save-cats-btn').addEventListener('click', async () => {
 });
 
 // Wiederkehrende
-const personsOpts = `{% for p in persons %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}`;
-const catsOpts    = `{% for c in categories %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}`;
+// Namen als JSON, nicht als vorgefertigtes Markup in einem Template-Literal:
+// Jinja maskiert dort zwar < > ", aber NICHT $ { } und Backtick - `${...}`
+// in einem Namen war deshalb eine lebende Substitution (K1). Die Optionen
+// entstehen jetzt per new Option(), also rein ueber den DOM.
+const REC_PERSONS = {{ persons | tojson }};
+const REC_CATS    = {{ categories | tojson }};
+
+/** Fuellt ein <select> mit Namen; Reihenfolge wie bisher (Server sortiert). */
+function fillRecSelect(sel, items) {
+  if (!sel) return;
+  items.forEach(it => sel.appendChild(new Option(it.name, it.id)));
+}
 document.getElementById('add-rec-btn').addEventListener('click', () => {
   const div = document.createElement('div');
   div.className = 'row g-2 mb-2 recurring-row'; div.dataset.id = '';
   div.innerHTML = `
     <div class="col-6 col-md-2"><input type="number" min="1" max="31" class="form-control rec-day" placeholder="${t('settings.day')}"></div>
     <div class="col-6 col-md-3"><input type="text" class="form-control rec-desc" placeholder="${t('settings.description')}"></div>
-    <div class="col-6 col-md-2"><select class="form-select rec-person"><option value="">${t('settings.person_placeholder')}</option>${personsOpts}</select></div>
-    <div class="col-6 col-md-2"><select class="form-select rec-cat"><option value="">${t('settings.category_placeholder')}</option>${catsOpts}</select></div>
+    <div class="col-6 col-md-2"><select class="form-select rec-person"><option value="">${t('settings.person_placeholder')}</option></select></div>
+    <div class="col-6 col-md-2"><select class="form-select rec-cat"><option value="">${t('settings.category_placeholder')}</option></select></div>
     <div class="col-4 col-md-1"><input type="number" step="0.01" class="form-control rec-amount" placeholder="€"></div>
     <div class="col-4 col-md-1"><select class="form-select rec-freq">
       <option value="monthly">${t('settings.monthly')}</option>
       <option value="quarterly">${t('settings.quarterly')}</option>
       <option value="yearly">${t('settings.yearly')}</option></select></div>
     <div class="col-4 col-md-1"><button class="btn btn-outline-danger btn-sm remove-rec-btn w-100"><i class="bi bi-trash"></i></button></div>`;
+  fillRecSelect(div.querySelector('.rec-person'), REC_PERSONS);
+  fillRecSelect(div.querySelector('.rec-cat'), REC_CATS);
   document.getElementById('recurring-list').appendChild(div);
 });
 document.getElementById('recurring-list').addEventListener('click', e => {

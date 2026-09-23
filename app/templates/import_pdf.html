@@ -81,7 +81,7 @@
 {% endblock %}
 
 {% block extra_script %}
-<script>
+<script nonce="{{ csp_nonce() }}">
 let parsedTransactions = [];
 
 document.getElementById('pdf-check-all').addEventListener('change', function() {
@@ -101,10 +101,15 @@ document.getElementById('pdf-parse-btn').addEventListener('click', async () => {
     const res = await fetch('/api/import/pdf/parse', {method:'POST', body: fd});
     const d = await res.json();
     if (!d.success) {
-      statusEl.innerHTML = `<div class="alert alert-danger py-2"><i class="bi bi-x-circle me-1"></i>${d.error}</div>`;
+      // d.error ist normalerweise ein übersetzter Server-Text ohne Nutzereingabe,
+      // wird aber trotzdem escaped, falls sich das je ändert (Sicherheitsprüfung K3).
+      statusEl.innerHTML = `<div class="alert alert-danger py-2"><i class="bi bi-x-circle me-1"></i>${escHtml(d.error)}</div>`;
       return;
     }
-    statusEl.innerHTML = `<div class="alert alert-success py-2"><i class="bi bi-check me-1"></i>${t('pdf.transactions_found', {count: d.transactions?.length||0, bank: d.bank||t('pdf.unknown_bank')})}</div>`;
+    // d.bank kommt zwar nur aus einer festen Bankennamen-Liste im Server,
+    // wird hier aber ebenfalls escaped eingesetzt (gleiche Regel: alles, was
+    // aus der Server-Antwort in innerHTML landet, wird escaped).
+    statusEl.innerHTML = `<div class="alert alert-success py-2"><i class="bi bi-check me-1"></i>${t('pdf.transactions_found', {count: d.transactions?.length||0, bank: escHtml(d.bank||t('pdf.unknown_bank'))})}</div>`;
     parsedTransactions = d.transactions || [];
     document.getElementById('pdf-holder-info').textContent = d.holder || '';
     const tbody = document.getElementById('pdf-tbody');
@@ -112,14 +117,21 @@ document.getElementById('pdf-parse-btn').addEventListener('click', async () => {
     parsedTransactions.forEach((txn, i) => {
       const row = document.createElement('tr');
       row.className = txn.is_income ? 'table-success' : '';
+      // Alle Werte aus dem PDF (date/type sind zwar serverseitig auf feste
+      // Muster/Whitelists geprüft, counterpart/description aber roh aus der
+      // Textebene) laufen hier durch escHtml, bevor sie per innerHTML als
+      // Attributwert ODER Elementinhalt eingesetzt werden – siehe
+      // Sicherheitsprüfung K3: sonst genügt eine präparierte Kontoauszugs-PDF
+      // für gespeichertes XSS im Origin des importierenden Nutzers.
+      const counterpartOrDescription = txn.counterpart || txn.description || '';
       row.innerHTML = `
         <td><input type="checkbox" class="pdf-row-check" data-idx="${i}" checked></td>
-        <td class="text-nowrap">${txn.date}</td>
-        <td><small class="text-muted">${txn.type||''}</small></td>
+        <td class="text-nowrap">${escHtml(txn.date)}</td>
+        <td><small class="text-muted">${escHtml(txn.type||'')}</small></td>
         <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-            title="${txn.counterpart||txn.description||''}">${txn.counterpart||txn.description||'–'}</td>
+            title="${escHtml(counterpartOrDescription)}">${escHtml(counterpartOrDescription || '–')}</td>
         <td class="text-end fw-semibold ${txn.is_income?'text-success':'text-danger'}">
-          ${txn.is_income?'+':'-'}${txn.amount.toFixed(2).replace('.',',')} €</td>
+          ${txn.is_income?'+':'-'}${escHtml(txn.amount.toFixed(2).replace('.',','))} €</td>
         <td><small>${txn.is_income?`<span class="badge bg-success">${t('pdf.income_badge')}</span>`:`<span class="badge bg-secondary">${t('pdf.expense_badge')}</span>`}</small></td>`;
       tbody.appendChild(row);
     });
@@ -142,9 +154,12 @@ document.getElementById('pdf-commit-btn').addEventListener('click', async () => 
   });
   const d = await res.json();
   document.getElementById('pdf-result-col').style.display = '';
+  // d.error kommt vom Server (immer ein übersetzter Text ohne Nutzereingabe),
+  // wird aber wie beim Parse-Fehler defensiv escaped, bevor t() ihn in die
+  // Meldung einsetzt und diese per innerHTML gerendert wird (Sicherheitsprüfung K3).
   document.getElementById('pdf-result-msg').innerHTML = d.success
     ? `<div class="alert alert-success"><i class="bi bi-check-circle me-1"></i><strong>${t('pdf.import_success')}</strong> ${t('pdf.import_result', {expenses: d.importedexpenses, income: d.importedincome})}</div>`
-    : `<div class="alert alert-danger"><i class="bi bi-x-circle me-1"></i>${t('pdf.import_error', {error: d.error})}</div>`;
+    : `<div class="alert alert-danger"><i class="bi bi-x-circle me-1"></i>${t('pdf.import_error', {error: escHtml(d.error)})}</div>`;
   if (d.success) {
     document.getElementById('pdf-preview-col').style.display = 'none';
     showToast(t('pdf.imported_toast', {count: d.importedexpenses + d.importedincome}), 'success');

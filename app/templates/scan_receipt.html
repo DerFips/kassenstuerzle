@@ -1,3 +1,14 @@
+{# ── ACHTUNG: toter Code (Befund M13) ─────────────────────────────────────────
+ # Keine View rendert dieses Template, und die hier angesprochenen Endpunkte
+ # existieren nicht.
+ #
+ # Die Inline-Ereignisattribute (on...=) sind inzwischen trotzdem abgebaut
+ # (Nacharbeit zu I6): sie waeren unter der scharfen CSP ohnehin tot, und die
+ # Ausnahme hat sich als Falle erwiesen - _NONCE_ERWARTET in
+ # tests/test_csp_nonce.py listete diese Datei, der Handler-Sweep daneben
+ # nicht. Beide Listen laufen jetzt ueber dieselben Dateien. Wer dieses
+ # Template wiederbelebt, prueft bitte zusaetzlich die Endpunkte.
+ #}
 {% extends 'base.html' %}
 {% block title %}Beleg scannen – Kassenstürzle{% endblock %}
 {% block content %}
@@ -22,37 +33,32 @@
         <div id="dropZone"
              class="border border-2 border-dashed rounded-3 p-4 text-center mb-3
                     d-flex flex-column align-items-center justify-content-center"
-             style="min-height:200px; cursor:pointer; border-color:#0d6efd !important"
-             onclick="document.getElementById('receiptFileInput').click()"
-             ondragover="event.preventDefault()"
-             ondrop="handleDrop(event)">
+             style="min-height:200px; cursor:pointer; border-color:#0d6efd !important">
           <i class="fas fa-file-image fa-3x text-primary mb-2"></i>
           <p class="mb-1 fw-semibold">Datei hierher ziehen</p>
           <p class="text-muted small">oder klicken zum Auswählen</p>
           <small class="text-muted">JPG, PNG, WEBP, BMP, TIFF</small>
         </div>
-        <input type="file" id="receiptFileInput" accept="image/*"
-               class="d-none" onchange="handleFileSelect(this)">
+        <input type="file" id="receiptFileInput" accept="image/*" class="d-none">
 
         {# Kamera-Button (mobile) #}
-        <button class="btn btn-outline-primary mb-3" onclick="openCamera()">
+        <button type="button" id="openCameraBtn" class="btn btn-outline-primary mb-3">
           <i class="fas fa-camera me-1"></i>Kamera öffnen
         </button>
         <input type="file" id="cameraInput" accept="image/*" capture="environment"
-               class="d-none" onchange="handleFileSelect(this)">
+               class="d-none">
 
         {# Vorschau #}
         <div id="previewWrapper" class="d-none text-center">
           <img id="previewImg" src="" alt="Vorschau"
                class="img-fluid rounded shadow-sm" style="max-height:350px">
-          <button class="btn btn-sm btn-outline-danger mt-2" onclick="clearReceipt()">
+          <button type="button" class="btn btn-sm btn-outline-danger mt-2 js-receipt-clear">
             <i class="fas fa-times me-1"></i>Entfernen
           </button>
         </div>
 
         {# Scan-Button #}
-        <button id="scanBtn" class="btn btn-primary mt-auto d-none"
-                onclick="scanReceipt()">
+        <button type="button" id="scanBtn" class="btn btn-primary mt-auto d-none">
           <i class="fas fa-search me-1"></i>Beleg analysieren
         </button>
       </div>
@@ -75,7 +81,7 @@
         </div>
 
         {# Formular #}
-        <form id="receiptForm" class="d-none" onsubmit="saveReceipt(event)">
+        <form id="receiptForm" class="d-none">
           <div class="row g-3">
             <div class="col-sm-8">
               <label class="form-label fw-semibold">Beschreibung / Händler</label>
@@ -138,8 +144,7 @@
             <button type="submit" class="btn btn-success flex-grow-1">
               <i class="fas fa-check me-1"></i>Als Ausgabe speichern
             </button>
-            <button type="button" class="btn btn-outline-secondary"
-                    onclick="clearReceipt()">
+            <button type="button" class="btn btn-outline-secondary js-receipt-clear">
               <i class="fas fa-redo me-1"></i>Neu
             </button>
           </div>
@@ -166,7 +171,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce() }}">
 const _NOW_Y = {{ now.year }};
 const _NOW_M = {{ now.month }};
 let _selectedFile = null;
@@ -318,5 +323,28 @@ async function saveReceipt(e) {
     showToast('Fehler: ' + err.message, 'danger');
   }
 }
+
+// ── Verdrahtung (Befund I6) ─────────────────────────────────────────────────
+// Sobald script-src eine 'nonce-...'-Quelle traegt, ignoriert der Browser
+// 'unsafe-inline' - und Nonces gelten NICHT fuer on...=-Attribute. Jedes
+// onclick/onchange/onsubmit in diesem Template waere damit tot. Die Handler
+// haengen deshalb hier, im Block mit Nonce.
+document.getElementById('dropZone').addEventListener('click', () => {
+  document.getElementById('receiptFileInput').click();
+});
+document.getElementById('dropZone').addEventListener('dragover', (e) => e.preventDefault());
+document.getElementById('dropZone').addEventListener('drop', handleDrop);
+document.getElementById('receiptFileInput').addEventListener('change', function () {
+  handleFileSelect(this);
+});
+document.getElementById('cameraInput').addEventListener('change', function () {
+  handleFileSelect(this);
+});
+document.getElementById('openCameraBtn').addEventListener('click', openCamera);
+document.getElementById('scanBtn').addEventListener('click', scanReceipt);
+document.getElementById('receiptForm').addEventListener('submit', saveReceipt);
+document.querySelectorAll('.js-receipt-clear').forEach((btn) => {
+  btn.addEventListener('click', clearReceipt);
+});
 </script>
 {% endblock %}

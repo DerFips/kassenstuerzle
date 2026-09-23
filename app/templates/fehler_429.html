@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}{{ t('error.rate_limited_title') }} – {{ t('nav.brand') }}{% endblock %}
+
+{# Befund I4: ohne eigene Seite lieferte Werkzeug hier seine nackte, englische
+   Standardseite aus - fuer jemanden, der sich nur beim Passwort vertippt hat,
+   ein unerklaerlicher Bruch mitten in der Anwendung. #}
+{% block content %}
+<div class="row justify-content-center mt-5">
+  <div class="col-md-6 col-lg-5 mt-5 text-center">
+    <div class="display-1 text-warning mb-3"><i class="bi bi-hourglass-split"></i></div>
+    <h2 class="fw-bold mb-3">{{ t('error.rate_limited_title') }}</h2>
+    <p class="text-muted">{{ t('error.rate_limited_text') }}</p>
+    {% if limit %}
+    <p class="text-muted small">{{ t('srv.rate_limited', limit=limit) }}</p>
+    {% endif %}
+    <a href="{{ url_for('main.login') }}" class="btn btn-outline-secondary mt-2">
+      <i class="bi bi-arrow-left me-1"></i>{{ t('error.rate_limited_back') }}
+    </a>
+  </div>
+</div>
+{% endblock %}

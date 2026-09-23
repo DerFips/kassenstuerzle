@@ -23,7 +23,14 @@
     <div class="icon">📡</div>
     <h1>{{ t('offline.title') }}</h1>
     <p>{{ t('offline.text') }}</p>
-    <button onclick="location.reload()">{{ t('offline.retry') }}</button>
+    <button id="offline-retry-btn">{{ t('offline.retry') }}</button>
   </div>
+  <script nonce="{{ csp_nonce() }}">
+    // Diese Seite liegt im Service-Worker-Cache (sw.js precacht '/offline').
+    // Antwort UND Header werden gemeinsam gecacht, die Nonce im Markup passt
+    // also auch offline noch zum mitgelieferten CSP-Header.
+    document.getElementById('offline-retry-btn')
+      .addEventListener('click', () => location.reload());
+  </script>
 </body>
 </html>

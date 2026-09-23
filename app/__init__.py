@@ -2,12 +2,86 @@ from flask import Flask
 import os
 import logging
 
-def create_app():
-    app = Flask(__name__)
-    
-    # Security: Use a consistent secret key across all workers.
-    secret_file = os.path.join(os.path.dirname(__file__), '..', 'data', '.secret_key')
-    os.makedirs(os.path.dirname(secret_file), exist_ok=True)
+
+def _chown_hinweis(data_dir, ursache):
+    """Baut die Startmeldung fuer ein Datenverzeichnis ohne Schreibrecht.
+
+    Befund M (Nacharbeit): ueberspringt der Betreiber das dokumentierte
+    `sudo chown -R 1000:1000 ./data`, starb der Start mit einem nackten
+    PermissionError-Traceback - ohne jeden Hinweis darauf, was zu tun ist.
+    Mit `restart: unless-stopped` laeuft der Container dann in einer
+    Schleife, und im Log steht dreimal pro Minute derselbe Stacktrace.
+
+    Die Meldung nennt den Befehl mit der WIRKLICHEN uid/gid dieses Prozesses
+    und dem WIRKLICHEN Pfad - nicht die Beispielwerte aus der
+    docker-compose.yml, die je nach Image auch anders sein koennen.
+    """
+    try:
+        uid, gid = os.getuid(), os.getgid()
+    except AttributeError:      # Windows kennt getuid() nicht
+        uid = gid = 1000
+    return (
+        f"Das Datenverzeichnis '{data_dir}' ist fuer diesen Prozess nicht "
+        f"beschreibbar ({ursache}).\n"
+        "Kassenstuerzle laeuft bewusst nicht als root und kann die Rechte "
+        "deshalb nicht selbst richten.\n"
+        "Auf dem HOST (im Projektverzeichnis) einmalig ausfuehren:\n"
+        f"    sudo chown -R {uid}:{gid} ./data\n"
+        "Danach den Container neu starten. Ohne diesen Schritt startet die "
+        "Anwendung nicht - sie koennte weder den Signierschluessel noch die "
+        "Datenbank anlegen."
+    )
+
+
+def _pruefe_datenverzeichnis_beschreibbar(data_dir):
+    """Stellt VOR dem ersten echten Schreibzugriff fest, ob es ueberhaupt geht.
+
+    Ein blosses os.access() reicht nicht: bei einem Bind-Mount entscheidet
+    der Eigentuemer im Container, und das laesst sich nur durch einen
+    tatsaechlichen Schreibversuch klaeren.
+    """
+    probe = os.path.join(data_dir, '.schreibprobe')
+    try:
+        with open(probe, 'wb'):
+            pass
+    except OSError as exc:
+        raise RuntimeError(_chown_hinweis(data_dir, exc)) from exc
+    finally:
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+
+
+def _ensure_data_dir_and_secret(data_dir):
+    """Legt das Datenverzeichnis und den Signierschlüssel an (falls nötig) und
+    liest ihn sonst ein. In eine eigene Funktion ausgelagert, damit sie
+    unabhängig von create_app() gegen ein Wegwerf-Verzeichnis testbar ist.
+
+    Sicherheit (Befund I2): das Datenverzeichnis darf nur vom eigenen
+    Benutzer lesbar sein - es enthält u.a. diesen Signierschlüssel. Ohne die
+    chmod-Aufrufe läge beides mit dem Standard-umask 644/755, jeder
+    Lesezugriff auf den Datenträger würde den Flask-Signierschlüssel
+    preisgeben und eine Admin-Sitzung fälschbar machen, ganz ohne Passwort.
+    Nur chmod'en wenn WIR das Verzeichnis/die Datei gerade neu anlegen: ein
+    bereits bestehendes Verzeichnis (z.B. mit absichtlich anderen Rechten
+    fürs Bind-Mount) bzw. eine bereits bestehende Datei bleibt unangetastet.
+    """
+    _log = logging.getLogger(__name__)
+    secret_file = os.path.join(data_dir, '.secret_key')
+
+    _data_dir_existed = os.path.isdir(data_dir)
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(_chown_hinweis(data_dir, exc)) from exc
+    _pruefe_datenverzeichnis_beschreibbar(data_dir)
+    if not _data_dir_existed:
+        try:
+            os.chmod(data_dir, 0o700)
+        except OSError as exc:
+            _log.warning(f"Konnte Rechte des Datenverzeichnisses nicht auf 0700 setzen: {exc}")
+
     if os.path.exists(secret_file):
         with open(secret_file, 'rb') as f:
             secret = f.read()
@@ -15,13 +89,202 @@ def create_app():
         secret = os.urandom(32)
         with open(secret_file, 'wb') as f:
             f.write(secret)
+        try:
+            os.chmod(secret_file, 0o600)
+        except OSError as exc:
+            _log.warning(f"Konnte Rechte des Secret-Key nicht auf 0600 setzen: {exc}")
+    return secret
+
+
+# Rate-Limits fuer sensible Endpunkte. Bewusst auf Modulebene statt lokal in
+# create_app(), damit Tests nachweisen koennen, dass ein Endpunkt hier gelistet
+# ist - ein fehlender Eintrag faellt sonst erst im Betrieb auf.
+#
+# WICHTIG (Befund M1, noch offen): gezaehlt wird nach der Adresse aus
+# get_remote_address(). Ohne ProxyFix ist das die Adresse des Reverse-Proxys,
+# und alle Haushaltsmitglieder teilen sich damit EINEN Zaehler - wer als
+# zweiter dran ist, erbt die Aufrufe des ersten. Solange M1 offen ist, sind
+# alle Werte hier also haushaltsweit zu lesen und entsprechend grosszuegig
+# bemessen.
+RATE_LIMITS = {
+    'main.login':              '10 per minute',
+    'main.api_parse_pdf':      '5 per minute',
+    'main.api_receipt_parse':  '10 per minute',
+    # Befund I5: der Beleg-Upload war der einzige Upload-Endpunkt ohne Limit.
+    # Jeder Request legt bis zu 20 MB ab, und weil der Dateiname aus dem
+    # Inhalt (MD5) gebildet wird, ergibt jeder neue Inhalt auch eine neue
+    # Datei. Ein eingeloggtes Mitglied konnte damit in einer Schleife die
+    # Platte fuellen, bis SQLite-Schreibzugriffe und Sicherungen scheitern.
+    # Bewusst hoeher als der Beleg-Scan nebenan (Befund I5, nachgebessert):
+    # bei einem gemeinsamen Haushalts-Zaehler (siehe M1 oben) sind 10/Minute
+    # im Alltag zu wenig - wer die Belege einer Woche nachtraegt, haengt ein
+    # gutes Dutzend Fotos in einem Zug an und wird mitten im Vorgang gebremst.
+    # Die eigentliche Schranke gegen ein Vollschreiben der Platte ist die
+    # Groessengrenze des Beleg-Verzeichnisses (RECEIPTS_MAX_TOTAL_MB), nicht
+    # dieses Limit; es verzoegert nur.
+    'main.api_receipt_upload': '30 per minute',
+    'main.api_backup_create':  '5 per minute',
+    # Nacharbeit: ein einziger bewusster Restore verbraucht ZWEI Aufrufe.
+    # Eine Sicherung ohne Instanzkennung wird zuerst abgelehnt; erst nach der
+    # Rueckfrage geht dieselbe Datei mit dem Uebersteuerungs-Kennzeichen
+    # erneut raus (siehe settings.html). Bei 3/Minute war damit nach einem
+    # einzigen Versuch Schluss - der zweite Anlauf lief in ein 429, und zwar
+    # genau in dem Moment, in dem der Betreiber gerade eine Datenbank
+    # zurueckholen will. 6/Minute lassen drei vollstaendige Versuche zu und
+    # sind als Bremse gegen das Durchprobieren fremder Dateien unveraendert
+    # wirksam: jeder Versuch schreibt vorher eine Schutzkopie.
+    'main.api_backup_restore': '6 per minute',
+    'main.import_csv':         '20 per minute',
+    'main.api_backup_download':'10 per minute',
+    'main.export_csv':         '20 per minute',
+}
+
+
+def _laeuft_im_container() -> bool:
+    """Erkennt, ob dieser Prozess in einem Container laeuft (Befund I7).
+
+    Unterschieden wird an Merkmalen, die es nur im Container gibt:
+      * `/.dockerenv` legt der Docker-Daemon in jedem Container an,
+      * `/run/.containerenv` ist das Gegenstueck von Podman,
+      * `KASSENSTUERZLE_IM_CONTAINER=1` setzt unser eigenes Dockerfile
+        ausdruecklich - der Rueckfall, falls eine Laufzeit keine der beiden
+        Dateien anlegt.
+    """
+    if os.environ.get('KASSENSTUERZLE_IM_CONTAINER', '').strip() == '1':
+        return True
+    return os.path.exists('/.dockerenv') or os.path.exists('/run/.containerenv')
+
+
+def _secure_cookie_aktiv() -> bool:
+    """Liefert den Wert fuer SESSION_COOKIE_SECURE (Befund I7).
+
+    Frueher stand hier `os.environ.get('HTTPS', '0') == '1'`: der Default war
+    UNSICHER. Wer `HTTPS` im Dockerfile oder in der .env vergass - und das
+    Dockerfile setzte selbst `HTTPS=0` -, verschickte Sitzungscookies ohne
+    `Secure`-Flag. Zusammen mit dem auf alle Interfaces veroeffentlichten Port
+    5000 liess sich der TLS-terminierende Reverse-Proxy umgehen und das Cookie
+    im Klartext mitlesen.
+
+    Jetzt gilt: `HTTPS` ist die ausdrueckliche Entscheidung des Betreibers und
+    hat immer Vorrang - `HTTPS=0` ist der bewusste Ausstieg fuer einen reinen
+    Klartext-Aufbau. Ist die Variable NICHT gesetzt, ist der Default "sicher",
+    sobald wir in einem Container laufen.
+
+    Warum nicht bedingungslos `True`? Ein `python run.py` auf dem
+    Entwicklungsrechner spricht Klartext-HTTP auf 127.0.0.1. Ein Secure-Cookie
+    sendet der Browser ueber `http://` nicht zurueck - die Anmeldung wuerde
+    endlos auf die Login-Seite zurueckfallen. Deshalb haengt der Default an
+    `_laeuft_im_container()`: im Container (dort steht immer der Proxy davor)
+    sicher, beim lokalen Lauf nicht. Wer lokal doch mit TLS testet, setzt
+    `HTTPS=1`; wer im Container bewusst Klartext fahren will, setzt `HTTPS=0`.
+    """
+    wert = os.environ.get('HTTPS')
+    if wert is not None and wert.strip() != '':
+        aktiv = wert.strip() == '1'
+        if not aktiv and _laeuft_im_container():
+            # Befund M8: docker-compose.yml laedt `env_file: .env`, und was
+            # dort steht ueberschreibt das `ENV HTTPS=1` aus dem Dockerfile.
+            # Ein stehengebliebenes HTTPS=0 in einer alten .env schaltet das
+            # Secure-Flag also wieder ab - lautlos. Deshalb hier laut.
+            logging.getLogger(__name__).warning(
+                "SICHERHEITSWARNUNG: HTTPS=0 im Container. Das Sitzungscookie "
+                "geht damit OHNE Secure-Flag hinaus und ist auf jedem "
+                "Klartext-Weg zum Container mitlesbar. Das Dockerfile setzt "
+                "HTTPS=1 - dieser Wert kommt also aus der .env (env_file in "
+                "docker-compose.yml ueberschreibt das Dockerfile). Entfernen "
+                "oder auf HTTPS=1 setzen, sofern nicht bewusst Klartext "
+                "gefahren wird."
+            )
+        return aktiv
+    return _laeuft_im_container()
+
+
+def _pruefe_db_verschluesselung() -> None:
+    """Bricht den Start ab, wenn Verschluesselung verlangt, aber unmoeglich ist.
+
+    Befund I9: `create_app()` rief `_migrate_to_encrypted()` nur auf, wenn
+    `_SQLCIPHER_AVAILABLE` bereits wahr war. Die einzige Warnung fuer den
+    Gegenfall steht aber INNERHALB dieser Funktion
+    (`app/routes/main.py`, "DB_ENCRYPTION_KEY gesetzt, aber sqlcipher3 nicht
+    installiert") - von dieser Aufrufstelle aus konnte sie also nie feuern.
+    `_open_db()` ueberspringt `PRAGMA key` ebenfalls kommentarlos. Scheiterte
+    bei einem Rebuild die Installation von `sqlcipher3`, lief die App damit
+    vollstaendig im Klartext weiter, waehrend der Betreiber die Finanzdaten
+    fuer verschluesselt hielt - und nichts an irgendeiner Stelle sagte das.
+
+    Deshalb wird der Fall hier ausdruecklich und AUSSERHALB der Migration
+    geprueft, bevor irgendetwas die Datenbank anfasst. Ein fehlgeschlagener
+    Start ist lauter und damit harmloser als ein stiller Klartextbetrieb.
+
+    Die Werte werden bewusst ueber das Modul gelesen (`_main._DB_KEY`) statt
+    per `from ... import`: nur so sieht die Pruefung den aktuellen Stand, und
+    nur so ist sie im Test ueberhaupt nachstellbar.
+
+    Absichtlich eng: nur die Kombination "Schluessel gesetzt, Treiber fehlt"
+    ist toedlich. Kein Schluessel und kein Treiber ist ein gueltiger,
+    unverschluesselter Aufbau (so laeuft auch die Testsuite) und bleibt still.
+    """
+    _log = logging.getLogger(__name__)
+
+    from .routes import main as _main
+    if not _main._DB_KEY or _main._SQLCIPHER_AVAILABLE:
+        return
+
+    meldung = (
+        "DB_ENCRYPTION_KEY ist gesetzt, aber der SQLCipher-Treiber (sqlcipher3) "
+        "fehlt. Die Datenbank wuerde im KLARTEXT angelegt und beschrieben, "
+        "obwohl die Konfiguration Verschluesselung verlangt."
+    )
+
+    if os.environ.get('ALLOW_UNENCRYPTED', '').strip() == '1':
+        _log.error(
+            "%s ALLOW_UNENCRYPTED=1 ist gesetzt - der Start wird auf "
+            "ausdruecklichen Wunsch fortgesetzt. Die Finanzdaten liegen ab "
+            "jetzt UNVERSCHLUESSELT auf dem Datentraeger.", meldung)
+        return
+
+    _log.error(
+        "%s Der Start wird abgebrochen. Behebung: Image neu bauen, damit "
+        "sqlcipher3 installiert wird (siehe Dockerfile), oder "
+        "DB_ENCRYPTION_KEY entfernen. Wer die Daten wirklich im Klartext "
+        "halten will, setzt ALLOW_UNENCRYPTED=1.", meldung)
+    raise RuntimeError(
+        meldung + " Der Start wird abgebrochen. Behebung: sqlcipher3 "
+        "installieren oder DB_ENCRYPTION_KEY entfernen. Bewusster "
+        "Klartextbetrieb: ALLOW_UNENCRYPTED=1 setzen."
+    )
+
+
+def create_app():
+    # Befund I9: ganz am Anfang, bevor irgendetwas die Datenbank oeffnet.
+    _pruefe_db_verschluesselung()
+
+    app = Flask(__name__)
+
+    # Security: Use a consistent secret key across all workers.
+    # Das Verzeichnis wird aus DATABASE_PATH abgeleitet, nicht relativ zum
+    # Quellcode verdrahtet. Vorher landete der Signierschluessel immer in
+    # <repo>/data, auch wenn die Datenbank ganz woanders lag: die Testsuite
+    # schrieb damit bei jedem Lauf in das echte Datenverzeichnis, und wer
+    # DATABASE_PATH umsetzt, bekam Schluessel und Datenbank an getrennten
+    # Orten. Im Container aendert sich nichts - dort ist dirname(DATABASE_PATH)
+    # genau das /app/data von vorher.
+    # `or '.'` (Befund M8): steht in DATABASE_PATH ein blosser Dateiname
+    # ('kassenstuerzle.db'), liefert dirname() den leeren String - und
+    # os.makedirs('') wirft FileNotFoundError, der Start bricht ab, bevor
+    # irgendetwas laeuft. Gemeint ist in dem Fall das Arbeitsverzeichnis.
+    data_dir = os.path.dirname(os.environ.get(
+        'DATABASE_PATH',
+        os.path.join(os.path.dirname(__file__), '..', 'data', 'kassenstuerzle.db'))) or '.'
+    secret = _ensure_data_dir_and_secret(data_dir)
     app.secret_key = os.environ.get('SECRET_KEY', secret)
 
     app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
 
     app.config['SESSION_COOKIE_HTTPONLY'] = True
     app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'   # CSRF-Schutz: verhindert Cross-Site Requests
-    app.config['SESSION_COOKIE_SECURE'] = os.environ.get('HTTPS', '0') == '1'  # True wenn hinter HTTPS
+    # Befund I7: Default ist jetzt "sicher" (siehe _secure_cookie_aktiv oben).
+    app.config['SESSION_COOKIE_SECURE'] = _secure_cookie_aktiv()
 
     # Session-Lifetime: läuft nach Inaktivität ab (Standard 12h, via ENV konfigurierbar)
     from datetime import timedelta
@@ -38,27 +301,45 @@ def create_app():
         default_limits=[],           # Kein globales Limit; selektiv per Decorator
         storage_uri="memory://",
         strategy="fixed-window",
+        # In der Testsuite abschaltbar: dort melden sich viele Tests nacheinander
+        # an und wuerden sonst reihenweise 429 bekommen. NUR fuer Tests gedacht -
+        # im Betrieb ist die Variable nicht gesetzt und das Limit aktiv.
+        enabled=os.environ.get('DISABLE_RATE_LIMIT') != '1',
     )
     app.extensions['limiter'] = limiter  # Für Zugriff in Blueprints
 
     from .routes.main import main_bp, init_db
     app.register_blueprint(main_bp)
 
-    # Rate-Limits auf sensible Endpunkte anwenden
-    _rate_limits = {
-        'main.login':              '10 per minute',
-        'main.api_parse_pdf':      '5 per minute',
-        'main.api_receipt_parse':  '10 per minute',
-        'main.api_backup_create':  '5 per minute',
-        'main.api_backup_restore': '3 per minute',
-        'main.import_csv':         '20 per minute',
-        'main.api_backup_download':'10 per minute',
-        'main.export_csv':         '20 per minute',
-    }
-    for endpoint, limit_str in _rate_limits.items():
+    # Rate-Limits auf sensible Endpunkte anwenden (Tabelle: RATE_LIMITS oben)
+    for endpoint, limit_str in RATE_LIMITS.items():
         view_fn = app.view_functions.get(endpoint)
         if view_fn:
-            limiter.limit(limit_str)(view_fn)
+            # Das Ergebnis MUSS zurueckgeschrieben werden. limiter.limit() gibt
+            # eine umhuellte Funktion zurueck; wird sie verworfen, zeigt
+            # app.view_functions weiter auf die ungebremste Originalfunktion und
+            # die gesamte Rate-Limit-Schicht ist wirkungslos - nachgewiesen mit
+            # 15 Login-Versuchen ohne einen einzigen 429.
+            app.view_functions[endpoint] = limiter.limit(limit_str)(view_fn)
+
+    # ── Antwort auf ein erreichtes Limit (Befund I4) ──────────────────────
+    # Ohne diesen Handler beantwortet Werkzeug den 429 mit seiner nackten
+    # HTML-Standardseite. Fuer einen API-Aufruf heisst das: das `res.json()`
+    # im Frontend wirft, der Fehler kommt nie bei der Benutzerin an und der
+    # Klick bleibt einfach stumm. Fuer einen normalen Seitenabruf - etwa
+    # nach ein paar vertippten Passwoertern - landet sie auf einer
+    # unmarkierten englischen Fehlerseite mitten in einer deutschen App.
+    @app.errorhandler(429)
+    def _zu_viele_anfragen(fehler):
+        from flask import request, render_template, jsonify, session
+        from .translations import translate
+        lang = session.get('lang', 'de')
+        # flask-limiter legt den verletzten Limit-Text in `description` ab.
+        limit = getattr(fehler, 'description', '') or ''
+        if request.path.startswith('/api/'):
+            return jsonify(success=False,
+                           error=translate(lang, 'srv.rate_limited', limit=limit)), 429
+        return render_template('fehler_429.html', limit=limit), 429
 
     @app.context_processor
     def inject_now():
@@ -72,6 +353,37 @@ def create_app():
         if 'csrf_token' not in session:
             session['csrf_token'] = _sec.token_hex(32)
         return {'csrf_token': session.get('csrf_token', '')}
+
+    # ── CSP-Nonce pro Request ─────────────────────────────────────────────
+    # Jeder Request bekommt einen frischen Zufallswert. Templates schreiben ihn
+    # per <script nonce="{{ csp_nonce() }}"> in ihre Inline-Bloecke. Der Wert
+    # landet auf g, damit Header und Template garantiert denselben benutzen.
+    #
+    # Bewusst in before_request und nicht erst beim ersten Abruf aus dem
+    # Template: der CSP-Header wird fuer JEDE Antwort gesetzt, auch fuer
+    # JSON-Antworten und Weiterleitungen, die gar kein Template rendern. Ein
+    # nur bei Bedarf erzeugter Wert waere dort nicht vorhanden und der Header
+    # wuerde beim Zusammenbauen scheitern.
+    @app.before_request
+    def _erzeuge_csp_nonce():
+        from flask import g
+        import secrets as _sec
+        g.csp_nonce = _sec.token_urlsafe(16)
+
+    @app.context_processor
+    def inject_csp_nonce():
+        from flask import g
+
+        def csp_nonce():
+            # Fallback nur fuer Aufrufe ausserhalb eines Requests (z.B.
+            # render_template in einem Skript) - im Normalfall steht der Wert
+            # laengst aus before_request bereit.
+            if not hasattr(g, 'csp_nonce'):
+                import secrets as _sec2
+                g.csp_nonce = _sec2.token_urlsafe(16)
+            return g.csp_nonce
+
+        return {'csp_nonce': csp_nonce}
 
     @app.context_processor
     def inject_i18n():
@@ -117,6 +429,7 @@ def create_app():
     # ── Security Response Headers ─────────────────────────────────────────
     @app.after_request
     def set_security_headers(response):
+        from flask import g
         # Verhindert MIME-Type-Sniffing (z.B. JS in Bild-Upload)
         response.headers['X-Content-Type-Options'] = 'nosniff'
         # Verhindert Clickjacking (App darf nicht in iframe eingebettet werden)
@@ -126,14 +439,42 @@ def create_app():
         # Deaktiviert Browser-Features die die App nicht braucht
         response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
         # Content Security Policy: nur eigene Ressourcen + CDNs die die App nutzt
+        #
+        # script-src setzt auf eine Nonce pro Antwort statt auf 'unsafe-inline'
+        # (Befund I6). 'unsafe-inline' erlaubte JEDES eingeschleuste Skript und
+        # entwertete damit genau den Schutz, der hinter den XSS-Befunden K1 und K3
+        # greifen soll.
+        #
+        # Zwei Eigenheiten, die beim Aendern dieser Zeile wichtig sind:
+        # 1. Sobald eine Nonce (oder ein Hash) in der Quellenliste steht, ignoriert
+        #    der Browser 'unsafe-inline' vollstaendig - beides gleichzeitig
+        #    anzugeben bringt also nichts. Im Browser nachgemessen.
+        # 2. Nonces gelten NICHT fuer on...=-Attribute. Ein einziges neues
+        #    onclick="..." in einem Template ist ab hier tot und faellt in den
+        #    Python-Tests nicht auf, weil die kein JavaScript ausfuehren. Deshalb
+        #    wacht tests/test_csp_nonce.py darueber, dass keine Inline-Handler
+        #    zurueckkommen - diesen Test nicht abschwaechen.
         csp = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://cdn.simpleicons.org; "
+            # cdn.simpleicons.org stand hier ohne Grund: ein Bild-Host, auf den
+            # kein einziges Skript verweist (Befund M8). Eine Quelle in
+            # script-src, die niemand braucht, ist nur Angriffsflaeche.
+            f"script-src 'self' 'nonce-{getattr(g, 'csp_nonce', '')}' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
             "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://api.fontshare.com; "
             "img-src 'self' data: blob:; "
             "connect-src 'self'; "
-            "frame-ancestors 'none';"
+            "frame-ancestors 'none'; "
+            # Befund I6 (nachgebessert): diese drei fallen NICHT auf
+            # default-src zurueck, fehlten sie, waren sie schlicht
+            # unbeschraenkt. form-action verhindert, dass eingeschleustes
+            # Markup ein Formular zu einem fremden Ziel abschickt (z.B. das
+            # Anmeldeformular), base-uri, dass ein eingefuegtes <base> alle
+            # relativen Pfade der Seite umlenkt, und object-src schliesst
+            # <object>/<embed> als Ausfuehrungsweg aus.
+            "form-action 'self'; "
+            "base-uri 'self'; "
+            "object-src 'none';"
         )
         response.headers['Content-Security-Policy'] = csp
         return response

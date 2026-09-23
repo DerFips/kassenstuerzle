@@ -15,18 +15,60 @@ RUN echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.lis
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Befund I10: requirements.lock ist der verbindliche, vollstaendig gepinnte und
+# hashgesicherte Stand (erzeugen mit `make requirements.lock`, braucht
+# Netzzugang). Die eckige Klammer ist der uebliche Kniff fuer ein OPTIONALES
+# COPY: passt das Muster auf nichts, bleibt die Datei einfach weg - COPY
+# scheitert nicht, weil requirements.txt immer trifft.
+COPY requirements.txt requirements.loc[k] ./
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    if [ -f requirements.lock ]; then \
+        pip install --no-cache-dir -r requirements.lock; \
+    else \
+        echo "HINWEIS: requirements.lock fehlt - Build ist nicht reproduzierbar (Befund I10)." >&2; \
+        pip install --no-cache-dir -r requirements.txt; \
+    fi
 
 COPY . .
 
 # Datenverzeichnis anlegen
 RUN mkdir -p /app/data
 
+# Sicherheit (Befund I2): nicht als root laufen. Eigener, unprivilegierter
+# Benutzer, dem das Arbeitsverzeichnis gehört.
+#
+# ACHTUNG, wichtige Einschränkung: dieses `chown -R /app` läuft zur BUILD-Zeit.
+# docker-compose.yml hängt zur LAUFZEIT `./data:/app/data` darüber - der
+# Bind-Mount verdeckt das mitgebaute /app/data samt seiner Rechte vollständig.
+# Für das Datenverzeichnis zählt deshalb ausschließlich, wem das Host-
+# Verzeichnis ./data gehört. Auf einem Linux-Host gehört ein bestehendes
+# ./data der uid 0 (vom früheren root-Container geschrieben); der Start stirbt
+# dann in _open_db beim `PRAGMA journal_mode=WAL`, weil sich -wal/-shm nicht
+# anlegen lassen - und `restart: unless-stopped` dreht das in eine Endlosschleife.
+#
+# Deshalb sind uid/gid fest auf 1000 gepinnt (`useradd -r` vergäbe sonst eine
+# beliebige System-uid, die sich zwischen Builds ändern kann). Erst dadurch ist
+# das `user: "1000:1000"` in docker-compose.yml und das dort dokumentierte
+# einmalige `sudo chown -R 1000:1000 ./data` überhaupt verlässlich.
+RUN groupadd -r -g 1000 kassenstuerzle && \
+    useradd -r -u 1000 -g kassenstuerzle -d /app -s /usr/sbin/nologin kassenstuerzle && \
+    chown -R kassenstuerzle:kassenstuerzle /app
+USER 1000:1000
+
 # Umgebungsvariablen (Defaults; per -e oder .env überschreibbar)
 ENV DATABASE_PATH=/app/data/kassenstuerzle.db
-ENV HTTPS=0
+# Sicherheit (Befund I7): HTTPS=1, damit das Sitzungscookie das Secure-Flag
+# bekommt. Hier stand vorher HTTPS=0 und docker-compose.yml überschrieb es
+# nicht - die Sitzungscookies gingen also ohne Secure-Flag hinaus und waren
+# auf jedem Klartext-Weg zum Container mitlesbar. Der Container läuft
+# ausschließlich hinter dem TLS-terminierenden Reverse-Proxy; wer bewusst
+# reines HTTP fahren will, setzt HTTPS=0 in seiner .env.
+ENV HTTPS=1
+# Rückfall-Kennzeichen für app/__init__.py:_laeuft_im_container(): setzt der
+# Betreiber HTTPS gar nicht, gilt im Container trotzdem "Secure", bei einem
+# lokalen `python run.py` dagegen nicht (sonst sperrt das Secure-Cookie die
+# Entwicklung über http://127.0.0.1 aus).
+ENV KASSENSTUERZLE_IM_CONTAINER=1
 
 EXPOSE 5000
 

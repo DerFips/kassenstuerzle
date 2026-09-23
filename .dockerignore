@@ -1,0 +1,39 @@
+# ── Warum diese Datei wichtig ist ──────────────────────────────────────────────
+# Dockerfile:22 macht "COPY . .". Ohne .dockerignore würde ein `docker build .`
+# aus diesem Verzeichnis .env (mit DB_ENCRYPTION_KEY), data/ und data_/ (echte
+# Datenbank, .secret_key, VAPID-Key, ggf. eine Klartext-Kopie der Datenbank)
+# dauerhaft in eine Image-Schicht backen. Das gilt selbst dann, wenn eine
+# spätere Schicht diese Dateien wieder "löscht" — über `docker history` bzw.
+# `docker save` bleiben sie aus früheren Schichten weiterhin lesbar.
+# (Sicherheitsprüfung 2026-09-18, Befund K4)
+
+# ── Geheimnisse ────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Nutzdaten: echte Datenbank, Backups, Belege, Secret-Key, VAPID-Key ─────────
+data/
+data_/
+*.db
+*.db-wal
+*.db-shm
+*.db.*
+
+# ── Versionskontrolle ───────────────────────────────────────────────────────────
+.git/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+.venv/
+.venv-dev/
+.venv*/
+.pytest_cache/
+
+# ── Werkzeuge / Entwicklung ──────────────────────────────────────────────────
+.superpowers/
+tests/
+docs/
+
+# ── Betriebssystem ────────────────────────────────────────────────────────────
+.DS_Store

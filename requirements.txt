@@ -1,10 +1,89 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Kassenstürzle – Laufzeit-Abhängigkeiten
+#
+# Befund I10 (Sicherheitsprüfung 2026-09-18): hier standen nur die zehn
+# obersten Pakete. Werkzeug, Jinja2, cryptography & Co. wurden bei JEDEM Build
+# neu aufgelöst — zwei Builds desselben Commits ergaben also verschiedene
+# Images, und eine zurückgezogene oder kompromittierte transitive Version wäre
+# unbemerkt hereingekommen. Zusätzlich stand Pillow auf 10.0.1 (September
+# 2023), obwohl es in main.py angreiferkontrollierte Bild-Bytes verarbeitet.
+#
+# ── Reproduzierbarer Build: requirements.lock ────────────────────────────────
+# Diese Datei bleibt die von Hand gepflegte Quelle. Der verbindliche,
+# vollständige und hashgesicherte Stand gehört in requirements.lock. Erzeugen
+# (braucht Netzzugang, deshalb NICHT Teil dieser Behebung):
+#
+#     make requirements.lock
+#
+# oder direkt eines von beidem:
+#
+#     uv pip compile requirements.txt --generate-hashes -o requirements.lock
+#     pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
+#
+# Das Dockerfile bevorzugt requirements.lock, sobald die Datei existiert, und
+# fällt sonst auf diese Datei zurück. Nach jeder Änderung hier muss die
+# Lock-Datei neu erzeugt und mit eingecheckt werden.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Direkte Abhängigkeiten ───────────────────────────────────────────────────
 Flask==3.0.0
 python-dotenv==1.0.1
 gunicorn==21.2.0
 pytesseract==0.3.10
-Pillow==10.0.1
+# Befund I10: angehoben von 10.0.1 (Sept. 2023). Pillow decodiert in
+# main.py:2776-2783 direkt hochgeladene, also angreiferkontrollierte Bytes;
+# seit 10.0.1 sind mehrere Speicherfehler in den Decodern korrigiert worden.
+# NICHT lokal verifiziert: Pillow ist im Entwicklungs-venv nicht installiert
+# und ohne Netzzugang nicht auflösbar. Vor dem nächsten Image-Bau prüfen.
+Pillow==11.3.0
 pdfplumber==0.10.2
 APScheduler==3.10.4
 Flask-Limiter==3.9.0
 sqlcipher3==0.5.4
 pywebpush==2.5.0
+
+# ── Transitive Abhängigkeiten: LOKAL VERIFIZIERT ─────────────────────────────
+# Abgelesen am Entwicklungs-venv (.venv-dev), in dem diese Pakete tatsächlich
+# in genau dieser Version installiert sind und die Testsuite grün läuft.
+# Bewusst KEINE erratenen Versionen: alles, was unten unter "nicht
+# verifizierbar" steht, bleibt hier absichtlich ungepinnt, bis
+# requirements.lock mit Netzzugang erzeugt wurde.
+#
+# über Flask:
+blinker==1.9.0
+click==8.5.0
+itsdangerous==2.2.0
+Jinja2==3.1.6
+Werkzeug==3.1.8
+MarkupSafe==3.0.3
+# über Flask-Limiter:
+limits==5.8.0
+ordered-set==4.1.0
+rich==13.9.4
+typing_extensions==4.16.0
+Deprecated==1.3.1
+wrapt==2.4.1
+packaging==26.3
+markdown-it-py==4.2.0
+mdurl==0.1.2
+Pygments==2.21.0
+# über APScheduler:
+pytz==2026.3.post1
+six==1.17.0
+tzlocal==5.4.4
+
+# ── Transitive Abhängigkeiten: NICHT VERIFIZIERBAR ───────────────────────────
+# Diese Pakete zieht sich der Build über pdfplumber, pywebpush und pytesseract,
+# sie sind im Entwicklungs-venv aber gar nicht installiert. Ohne Netzzugang
+# lässt sich keine Version davon nachschlagen oder prüfen — eine geratene
+# Versionsnummer wäre schlechter als gar keine, weil sie einen Build brechen
+# oder eine falsche Sicherheit vortäuschen würde. Sie werden deshalb erst
+# durch `make requirements.lock` festgeschrieben:
+#
+#   pdfminer.six, pypdfium2       (über pdfplumber)
+#   charset-normalizer            (über pdfminer.six / requests)
+#   cryptography, cffi, pycparser (über pdfminer.six und pywebpush)
+#   requests, urllib3, idna, certifi, http-ece, py-vapid (über pywebpush)
+#
+# Hinweis für das Erzeugen der Lock-Datei: pdfplumber 0.10.2 pinnt pdfminer.six
+# selbst hart, der Resolver hat dort also keinen Spielraum.

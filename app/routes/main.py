@@ -5,6 +5,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
 from flask import Flask, render_template, request, jsonify, Response, redirect, url_for
 import os
+import re as _re_modul
 # SQLCipher Drop-in: verschlüsselte SQLite-Datenbank
 # Fallback auf Standard-sqlite3 wenn sqlcipher3 nicht installiert ist
 try:
@@ -13,6 +14,7 @@ try:
 except ImportError:
     import sqlite3
     _SQLCIPHER_AVAILABLE = False
+from contextlib import contextmanager
 from datetime import datetime
 import logging
 log = logging.getLogger(__name__)
@@ -32,6 +34,46 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 RECEIPTS_DIR = os.path.join(os.path.dirname(DB_PATH), 'receipts')
 os.makedirs(RECEIPTS_DIR, exist_ok=True)
 ALLOWED_RECEIPT_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf'}
+# Befund K1: genau die Form, die api_receipt_upload erzeugt - MD5 des Inhalts
+# plus erlaubte Endung. Alles andere kann kein Beleg dieser Anwendung sein.
+# Ohne diese Pruefung nahm /api/expenses/save jeden Text an, und er kam in
+# `const EXISTING` woertlich in die Seite zurueck (z.B.
+# 'a.jpg" onerror="..." x="' - ein Ausbruch aus dem Attribut).
+_BELEGNAME_MUSTER = _re_modul.compile(r'^[0-9a-f]{32}\.(jpg|jpeg|png|gif|webp|pdf)$')
+
+
+def _pruefe_belegname(wert):
+    """Laesst nur Belegnamen durch, die api_receipt_upload so erzeugt haben kann.
+
+    Rueckgabe: (gepruefter_name_oder_None, abgelehnt). `abgelehnt` ist nur
+    dann wahr, wenn wirklich ein Wert ankam und die Pruefung ihn verworfen
+    hat - ein leeres Feld ist keine Ablehnung, sondern "kein Beleg".
+
+    Bewusst verwerfen statt den ganzen Speichervorgang mit 400 abzubrechen:
+    die Oberflaeche schickt bei jedem Autosave ALLE Zeilen des Monats mit.
+    Ein einzelner, vor dieser Pruefung gespeicherter Altwert wuerde sonst das
+    Speichern des ganzen Monats dauerhaft blockieren. So wird er beim
+    naechsten Speichern still bereinigt - der Wert erreicht die Datenbank
+    (und damit `const EXISTING` in der Seite) in keinem Fall.
+
+    Die zweite Rueckgabe gibt es, weil "still verwerfen" und "still loeschen"
+    zweierlei sind: der Aufrufer darf die Belegdatei der Zeile nach einer
+    Ablehnung NICHT als verwaist aufraeumen (siehe save_expenses).
+    """
+    if not wert:
+        return None, False
+    if _BELEGNAME_MUSTER.match(str(wert)):
+        return str(wert), False
+    log.warning("Ungueltiger Belegname verworfen (%r) - Benutzer '%s'",
+                str(wert)[:80], session.get('username', ''))
+    return None, True
+# Sicherheit (Befund I5): Obergrenze fuer das gesamte Beleg-Verzeichnis.
+# Ohne sie kann jedes eingeloggte Mitglied - nicht nur ein Admin - den
+# Upload in einer Schleife aufrufen und den Datentraeger fuellen; danach
+# scheitern SQLite-Schreibzugriffe und Sicherungen, die App steht.
+# Das Rate-Limit alleine verzoegert das nur, es begrenzt nichts.
+# Per ENV anpassbar, weil die sinnvolle Groesse am Datentraeger haengt.
+RECEIPTS_MAX_TOTAL_MB = int(os.environ.get('RECEIPTS_MAX_TOTAL_MB', '500'))
 
 # ── Verschlüsselungs-Schlüssel aus ENV ────────────────────────────────────────
 # Setze DB_ENCRYPTION_KEY in .env / docker-compose.yml
@@ -51,6 +93,11 @@ def _open_db(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     if _SQLCIPHER_AVAILABLE and _DB_KEY:
         conn.execute(_pragma_key_sql(_DB_KEY))
+    # Befund I9: Fehlt der Treiber, waehrend _DB_KEY gesetzt ist, wird hier
+    # kommentarlos KEIN PRAGMA key gesetzt - die DB liefe im Klartext. Dieser
+    # Zustand kann den Start nicht mehr ueberleben: create_app() bricht dann
+    # in _pruefe_db_verschluesselung() ab (app/__init__.py), ausser der
+    # Betreiber hat ALLOW_UNENCRYPTED=1 ausdruecklich gesetzt.
     # Nebenläufigkeit: WAL erlaubt parallele Leser während ein Writer schreibt,
     # busy_timeout verhindert sofortige "database is locked"-Fehler bei den
     # 4 Gunicorn-Threads. journal_mode ist in der DB-Datei persistent,
@@ -69,6 +116,11 @@ def _migrate_to_encrypted(path: str, key: str) -> None:
     log = logging.getLogger(__name__)
 
     if not _SQLCIPHER_AVAILABLE:
+        # Befund I9: Diese Warnung war toter Code - der einzige Aufrufer
+        # (create_app) betrat die Funktion nur, wenn _SQLCIPHER_AVAILABLE
+        # bereits wahr war. Die verbindliche Pruefung sitzt jetzt in
+        # _pruefe_db_verschluesselung() (app/__init__.py) und verweigert den
+        # Start. Der Zweig bleibt als Absicherung fuer andere Aufrufer stehen.
         log.warning("DB_ENCRYPTION_KEY gesetzt, aber sqlcipher3 nicht installiert – DB bleibt unverschlüsselt!")
         return
 
@@ -108,6 +160,31 @@ def _migrate_to_encrypted(path: str, key: str) -> None:
         src.close()
         _shutil.move(tmp_path, path)
         log.info("Migration erfolgreich abgeschlossen.")
+
+        # Sicherheit (Befund I1): die Klartext-Sicherung ist nur die
+        # Rückfallebene für den Fall, dass die Migration fehlschlägt. Sobald
+        # feststeht, dass sich die neue verschlüsselte Datenbank tatsächlich
+        # öffnen lässt, hat sie keinen Zweck mehr und hebt die Verschlüsselung
+        # der gesamten Finanzhistorie auf, solange sie im selben Verzeichnis
+        # liegt (z.B. über den Bind-Mount ./data:/app/data im Container).
+        try:
+            verify_conn = sqlite3.connect(path)
+            try:
+                verify_conn.execute(_pragma_key_sql(key))
+                verify_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            finally:
+                verify_conn.close()
+        except Exception as verify_exc:
+            log.error(
+                "Verifikation der verschlüsselten Datenbank fehlgeschlagen – "
+                f"Klartext-Sicherung wird zur Sicherheit NICHT gelöscht: {verify_exc}"
+            )
+        else:
+            try:
+                os.remove(backup_path)
+                log.info(f"Klartext-Sicherung nach erfolgreicher Verifikation entfernt: {backup_path}")
+            except OSError as remove_exc:
+                log.warning(f"Klartext-Sicherung konnte nicht entfernt werden: {remove_exc}")
     except Exception as e:
         log.error(f"Migration fehlgeschlagen: {e}")
         if os.path.exists(tmp_path):
@@ -171,9 +248,13 @@ def csrf_protect():
     if result is not None:
         return result
 
-# ── Rate-Limiter Zugriff aus Blueprint ────────────────────────────────────────
-def _get_limiter():
-    return current_app.extensions.get('limiter')
+# Befund I4 (Aufraeumen): hier standen `_get_limiter()` und `_rate_limit()`.
+# Beide wurden von nichts aufgerufen - und sie waren obendrein falsch: der
+# Limit-String ging an `callable_name` von flask-limiter, nicht an die
+# Limit-Definition, sie haetten also auch als Aufruf nichts durchgesetzt.
+# Dieses Paar ist sehr wahrscheinlich der Grund, warum vier Pruefdurchgaenge
+# die Rate-Limits fuer wirksam hielten. Die Durchsetzung passiert
+# ausschliesslich in create_app() ueber die Tabelle RATE_LIMITS.
 
 
 # ── Nebenläufigkeit: Payload-Version und Änderungszähler ─────────────────────
@@ -205,19 +286,6 @@ def _bump_activity(conn, scope: str) -> int:
 
 def _month_scope(year: int, month: int) -> str:
     return f'month:{int(year):04d}-{int(month):02d}'
-
-
-def _rate_limit(limit_string: str):
-    """Prüft Rate-Limit für den aktuellen Request manuell via Flask-Limiter."""
-    from flask_limiter.errors import RateLimitExceeded
-    limiter = _get_limiter()
-    if limiter is None:
-        return None  # Limiter nicht initialisiert - kein Fehler
-    try:
-        limiter._check_request_limit(limit_string)
-    except RateLimitExceeded:
-        return jsonify(success=False, error=t('srv.rate_limited', limit=limit_string)), 429
-    return None
 
 
 def login_required(f):
@@ -361,6 +429,311 @@ def _autolink_single_person(conn) -> None:
                  users[0]['id'], persons[0]['id'])
 
 
+# ── Herkunftsnachweis fuer Sicherungen (Blocker 1) ───────────────────────────
+# Der Schluessel, unter dem die Instanzkennung in app_meta liegt. Sie wird
+# genau einmal erzeugt und NIE rotiert: sie ist das einzige Merkmal, an dem
+# eine Sicherung dieser Installation von einer untergeschobenen Datei zu
+# unterscheiden ist. Weil sie in der Datenbank steht, traegt jede Sicherung
+# (ein blosser Dateikopie-Vorgang) sie automatisch mit.
+#
+# Sie bezeichnet die INSTALLATION, nicht den Datenbestand: ein Restore
+# schreibt die bisherige Kennung in die eingespielte Datei zurueck
+# (_instanz_id_festschreiben), sonst wuerde er alle uebrigen Sicherungen
+# derselben Installation entwerten.
+_INSTANZ_ID_SCHLUESSEL = 'instance_id'
+
+# Genau die Form, die diese Anwendung fuer app_meta erwartet: (name, typ, pk).
+# PRAGMA table_info liefert je Spalte (cid, name, type, notnull, default, pk).
+#
+# ACHTUNG: Diese Liste ist eine BESCHREIBUNG, kein Beweis. table_info sieht
+# weder CHECK noch FOREIGN KEY, weder generierte Spalten noch sonst etwas,
+# was ein INSERT scheitern lassen kann. Sie ist deshalb nur die schnelle
+# Vorpruefung; verbindlich ist der Schreib-/Lese-Versuch weiter unten.
+_APP_META_SOLLFORM = [('key', 'TEXT', 1), ('value', 'TEXT', 0)]
+_APP_META_SCHEMA = 'CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT)'
+# Schluessel, unter dem der Selbsttest schreibt. Bewusst ein Name, den die
+# Anwendung sonst nirgends verwendet - die Zeile wird sofort wieder geloescht.
+_APP_META_PROBE_SCHLUESSEL = '__schreibprobe__'
+
+# Schluessel, die einen Neuaufbau von app_meta ueberleben duerfen, mit genau
+# den Werten, die diese Anwendung selbst schreibt. Uebernommen wird nur, was
+# hier woertlich steht - der Inhalt der Tabelle ist im Moment des Neuaufbaus
+# angreifergewaehlt, ein "irgendein Text" wuerde also aus der eingespielten
+# Datei stammen. Die Instanzkennung steht bewusst NICHT hier: sie wird vom
+# Aufrufer neu vergeben bzw. festgeschrieben.
+_APP_META_UEBERNAHME = {
+    # Ohne diesen Schluessel stellt sich nach jedem bestaetigten Restore der
+    # Einrichtungsassistent wieder auf "noch nicht erledigt" - der Admin
+    # bekommt ihn erneut vorgesetzt, obwohl er ihn laengst durchlaufen hat.
+    'profiles_setup_done': frozenset({'1'}),
+}
+
+
+def _app_meta_pruefen(conn) -> bool:
+    """Beweist, dass app_meta als Schluessel-/Wert-Ablage taugt.
+
+    Kein Beschreiben der erwarteten Form, sondern ein Versuch: Probeschluessel
+    schreiben, zurueckzulesen, wieder loeschen. Kommt der geschriebene Wert
+    nicht zurueck, ist die Tabelle unbrauchbar - egal WARUM. Das deckt
+    CHECK-Bedingungen, FOREIGN KEY (PRAGMA foreign_keys steht in _open_db auf
+    ON), generierte Spalten, NOT NULL, Trigger und jede kuenftige Bauart ab,
+    ohne sie einzeln aufzuzaehlen. Genau daran ist die reine Formpruefung
+    dreimal hintereinander vorbeigelaufen.
+
+    Der Probewert ist zufaellig: ein fest verdrahteter Wert liesse sich mit
+    `CHECK (value = '...')` nachbauen und der Selbsttest damit austricksen.
+    """
+    probe = secrets.token_hex(8)
+    try:
+        conn.execute('DELETE FROM app_meta WHERE key=?', (_APP_META_PROBE_SCHLUESSEL,))
+        conn.execute('INSERT INTO app_meta (key, value) VALUES (?,?)',
+                     (_APP_META_PROBE_SCHLUESSEL, probe))
+        zeile = conn.execute('SELECT value FROM app_meta WHERE key=?',
+                             (_APP_META_PROBE_SCHLUESSEL,)).fetchone()
+        gelesen = zeile[0] if zeile is not None else None
+        conn.execute('DELETE FROM app_meta WHERE key=?', (_APP_META_PROBE_SCHLUESSEL,))
+    except sqlite3.Error as exc:
+        # Bewusst KEIN conn.rollback(): _app_meta_sicherstellen() laeuft
+        # mitten in einem groesseren Schritt (init_db(), bzw.
+        # _instanz_id_festschreiben()), und ein Rollback hier wuerde dessen
+        # bisherige Arbeit mitreissen. Ob der Schritt als Ganzes zurueckgerollt
+        # wird, entscheidet der Aufrufer (in init_db(): _startschritt()).
+        # SQLite verwirft die gescheiterte Anweisung ohnehin fuer sich.
+        log.warning("Schreibprobe auf app_meta fehlgeschlagen (%s) - die "
+                    "Tabelle wird neu aufgebaut.", exc)
+        return False
+    if gelesen != probe:
+        log.warning("Schreibprobe auf app_meta lieferte %r statt %r - die "
+                    "Tabelle wird neu aufgebaut.", gelesen, probe)
+        return False
+    return True
+
+
+def _app_meta_sicherstellen(conn) -> None:
+    """Erzwingt eine BRAUCHBARE app_meta - notfalls durch Neuaufbau.
+
+    Nacharbeit zum Herkunftsnachweis: bei einer wiederhergestellten Datei
+    stammt app_meta samt SCHEMA aus der hochgeladenen Datei. init_db() legte
+    die Tabelle mit CREATE TABLE IF NOT EXISTS an, eine mitgelieferte
+    Tabelle `app_meta (key, value)` OHNE Primaerschluessel blieb also
+    bestehen. Darin wirkt `INSERT OR REPLACE` nicht als Ersetzen, sondern
+    haengt eine zweite Zeile an - `SELECT ... fetchone()` liefert danach
+    dauerhaft die erste, vom Angreifer gewaehlte Zeile (z.B. den leeren
+    Text). Damit haette diese Installation fuer immer KEINE lesbare eigene
+    Kennung mehr, und der Herkunftsnachweis waere erledigt.
+
+    Die Form allein zu vergleichen hat dreimal nicht gereicht: PRAGMA
+    table_info zeigt CHECK, FOREIGN KEY und generierte Spalten nicht an, eine
+    so praeparierte Tabelle sah also korrekt aus und liess trotzdem kein
+    INSERT zu. Verbindlich ist deshalb _app_meta_pruefen() - ein echter
+    Schreib-/Lese-Versuch. Die Formpruefung bleibt als billiger Schnellpfad
+    davor stehen.
+
+    Aus der Tabelle wird bis auf _APP_META_UEBERNAHME NICHTS uebernommen: ihr
+    Inhalt ist in genau dem Moment, in dem diese Funktion etwas zu tun
+    findet, angreifergewaehlt.
+    """
+    try:
+        spalten = list(conn.execute('PRAGMA table_info(app_meta)'))
+    except sqlite3.Error:
+        spalten = []
+    if ([(r[1], str(r[2] or '').upper(), r[5]) for r in spalten] == _APP_META_SOLLFORM
+            and _app_meta_pruefen(conn)):
+        return
+
+    if spalten:
+        log.warning("app_meta hat eine unerwartete Form (%s) und wird neu "
+                    "aufgebaut - der bisherige Inhalt stammt aus einer "
+                    "eingespielten Datei und wird verworfen.",
+                    ', '.join(str(r[1]) for r in spalten))
+    gerettet = _app_meta_uebernahme_lesen(conn)
+    # Unter dem Namen `app_meta` kann alles liegen: Tabelle, View, Index oder
+    # Trigger. DROP TABLE ist bei einem Index ein stilles Nichts (kein
+    # Fehler!) - frueher brach die Schleife danach ab, der Index blieb stehen
+    # und das folgende CREATE TABLE scheiterte mit "there is already an index
+    # named app_meta". Deshalb werden ALLE vier Wege ausgefuehrt, ohne break:
+    # ein Drop, der nichts getan hat, ist kein Erfolg.
+    for anweisung in ('DROP TABLE IF EXISTS app_meta',
+                      'DROP VIEW IF EXISTS app_meta',
+                      'DROP INDEX IF EXISTS app_meta',
+                      'DROP TRIGGER IF EXISTS app_meta'):
+        try:
+            conn.execute(anweisung)
+        except sqlite3.Error as exc:
+            log.debug("Neuaufbau app_meta: '%s' nicht anwendbar (%s)", anweisung, exc)
+    conn.execute(_APP_META_SCHEMA)
+    for schluessel, wert in gerettet.items():
+        conn.execute('INSERT INTO app_meta (key, value) VALUES (?,?)',
+                     (schluessel, wert))
+        log.info("app_meta neu aufgebaut - '%s' wurde uebernommen.", schluessel)
+
+
+def _app_meta_uebernahme_lesen(conn) -> dict:
+    """Liest die wenigen Schluessel, die einen Neuaufbau ueberleben duerfen.
+
+    Uebernommen wird ausschliesslich, was in _APP_META_UEBERNAHME woertlich
+    als erlaubter Wert steht. Alles andere - auch ein "fast richtiger" Wert -
+    wird verworfen, denn es kann aus der eingespielten Datei stammen.
+    """
+    gerettet = {}
+    for schluessel, erlaubte in _APP_META_UEBERNAHME.items():
+        try:
+            zeile = conn.execute('SELECT value FROM app_meta WHERE key=?',
+                                 (schluessel,)).fetchone()
+        except sqlite3.Error:
+            continue
+        if zeile is not None and zeile[0] in erlaubte:
+            gerettet[schluessel] = zeile[0]
+    return gerettet
+
+
+def _ensure_instanz_id(conn):
+    """Legt die Instanzkennung beim Start an, falls sie noch fehlt.
+
+    Rueckgabe ist die (ggf. frisch erzeugte) Kennung, oder None, wenn sie
+    sich nicht sicherstellen laesst. Kein Rotieren, kein Ueberschreiben einer
+    gueltigen Kennung: eine neue Kennung wuerde alle bisherigen Sicherungen
+    dieser Installation entwerten.
+
+    Die Funktion laeuft in init_db() - und init_db() laeuft in create_app().
+    Sie darf deshalb unter keinen Umstaenden durchschlagen: eine eingespielte
+    Datei mit kaputtem app_meta (z.B. ohne Spalte `value`) liess den Start
+    frueher mit `no such column: value` scheitern. Die Datei war zu dem
+    Zeitpunkt schon getauscht - die Anwendung startete danach gar nicht mehr
+    und war bei `restart: unless-stopped` nur noch per Shell zu retten.
+    """
+    try:
+        _app_meta_sicherstellen(conn)
+        row = conn.execute('SELECT value FROM app_meta WHERE key=?',
+                           (_INSTANZ_ID_SCHLUESSEL,)).fetchone()
+        if row is not None and row[0]:
+            return row[0]
+        neue = secrets.token_hex(16)
+        # Bewusst DELETE + INSERT statt INSERT OR REPLACE: `OR REPLACE`
+        # ersetzt nur ueber eine Eindeutigkeitsbedingung. Sie steht zwar
+        # gerade wieder (siehe _app_meta_sicherstellen), aber die Absicht
+        # "es gibt genau eine Zeile" soll nicht von der Form der Tabelle
+        # abhaengen.
+        conn.execute('DELETE FROM app_meta WHERE key=?', (_INSTANZ_ID_SCHLUESSEL,))
+        conn.execute('INSERT INTO app_meta (key, value) VALUES (?,?)',
+                     (_INSTANZ_ID_SCHLUESSEL, neue))
+        log.info("Instanzkennung fuer den Herkunftsnachweis von Sicherungen angelegt.")
+        return neue
+    except sqlite3.Error as exc:
+        log.error("Instanzkennung konnte nicht sichergestellt werden (%s). Der "
+                  "Herkunftsnachweis ist damit nicht fuehrbar - jeder Restore "
+                  "wird abgelehnt, bis das behoben ist.", exc)
+        return None
+
+
+def _instanz_id_festschreiben(pfad, kennung) -> None:
+    """Schreibt die Kennung der LAUFENDEN Installation in die Datei `pfad`.
+
+    Die Kennung bezeichnet die INSTALLATION, nicht den Datenbestand. Ohne
+    diesen Schritt bekam eine mit Bestaetigung eingespielte Altsicherung
+    (die noch keine Kennung traegt) beim anschliessenden init_db() eine
+    frische - und danach war JEDE eigene Sicherung dieser Installation
+    'srv.restore_fremde_instanz', inklusive der Sekunden zuvor angelegten
+    Schutzkopie 'pre-restore'. Der Betreiber haette die falsche Datei
+    eingespielt und keinen Rueckweg mehr.
+    """
+    if not kennung:
+        return
+    con = _open_db(pfad)
+    try:
+        _app_meta_sicherstellen(con)
+        con.execute('DELETE FROM app_meta WHERE key=?', (_INSTANZ_ID_SCHLUESSEL,))
+        con.execute('INSERT INTO app_meta (key, value) VALUES (?,?)',
+                    (_INSTANZ_ID_SCHLUESSEL, kennung))
+        con.commit()
+    except sqlite3.Error:
+        log.exception("Instanzkennung konnte nach dem Restore nicht "
+                      "festgeschrieben werden - eigene Sicherungen koennten "
+                      "danach als fremd gelten.")
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def _lies_instanz_id(conn):
+    """Liest die Instanzkennung aus einer beliebigen Verbindung.
+
+    Gibt None zurueck, wenn app_meta fehlt (Sicherung aus einer frueheren
+    Version) oder kein Eintrag vorhanden ist. Fehlend und "anders" sind
+    bewusst unterscheidbar - nur der erste Fall ist per Bestaetigung
+    ueberstimmbar.
+    """
+    try:
+        row = conn.execute('SELECT value FROM app_meta WHERE key=?',
+                           (_INSTANZ_ID_SCHLUESSEL,)).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    return row[0] or None
+
+
+def _eigene_instanz_id():
+    """Instanzkennung der LAUFENDEN Datenbank.
+
+    Bewusst ueber eine eigene Verbindung statt ueber get_db(): der
+    Restore-Endpunkt schliesst die Request-Verbindung, bevor er prueft.
+    """
+    con = _open_db(DB_PATH)
+    try:
+        return _lies_instanz_id(con)
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+@contextmanager
+def _startschritt(conn, schritt: str, folge: str):
+    """Ein Schritt von init_db(), der den Start NICHT verhindern darf.
+
+    Die Regel, um die es geht (vier Pruefrunden lang jeweils an genau einer
+    weiteren Anweisung verletzt): init_db() laeuft in create_app(). Wirft
+    darin irgendetwas, startet die Anwendung nie wieder - mit
+    `restart: unless-stopped` eine endlose Neustartschleife, aus der nur ein
+    Shell-Zugriff auf das Volume herausfuehrt. Und nach einem Restore stammen
+    Tabellen UND Zeilen aus einer hochgeladenen Datei: jede Anweisung, die
+    darauf schreibt oder deren Werte weiterverarbeitet, kann an einer Form
+    scheitern, die sich niemand vorher ausgedacht hat.
+
+    Deshalb wird hier nicht die einzelne bekannte Ursache abgefangen, sondern
+    JEDE Ausnahme des Schritts. `folge` sagt im Protokoll, welche Garantie
+    dadurch fehlt - der Betreiber soll erkennen koennen, WELCHER Schritt
+    ausgefallen ist und welche davor und danach gelaufen sind.
+
+    Jeder Schritt ist fuer sich atomar: bei Erfolg wird er sofort
+    festgeschrieben, beim Scheitern nur SEINE Arbeit zurueckgerollt. So kann
+    weder ein halb ausgefuehrter Schritt stehen bleiben noch ein
+    `ON CONFLICT ROLLBACK` bzw. ein erst beim COMMIT gepruefter
+    (DEFERRABLE) Fremdschluessel aus einer eingespielten Tabelle die
+    Arbeit der vorherigen Schritte mitreissen.
+
+    NICHT fuer die Anweisungen, die das Schema selbst aufbauen (CREATE
+    TABLE, ALTER TABLE ADD COLUMN): fehlt eine Kerntabelle, ist die
+    Anwendung auch dann nicht sinnvoll "gestartet", wenn der Prozess laeuft.
+    Solche Fehler bleiben laut.
+    """
+    try:
+        yield
+        conn.commit()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        log.warning("Start-Schritt '%s' fehlgeschlagen (%s: %s). Die Anwendung "
+                    "startet trotzdem, aber mit eingeschraenkter Garantie: %s",
+                    schritt, type(exc).__name__, exc, folge)
+
+
 def init_db():
     conn = get_db()
     conn.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -375,31 +748,60 @@ def init_db():
     # Admin-Kaskade weiter unten) bei jedem Neustart einen zweiten,
     # ueberfluessigen 'admin'-Account erzeugen.
     _user_count = conn.execute("SELECT COUNT(*) c FROM users").fetchone()['c']
+    # Sicherheit (Befund I8): das Bootstrap-Passwort ist ein Einmalpasswort.
+    # Ohne ADMIN_PASSWORD wird es erzeugt und im Klartext geloggt - der
+    # Betreiber braucht bei einer frischen Installation irgendeinen Weg
+    # hinein, also bleibt das Log. Damit landet es aber im Docker-Log, das
+    # Log-Treiber typischerweise aufbewahren und weiterreichen. Frueher setzte
+    # dieses INSERT `must_change_password` nicht (Spaltendefault 0), das
+    # geloggte Passwort blieb also unbegrenzt gueltig. Jetzt wird das Flag
+    # unten gesetzt, sobald die Spalte per Migration existiert - der erste
+    # Login zwingt ueber login_required nach /password/aendern, danach ist der
+    # geloggte Wert wertlos.
+    _bootstrap_admin_id = None
     if not user and _user_count == 0:
-        from werkzeug.security import generate_password_hash
-        import os as _os
-        # Passwort aus ENV oder sicheres Zufalls-Passwort generieren
-        _init_pwd = _os.environ.get('ADMIN_PASSWORD', '')
-        if not _init_pwd:
-            import secrets as _s
-            _init_pwd = _s.token_urlsafe(12)
-            import logging as _lg
-            _lg.getLogger(__name__).warning(
-                "ACHTUNG: Kein ADMIN_PASSWORD gesetzt. "
-                "Temporäres Passwort: %s — bitte sofort in den Einstellungen ändern!", _init_pwd
-            )
-        default_hash = generate_password_hash(_init_pwd)
-        conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", ('admin', default_hash))
-    else:
-        # Prüfe ob noch das alte Default-Passwort 'admin' aktiv ist
-        from werkzeug.security import check_password_hash as _cph
-        _row = conn.execute("SELECT password_hash FROM users WHERE username = 'admin'").fetchone()
-        if _row and _cph(_row['password_hash'], 'admin'):
-            import logging as _lg
-            _lg.getLogger(__name__).warning(
-                "SICHERHEITSWARNUNG: Admin-Passwort ist noch 'admin'. "
-                "Bitte sofort unter Einstellungen → Passwort ändern!"
-            )
+        # Bootstrap, keine Schemadefinition - darf den Start nicht verhindern
+        # (Regel: siehe _startschritt). Scheitert das INSERT an einer
+        # eingespielten users-Tabelle, startet die Anwendung ohne Konto, statt
+        # gar nicht; das Protokoll sagt, warum.
+        with _startschritt(conn, 'Bootstrap-Admin anlegen',
+                           "es wurde kein Benutzer 'admin' angelegt, eine "
+                           "Anmeldung ist erst nach Reparatur der users-Tabelle "
+                           "moeglich"):
+            from werkzeug.security import generate_password_hash
+            import os as _os
+            # Passwort aus ENV oder sicheres Zufalls-Passwort generieren
+            _init_pwd = _os.environ.get('ADMIN_PASSWORD', '')
+            if not _init_pwd:
+                import secrets as _s
+                _init_pwd = _s.token_urlsafe(12)
+                import logging as _lg
+                _lg.getLogger(__name__).warning(
+                    "ACHTUNG: Kein ADMIN_PASSWORD gesetzt. Einmal-Passwort für den "
+                    "Benutzer 'admin': %s — es MUSS beim ersten Login geändert werden, "
+                    "die App erzwingt das. Achtung: dieses Passwort steht jetzt im "
+                    "Klartext im Log (z.B. im Docker-Log). Das Log ist damit "
+                    "vertraulich zu behandeln und nach dem ersten Login zu löschen "
+                    "bzw. zu rotieren.", _init_pwd
+                )
+            default_hash = generate_password_hash(_init_pwd)
+            _cur = conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                                ('admin', default_hash))
+            _bootstrap_admin_id = _cur.lastrowid
+    # Hier stand frueher eine Pruefung "ist das Admin-Passwort noch 'admin'?"
+    # per check_password_hash(). Bewusst ENTFERNT, nicht nur eingerahmt
+    # (fuenfte Nachpruefung): sie war reine Diagnose, lief bei jedem
+    # create_app() und rechnete mit Kostenparametern, die nach einem Restore
+    # aus der hochgeladenen Datei stammen. Ein Hash wie
+    # 'pbkdf2:sha256:2147483647$...' wirft nichts - er rechnet nur ueber zwei
+    # Minuten, und gunicorn (timeout=120, preload_app=False) beendet den
+    # Worker waehrend load_wsgi(), startet ihn neu, und so fort. Gegen
+    # Rechenzeit hilft _startschritt nicht. Regel daraus: nichts, was
+    # bedingungslos in create_app() laeuft, darf wiederherstellbare Daten an
+    # ein kostenparametrisiertes Verfahren (KDF) geben. Das Standardpasswort
+    # 'admin' vergibt die Anwendung ohnehin seit Befund I8 nicht mehr (das
+    # Bootstrap-Passwort ist zufaellig und muss beim ersten Login geaendert
+    # werden) - die Warnung galt nur noch sehr alten Installationen.
 
     conn.execute("""CREATE TABLE IF NOT EXISTS persons (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
@@ -465,7 +867,7 @@ def init_db():
     _user_cols = {r[1] for r in conn.execute('PRAGMA table_info(users)')}
     if 'role' not in _user_cols:
         try:
-            _dest = create_backup('pre-profiles')
+            _dest = create_backup('pre-profiles', schutz=True)
             log.info("Sicherungskopie vor der Profil-Migration: %s", _dest.name)
         except Exception:
             log.exception("Sicherungskopie vor der Profil-Migration fehlgeschlagen "
@@ -497,27 +899,100 @@ def init_db():
         except Exception as _exc:
             log.debug("Migration uebersprungen (vermutlich bereits vorhanden): %s (%s)", sql, _exc)
 
-    # 1:1-Verknuepfung Benutzer <-> Person; beide Seiten bleiben optional.
-    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person'
-                 ' ON users(person_id) WHERE person_id IS NOT NULL')
-    conn.execute('CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)')
+    # ════════════════════════════════════════════════════════════════════
+    # Ab hier steht das Schema. Was folgt, ist Absicherung, Bootstrap und
+    # Nacharbeit - und fuer ALLES davon gilt eine einzige Regel:
+    #
+    #   Nichts in diesem Abschnitt darf den Start verhindern koennen.
+    #
+    # Jeder Schritt laeuft deshalb in _startschritt() (Begruendung dort).
+    # Frueher stand hier genau EIN try/except, um den Index idx_users_person;
+    # die Regel galt also fuer eine Anweisung, und die naechste Pruefrunde
+    # fand die naechste ungeschuetzte (_ensure_admin an einer eingespielten
+    # users-Tabelle mit `CHECK (role <> 'admin')`). Wer hier einen Schritt
+    # ergaenzt, setzt ihn in einen eigenen _startschritt() - nicht daneben.
+    #
+    # Der Schemastand wird vorher festgeschrieben: das Zurueckrollen eines
+    # gescheiterten Schritts soll nur dessen eigene Arbeit treffen.
+    conn.commit()
 
-    _ensure_admin(conn)
-    _autolink_single_person(conn)
+    # Sicherheit (Befund I8): Bootstrap-Passwort ist ein Einmalpasswort.
+    # Der INSERT oben kann das Flag nicht selbst setzen - bei einer frischen
+    # Datenbank existiert die Spalte `must_change_password` zu dem Zeitpunkt
+    # noch gar nicht, sie kommt erst aus der Migration direkt darueber.
+    # Deshalb hier, direkt nach der Migration und nur fuer genau die Zeile,
+    # die dieser Lauf angelegt hat.
+    if _bootstrap_admin_id is not None:
+        with _startschritt(conn, 'Einmalpasswort des Bootstrap-Admins markieren',
+                           'der erste Login erzwingt KEINEN Passwortwechsel, das '
+                           'geprotokollierte Initialpasswort bleibt gueltig - '
+                           'bitte sofort von Hand aendern'):
+            conn.execute('UPDATE users SET must_change_password=1 WHERE id=?',
+                         (_bootstrap_admin_id,))
+            log.info("Bootstrap-Admin id=%s angelegt - Passwortwechsel beim ersten "
+                     "Login erzwungen.", _bootstrap_admin_id)
+
+    # 1:1-Verknuepfung Benutzer <-> Person; beide Seiten bleiben optional.
+    #
+    # Der Anlass fuer die Regel oben: `CREATE INDEX IF NOT EXISTS` ist nur
+    # dann ein stilles Nichts, wenn unter dem Namen bereits ein INDEX liegt.
+    # Lag dort eine TABELLE (eine eingespielte Datei mit einer Tabelle
+    # `idx_users_person`), warf die Anweisung "there is already a table named
+    # idx_users_person" - und die Anwendung startete nie wieder.
+    with _startschritt(conn, 'Index idx_users_person anlegen',
+                       'die Eindeutigkeit der 1:1-Verknuepfung Benutzer <-> '
+                       'Person wird nicht von der Datenbank erzwungen'):
+        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_person'
+                     ' ON users(person_id) WHERE person_id IS NOT NULL')
+
+    # app_meta wird bewusst NICHT mit `CREATE TABLE IF NOT EXISTS` angelegt:
+    # das haette die (moeglicherweise aus einer eingespielten Datei
+    # stammende) vorhandene Tabelle samt ihrer Form stehen lassen.
+    # _app_meta_sicherstellen() legt sie an bzw. baut sie neu auf.
+    # _ensure_instanz_id() faengt sqlite3.Error schon selbst ab; der Rahmen
+    # (Regel oben) nimmt alles andere. Fehlt die Kennung danach, faellt der
+    # Restore zu (srv.restore_kein_eigener_nachweis) - nicht auf.
+    with _startschritt(conn, 'Instanzkennung sicherstellen (_ensure_instanz_id)',
+                       'ohne lesbare Instanzkennung wird jeder Restore abgelehnt'):
+        _ensure_instanz_id(conn)
+
+    # Beide schreiben auf users - nach einem Restore eine Tabelle aus der
+    # hochgeladenen Datei, samt CHECK-Bedingungen und generierten Spalten.
+    # Regel: siehe oben. Getrennte Schritte, damit das Protokoll zeigt,
+    # welcher von beiden ausgefallen ist.
+    with _startschritt(conn, 'aktiven Admin sicherstellen (_ensure_admin)',
+                       'es gibt moeglicherweise keinen aktiven Admin; die '
+                       'Benutzerverwaltung ist dann nicht erreichbar'):
+        _ensure_admin(conn)
+    with _startschritt(conn, 'Benutzer und Person verknuepfen '
+                             '(_autolink_single_person)',
+                       'der einzige Benutzer ist keiner Person zugeordnet und '
+                       'muss von Hand verknuepft werden'):
+        _autolink_single_person(conn)
 
     # ── Performance: Indices für häufig gefilterte Spalten ──────────────────
-    for idx_sql in [
-        'CREATE INDEX IF NOT EXISTS idx_expenses_year_month ON expenses(year, month)',
-        'CREATE INDEX IF NOT EXISTS idx_expenses_person_id ON expenses(person_id)',
-        'CREATE INDEX IF NOT EXISTS idx_expenses_category_id ON expenses(category_id)',
-        'CREATE INDEX IF NOT EXISTS idx_income_year_month ON income(year, month)',
-        'CREATE INDEX IF NOT EXISTS idx_income_person_id ON income(person_id)',
-        'CREATE INDEX IF NOT EXISTS idx_month_status_ym ON month_status(year, month)',
-    ]:
-        try:
-            conn.execute(idx_sql)
-        except Exception:
-            pass
+    # Regel: siehe oben. Jeder Index einzeln, damit einer, der scheitert,
+    # die uebrigen nicht mitnimmt; der Rahmen faengt, was ausserhalb der
+    # einzelnen Anweisungen passiert (z.B. beim COMMIT).
+    with _startschritt(conn, 'Performance-Indizes anlegen',
+                       'Abfragen koennen langsamer sein, das Ergebnis ist '
+                       'dasselbe'):
+        for idx_sql in [
+            'CREATE INDEX IF NOT EXISTS idx_expenses_year_month ON expenses(year, month)',
+            'CREATE INDEX IF NOT EXISTS idx_expenses_person_id ON expenses(person_id)',
+            'CREATE INDEX IF NOT EXISTS idx_expenses_category_id ON expenses(category_id)',
+            'CREATE INDEX IF NOT EXISTS idx_income_year_month ON income(year, month)',
+            'CREATE INDEX IF NOT EXISTS idx_income_person_id ON income(person_id)',
+            'CREATE INDEX IF NOT EXISTS idx_month_status_ym ON month_status(year, month)',
+        ]:
+            try:
+                conn.execute(idx_sql)
+            except Exception as _exc:
+                # Frueher ein stilles `pass`. `IF NOT EXISTS` wirft bei einem
+                # vorhandenen Index gar nicht erst - ein Fehler hier ist also
+                # immer ein echter und gehoert ins Protokoll.
+                log.warning("Performance-Index nicht angelegt (%s): %s - der "
+                            "Start laeuft weiter.", _exc, idx_sql)
 
     conn.commit(); conn.close()
     # init_db() darf innerhalb desselben App-Context mehrfach laufen (Idempotenz-
@@ -844,6 +1319,115 @@ _MAX_LOGIN_ATTEMPTS = 5
 _MAX_IP_ATTEMPTS = 30
 _LOGIN_LOCKOUT_SECONDS = 60
 
+# Sicherheit (Befund I3): Zeitkanal am Login, der gueltige Benutzernamen verraet.
+#
+# Frueher stand dort `if user and check_password_hash(...)`. Bei einem
+# unbekannten Benutzernamen schliesst `and` kurz, der teure scrypt-Vergleich
+# entfaellt komplett und die Antwort kommt messbar frueher - gemessen 0,7 ms
+# gegenueber 36,6 ms bei einem existierenden Konto, also Faktor 50 und aus der
+# Ferne trivial ablesbar. Damit laesst sich aufzaehlen, welche Konten im
+# Haushalt existieren; erst danach lohnt sich Brute-Force oder das gezielte
+# Aussperren per Lockout. Die absichtlich unspezifische Fehlermeldung nuetzt
+# nichts, wenn die Antwortzeit die Auskunft gibt.
+#
+# Gegenmittel: existiert keine Zeile, wird das eingegebene Passwort gegen
+# diesen festen Dummy-Hash geprueft. Der Vergleich sieht sinnlos aus - sein
+# Ergebnis wird verworfen - kostet aber genau dieselbe scrypt-Rechenzeit.
+# BITTE NICHT "WEGOPTIMIEREN": ohne ihn ist der Zeitkanal sofort zurueck.
+#
+# Der Dummy kann niemanden anmelden: der Erfolgszweig unten verlangt
+# zusaetzlich eine echte Benutzerzeile, und das Klartextpasswort hier ist
+# keinem Konto zugeordnet.
+_DUMMY_PASSWORT = 'kassenstuerzle-dummy-nie-ein-konto'
+_DUMMY_PASSWORT_HASH = generate_password_hash(_DUMMY_PASSWORT)
+
+
+# ── Kostenobergrenze fuer gespeicherte Passwort-Hashes (fuenfte Nachpruefung) ─
+#
+# Ein werkzeug-Hash traegt seine Kostenparameter selbst im Text:
+#   scrypt:<n>:<r>:<p>$<salt>$<hex>     pbkdf2:<hash>:<iterationen>$<salt>$<hex>
+# check_password_hash() liest sie aus und reicht sie UNGEPRUEFT an hashlib
+# weiter. Ein eingespielter Hash 'pbkdf2:sha256:2147483647$...' rechnet damit
+# minutenlang, ein 'scrypt:<riesig>:...' belegt Gigabytes - und dagegen hilft
+# kein try/except, denn es wird nichts geworfen, es dauert nur. Vier
+# Pruefrunden lang wurde hier gegen AUSNAHMEN abgesichert; diese Luecke ist
+# eine andere Klasse: Rechenzeit und Speicher.
+#
+# Deshalb geht ein Hash aus der Datenbank nur dann an check_password_hash(),
+# wenn diese Funktion ihn als Positivliste bestaetigt: bekanntes Verfahren,
+# genau die Form, die werkzeug selbst erzeugt, und Kosten hoechstens das
+# Doppelte der werkzeug-Voreinstellung. Alles andere zaehlt wie ein falsches
+# Passwort (Login, Passwortwechsel) bzw. als ungueltige Sicherung (Restore).
+#
+# Obergrenzen, abgeleitet aus Werkzeug 3.1.8 (requirements.txt):
+#   * pbkdf2: werkzeug.security.DEFAULT_PBKDF2_ITERATIONS (dort 1_000_000),
+#     zur Laufzeit gelesen - hebt ein werkzeug-Update die Voreinstellung an,
+#     wandert die Grenze mit, und frisch erzeugte Hashes bleiben gueltig.
+#   * scrypt: werkzeug setzt n=2**15, r=8, p=1 fest im Code von
+#     _hash_internal(), ohne Konstante. Begrenzt wird das Produkt n*r*p:
+#     Rechenzeit waechst mit n*r*p, Speicher (128*n*r Byte) mit n*r, beides
+#     ist damit gedeckelt (bei p >= 1). Ein Test prueft, dass
+#     generate_password_hash() in beiden Verfahren diese Grenze einhaelt -
+#     aendert ein Update die scrypt-Voreinstellung, faellt das dort auf und
+#     nicht erst beim Login der Nutzer.
+_HASH_KOSTEN_FAKTOR = 2
+_SCRYPT_STANDARD_AUFWAND = (2 ** 15) * 8 * 1
+_PBKDF2_HASHVERFAHREN = frozenset({'sha1', 'sha224', 'sha256', 'sha384', 'sha512'})
+# Ein echter Hash ist 100-170 Zeichen lang. Die Grenze haelt auch die
+# Laenge des Salts (geht einmal in die Rechnung ein) und int() vom Hals.
+_HASH_MAX_LAENGE = 512
+
+
+def _pbkdf2_obergrenze() -> int:
+    import werkzeug.security as _ws
+    return _HASH_KOSTEN_FAKTOR * int(getattr(_ws, 'DEFAULT_PBKDF2_ITERATIONS', 1_000_000))
+
+
+def _hash_kosten_sind_plausibel(hash_str) -> bool:
+    """Wahr nur fuer einen Hash, den check_password_hash() in bekannter,
+    begrenzter Zeit und mit begrenztem Speicher pruefen kann.
+
+    Zerlegt den Text genau so wie werkzeug (split('$', 2), dann
+    split(':') und int()) - damit bewertet diese Funktion dieselben Zahlen,
+    die werkzeug anschliessend verwenden wuerde. Wirft nie; jede
+    Unregelmaessigkeit ergibt False.
+    """
+    try:
+        if not isinstance(hash_str, str) or not hash_str:
+            return False
+        if len(hash_str) > _HASH_MAX_LAENGE or not hash_str.isascii():
+            # Nicht-ASCII laesst ausserdem hmac.compare_digest mit TypeError
+            # scheitern.
+            return False
+        teile = hash_str.split('$', 2)
+        if len(teile) != 3:
+            return False
+        verfahren, salz, wert = teile
+        if not salz or not wert:
+            return False
+        name, *parameter = verfahren.split(':')
+        if name == 'scrypt':
+            if not parameter:
+                return True     # werkzeug nimmt dann seine Voreinstellung
+            if len(parameter) != 3:
+                return False
+            n, r, p = (int(x) for x in parameter)
+            if n < 2 or (n & (n - 1)) != 0 or r < 1 or p < 1:
+                return False
+            return n * r * p <= _HASH_KOSTEN_FAKTOR * _SCRYPT_STANDARD_AUFWAND
+        if name == 'pbkdf2':
+            if len(parameter) > 2:
+                return False
+            if parameter and parameter[0] not in _PBKDF2_HASHVERFAHREN:
+                return False
+            if len(parameter) < 2:
+                return True     # werkzeug nimmt dann seine Voreinstellung
+            iterationen = int(parameter[1])
+            return 1 <= iterationen <= _pbkdf2_obergrenze()
+        return False
+    except Exception:
+        return False
+
 
 @main_bp.route('/login', methods=['GET', 'POST'])
 def login():
@@ -877,7 +1461,42 @@ def login():
         # deaktiviertes Konto ohne den teuren Hash-Vergleich und damit messbar
         # schneller - ein Zeitkanal, der genau das verraet, was die
         # unspezifische Fehlermeldung verbergen soll.
-        if user and check_password_hash(user['password_hash'], password) and user['is_active']:
+        #
+        # Und aus demselben Grund (Befund I3) laeuft der scrypt-Vergleich auch
+        # dann, wenn es den Benutzernamen gar nicht gibt: dann eben gegen
+        # _DUMMY_PASSWORT_HASH. Das Ergebnis wird verworfen, nur die Rechenzeit
+        # zaehlt. Siehe den ausfuehrlichen Kommentar bei _DUMMY_PASSWORT_HASH.
+        #
+        # Ein gespeicherter Hash mit unplausiblen Kosten (siehe
+        # _hash_kosten_sind_plausibel) geht NICHT an check_password_hash -
+        # er koennte den Worker minutenlang blockieren. Stattdessen laeuft
+        # der Dummy-Vergleich, damit auch dieser Fall nicht an der
+        # Antwortzeit erkennbar ist; das Ergebnis ist "falsches Passwort".
+        if user is not None and _hash_kosten_sind_plausibel(user['password_hash']):
+            try:
+                passwort_stimmt = check_password_hash(user['password_hash'], password)
+            except Exception:
+                # Kann nur bei einem Hash passieren, der nicht von
+                # generate_password_hash() stammt - ausserhalb einer
+                # gebastelten, eingespielten Datei kommt das nicht vor (siehe
+                # _hat_ungueltige_passwort_hashes, der Riegel davor). Ohne
+                # dieses Auffangen waere dieses eine Konto nach einem
+                # bestaetigten Altrestore fuer immer gesperrt: jeder
+                # Loginversuch wuerfe einen 500er, behebbar nur per
+                # Datenbankzugriff. Ein ungueltiger Hash ist kein gueltiges
+                # Passwort - also schlicht als falsch behandeln.
+                #
+                # Bewusst `Exception` und keine Aufzaehlung: frueher stand
+                # hier (ValueError, TypeError), und werkzeug warf bei einer
+                # zu grossen Iterationszahl OverflowError - wieder ein 500er.
+                # Eine Liste bekannter Ausnahmen ist genau das Muster, das
+                # fuenf Pruefrunden lang die jeweils naechste Luecke liess.
+                passwort_stimmt = False
+        else:
+            check_password_hash(_DUMMY_PASSWORT_HASH, password)
+            passwort_stimmt = False
+
+        if user and passwort_stimmt and user['is_active']:
             # Erfolg: Zähler zurücksetzen, Session neu aufbauen
             if key:
                 _login_attempts[key] = {'count': 0, 'locked_until': 0}
@@ -934,7 +1553,23 @@ def change_password():
     conn = get_db()
     user = conn.execute("SELECT password_hash FROM users WHERE id = ?", (session['user_id'],)).fetchone()
 
-    if not user or not check_password_hash(user['password_hash'], old_pw):
+    # try/except aus demselben Grund wie beim Login (main.py, check_password_hash
+    # dort): ein Hash, der nicht von generate_password_hash() stammt, kann nur
+    # aus einer eingespielten, gebastelten Datei kommen und liesse diese Route
+    # sonst mit einem 500er scheitern statt mit der eigentlich gemeinten
+    # Fehlermeldung "altes Passwort falsch".
+    #
+    # Ein Hash mit unplausiblen Kosten wird gar nicht erst berechnet (siehe
+    # _hash_kosten_sind_plausibel) - und `except Exception` statt einer Liste
+    # aus demselben Grund wie beim Login (OverflowError fehlte dort).
+    altes_passwort_stimmt = False
+    if user and _hash_kosten_sind_plausibel(user['password_hash']):
+        try:
+            altes_passwort_stimmt = check_password_hash(user['password_hash'], old_pw)
+        except Exception:
+            altes_passwort_stimmt = False
+
+    if not user or not altes_passwort_stimmt:
         conn.close()
         return jsonify({'success': False, 'error': t('srv.old_password_wrong')}), 400
 
@@ -1308,6 +1943,17 @@ def save_expenses():
     deleted_ids = d.get('deleted_ids') or []
     conn = get_db()
     id_map = {}
+    # Belege, deren letzte Referenz in diesem Request verschwinden koennte.
+    # Gesammelt VOR dem Schreiben, aufgeraeumt am Ende (Befund I5) - siehe
+    # _verwaiste_belege_loeschen(). Frueher blieb jede Datei fuer immer liegen.
+    _belegkandidaten = set()
+
+    def _beleg_von(rid):
+        """Aktuell gespeicherter Belegname dieser Ausgabe (oder None)."""
+        row = conn.execute('SELECT receipt_filename FROM expenses'
+                           ' WHERE id=? AND year=? AND month=?',
+                           (rid, year, month)).fetchone()
+        return row['receipt_filename'] if row else None
 
     # 1) Ausdrücklich gelöschte Zeilen entfernen
     for raw in deleted_ids:
@@ -1315,6 +1961,7 @@ def save_expenses():
             rid = int(raw)
         except (TypeError, ValueError):
             continue
+        _belegkandidaten.add(_beleg_von(rid))
         conn.execute('DELETE FROM expenses WHERE id=? AND year=? AND month=?', (rid, year, month))
 
     # 2) Zeilen anlegen bzw. aktualisieren (nie löschen, was hier fehlt)
@@ -1331,6 +1978,7 @@ def save_expenses():
         if amt == 0:
             # Geleerter Betrag: bestehende Zeile löschen, neue ignorieren
             if rid is not None:
+                _belegkandidaten.add(_beleg_von(rid))
                 conn.execute('DELETE FROM expenses WHERE id=? AND year=? AND month=?',
                              (rid, year, month))
             continue
@@ -1339,11 +1987,24 @@ def save_expenses():
         cid     = int(e['category_id'])        if e.get('category_id')        else None
         pfpid   = int(e['paid_for_person_id']) if e.get('paid_for_person_id') else None
         is_cash = 1 if e.get('is_cash') else 0
-        rfn     = e.get('receipt_filename') or None
+        rfn, _name_abgelehnt = _pruefe_belegname(e.get('receipt_filename'))
         day     = int(e.get('day') or 1)
         desc    = e.get('description', '')
 
         if rid is not None:
+            # Wird der Beleg ausgetauscht oder entfernt, ist der alte danach
+            # moeglicherweise verwaist (Befund I5).
+            #
+            # Nacharbeit: NICHT nach einem abgelehnten Namen. Das stille
+            # Verwerfen eines ungueltigen Werts ist dokumentiert - das stille
+            # Loeschen der zugehoerigen Datei war es nicht. Ohne diese
+            # Ausnahme genuegte ein einziger Autosave mit kaputtem Namen
+            # (z.B. aus einem alten Tab), damit der Beleg von der Platte
+            # verschwindet: rfn wird None, die Zeile zeigt auf nichts mehr,
+            # und _verwaiste_belege_loeschen() raeumt die Datei weg.
+            _alter_beleg = _beleg_von(rid)
+            if _alter_beleg and _alter_beleg != rfn and not _name_abgelehnt:
+                _belegkandidaten.add(_alter_beleg)
             conn.execute(
                 'UPDATE expenses SET day=?, description=?, person_id=?, category_id=?,'
                 ' amount=?, is_cash=?, paid_for_person_id=?, receipt_filename=?'
@@ -1360,6 +2021,10 @@ def save_expenses():
 
     activity_version = _bump_activity(conn, _month_scope(year, month))
     conn.commit()
+
+    # Erst nach dem Commit aufraeumen: bricht das Speichern vorher ab, waere
+    # sonst schon die Datei weg, waehrend die Ausgabe noch existiert.
+    _verwaiste_belege_loeschen(conn, _belegkandidaten)
 
     ms = conn.execute('SELECT settled FROM month_status WHERE year=? AND month=?', (year, month)).fetchone()
     is_settled = bool(ms and ms['settled'])
@@ -1455,6 +2120,25 @@ def save_persons():
                     'activity_version': activity_version, 'conflicts': conflicts,
                     'blocked': blocked})
 
+STANDARD_FARBE = '#6c757d'
+_FARB_MUSTER = _re_modul.compile(r'^#?[0-9A-Fa-f]{3,8}$')
+
+
+def sichere_farbe(wert, standard=STANDARD_FARBE):
+    """Gibt `wert` nur zurück, wenn er wie ein Farbwert aussieht, sonst
+    `standard`.
+
+    Kategoriefarben sind frei wählbar und landen in `style`-Attributen. Ohne
+    diese Prüfung reicht ein Wert wie `red" onmouseover="alert(1)` aus, um aus
+    dem Attribut auszubrechen - das ist die Wurzel der Farb-Senken aus
+    Sicherheitsprüfung K1. Deshalb serverseitig prüfen, nicht erst im Browser.
+    """
+    if wert is None:
+        return standard
+    text = str(wert).strip()
+    return text if _FARB_MUSTER.match(text) else standard
+
+
 @main_bp.route('/api/categories/save', methods=['POST'])
 @login_required
 def save_categories():
@@ -1479,7 +2163,9 @@ def save_categories():
             continue
         # `color` ist NOT NULL in der DB - c.get(key, default) greift nur wenn
         # der Key fehlt, nicht wenn der Client explizit `color: null` sendet.
-        col = c.get('color') or '#6c757d'
+        # Alles, was nicht wie eine Farbe aussieht, wird auf den Standard
+        # zurückgesetzt (siehe sichere_farbe).
+        col = sichere_farbe(c.get('color'))
         sp = 1 if c.get('is_split') else 0
         try:
             cid = int(c['id']) if c.get('id') else None
@@ -1562,8 +2248,16 @@ def import_csv():
         if len(row) < 4: continue
         try: affected.add((int(row[1]), int(row[2])))
         except: pass
+    _belegkandidaten = set()
     if overwrite:
         for y,m in affected:
+            # Belege der gleich geloeschten Ausgaben merken (Befund I5) - der
+            # CSV-Import kennt keine Belege, ihre Dateien blieben sonst
+            # dauerhaft ohne Referenz im Verzeichnis liegen.
+            _belegkandidaten.update(
+                r['receipt_filename'] for r in conn.execute(
+                    'SELECT DISTINCT receipt_filename FROM expenses'
+                    ' WHERE year=? AND month=? AND receipt_filename IS NOT NULL', (y, m)))
             conn.execute('DELETE FROM expenses WHERE year=? AND month=?',(y,m))
             conn.execute('DELETE FROM income   WHERE year=? AND month=?',(y,m))
     imported = ok = 0; skipped = []
@@ -1593,7 +2287,11 @@ def import_csv():
     # ueber den Aenderungszaehler anstossen.
     for y, m in affected:
         _bump_activity(conn, _month_scope(y, m))
-    conn.commit(); conn.close()
+    conn.commit()
+    # Erst nach dem Commit (Befund I5): bricht der Import vorher ab, bleiben
+    # Ausgabe und Beleg zusammen erhalten.
+    _verwaiste_belege_loeschen(conn, _belegkandidaten)
+    conn.close()
     month_links = sorted([{'year':y,'month':m} for y,m in affected], key=lambda x:(x['year'],x['month']))
     return jsonify({'success': True, 'imported': imported,
                     'months': len(affected), 'month_links': month_links,
@@ -2518,14 +3216,47 @@ from pathlib import Path
 # (der oben ggf. an sqlcipher3 gebunden ist) überschreiben und die
 # Verschlüsselung für die gesamte App stillschweigend deaktivieren.
 
-def create_backup(label: str = "") -> Path:
+def create_backup(label: str = "", schutz: bool = False) -> Path:
+    """Legt eine Sicherung der Hauptdatenbank an.
+
+    `schutz=True` kennzeichnet eine Schutzkopie und ist ausschliesslich den
+    beiden internen Aufrufern vorbehalten (vor der Profil-Migration und vor
+    einem Restore). Befund M2: frueher entschied allein der DATEINAME darueber,
+    ob eine Sicherung als Schutzkopie zaehlt - und das Label kommt bei
+    /api/backup/create aus einer Benutzereingabe. Fuenf Sicherungen mit dem
+    Label 'pre-restore' verdraengten so genau die Schutzkopien, die nach einem
+    misslungenen Restore der einzige Rueckweg sind. Die Einstufung haengt jetzt
+    am Aufrufer; ein Benutzer-Label kann keinen Schutzkopie-Namen mehr
+    erzeugen.
+    """
     from datetime import datetime
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    # Fuenfte Nachpruefung: der Zeitstempel war nur minutengenau. Zwei
+    # Restores in derselben Minute schrieben beide 'pre-restore' unter
+    # DEMSELBEN Namen - die zweite Schutzkopie ueberschrieb die erste, und
+    # der Rueckweg aus dem ersten (vielleicht schon misslungenen) Restore war
+    # weg, bevor ihn jemand nutzen konnte. Jetzt sekundengenau, und fuer den
+    # Fall derselben Sekunde ein Zaehler. Der Name wird mit O_EXCL belegt:
+    # "existiert schon" entscheidet das Dateisystem atomar, auch bei zwei
+    # gleichzeitigen Anfragen. Der Zaehler steht VOR dem Label, damit
+    # _ist_schutzkopie() (prueft das Namensende) unveraendert greift.
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    if not schutz:
+        label = _entschaerfe_label(label)
     suffix = f"_{label}" if label else ""
     db_path = DB_PATH
     backup_dir = Path(os.path.dirname(db_path)) / 'backups'
     backup_dir.mkdir(exist_ok=True)
-    dest = backup_dir / f"kassenstuerzle_{ts}{suffix}.db"
+    for zaehler in range(1, 1000):
+        teil = ts if zaehler == 1 else f"{ts}-{zaehler}"
+        dest = backup_dir / f"kassenstuerzle_{teil}{suffix}.db"
+        try:
+            # Gleich mit 0600 anlegen (Befund I2), nicht erst nachtraeglich.
+            os.close(os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise FileExistsError(f"Kein freier Sicherungsname fuer {ts}{suffix}")
     src = _open_db(db_path)
     bak = sqlite3.connect(str(dest))
     if _SQLCIPHER_AVAILABLE and _DB_KEY:
@@ -2534,15 +3265,22 @@ def create_backup(label: str = "") -> Path:
     src.backup(bak)
     bak.close()
     src.close()
+    # Sicherheit (Befund I2): eine Sicherung enthält dieselben Finanzdaten wie
+    # die Hauptdatenbank - ohne dies wäre sie mit dem Standard-umask 644
+    # abgelegt und für jeden mit Lesezugriff auf den Datenträger einsehbar.
+    try:
+        os.chmod(dest, 0o600)
+    except OSError as exc:
+        log.warning(f"Konnte Rechte der Sicherung nicht auf 0600 setzen: {exc}")
     # Sicherungskopien vor der Profil-Migration ('pre-profiles') und vor einem
     # Restore ('pre-restore') rotieren getrennt von den gewoehnlichen: bricht
     # die Migration wiederholt ab (z.B. ein fehlerhaftes ALTER), legt jeder
     # Neustart des Workers eine neue 'pre-profiles'-Sicherung an - in einem
     # gemeinsamen Topf wuerden 30 Neustarts jede vorher vorhandene Sicherung
     # verdraengen. Ein eigener, kleiner Topf schuetzt sie davor, ohne dass sie
-    # unbegrenzt wachsen koennen: das Label kommt aus einer Benutzereingabe
-    # (api_backup_create laesst Bindestriche stehen), ein reiner Ausschluss von
-    # der Rotation waere also beliebig oft ausloesbar.
+    # unbegrenzt wachsen koennen: auch die Schutzkopien entstehen automatisch
+    # (jeder Restore legt eine an), ein reiner Ausschluss von der Rotation
+    # waere also beliebig oft ausloesbar.
     _rotiere(backup_dir, schutzkopie=True,  limit=_MAX_SCHUTZ_BACKUPS)
     _rotiere(backup_dir, schutzkopie=False, limit=_MAX_BACKUPS)
     return dest
@@ -2554,16 +3292,40 @@ _SCHUTZ_LABELS = ('pre-profiles', 'pre-restore')
 
 
 def _ist_schutzkopie(name: str) -> bool:
-    """Sicherung, die vor einem riskanten Schritt automatisch angelegt wurde."""
+    """Stuft eine BEREITS vorhandene Datei anhand ihres Namens ein.
+
+    Nur fuer die Rotation gedacht: Sicherungen, die vor diesem Fix auf der
+    Platte des Nutzers gelandet sind, tragen ihre Einstufung ausschliesslich
+    im Namen und muessen weiter geschuetzt bleiben. Welche Art eine NEUE
+    Sicherung ist, entscheidet dagegen der Aufrufer (create_backup(schutz=...)).
+    """
     return any(name.endswith(f'_{label}.db') for label in _SCHUTZ_LABELS)
+
+
+def _entschaerfe_label(label: str) -> str:
+    """Nimmt einem Benutzer-Label die Wirkung eines Schutzkopie-Namens (M2).
+
+    Zweite Verteidigungslinie hinter der Ablehnung in api_backup_create: auch
+    ein kuenftiger Aufrufer, der ein ungeprueftes Label durchreicht, darf keine
+    Datei erzeugen, die _ist_schutzkopie() spaeter als Schutzkopie zaehlt.
+    """
+    if _ist_schutzkopie(f'_{label}.db'):
+        return label.replace('-', '_')
+    return label
+
+
+def _label_ist_reserviert(label: str) -> bool:
+    """Wuerde dieses Label einen reservierten Schutzkopie-Namen ergeben?"""
+    return _ist_schutzkopie(f'_{label}.db')
 
 
 def _rotiere(backup_dir: Path, schutzkopie: bool, limit: int) -> None:
     """Behaelt die juengsten `limit` Sicherungen der jeweiligen Art.
 
     Sortiert nach Aenderungszeit, nicht nach Dateiname: der Zeitstempel im
-    Namen ist minutengenau, mehrere Sicherungen derselben Minute liessen sich
-    ueber den Namen nicht in eine verlaessliche Reihenfolge bringen.
+    Namen ist nur sekundengenau (aeltere Dateien sogar nur minutengenau),
+    mehrere Sicherungen derselben Sekunde liessen sich ueber den Namen nicht
+    in eine verlaessliche Reihenfolge bringen.
     """
     vorhanden = [p for p in backup_dir.glob("kassenstuerzle_*.db")
                  if _ist_schutzkopie(p.name) == schutzkopie]
@@ -2577,6 +3339,12 @@ def api_backup_create():
     import re
     label = request.json.get('label', '')[:50]
     label = re.sub(r'[^a-zA-Z0-9_-]', '_', label)
+    # Befund M2: 'pre-restore'/'pre-profiles' sind den automatischen
+    # Schutzkopien vorbehalten. Klare Rueckmeldung statt stiller Umbenennung,
+    # damit der Admin die Sicherung unter dem Namen wiederfindet, den er
+    # vergeben hat.
+    if _label_ist_reserviert(label):
+        return jsonify(success=False, error=t('srv.reserved_backup_label', label=label)), 400
     dest = create_backup(label)
     stat = dest.stat()
     return jsonify({"success": True, "filename": dest.name, "size_kb": round(stat.st_size / 1024, 1)})
@@ -2612,6 +3380,395 @@ def api_backup_download(filename):
         return t('srv.file_not_found'), 404
     return send_file(str(path), as_attachment=True, download_name=filename, mimetype="application/x-sqlite3")
 
+
+class _SicherungAbgelehnt(Exception):
+    """Eine hochgeladene Sicherung hat die Pruefung nicht bestanden.
+
+    Traegt den Uebersetzungs-Key des konkreten Ablehnungsgrundes, damit ein
+    Admin eine Sicherung mit falschem Schluessel von einer fremden Datei
+    unterscheiden kann (Befund K2).
+    """
+
+    def __init__(self, schluessel: str, **platzhalter):
+        super().__init__(schluessel)
+        self.schluessel = schluessel
+        self.platzhalter = platzhalter
+
+
+# Tabellen, die JEDE echte Kassenstuerzle-Sicherung enthaelt, mit den Spalten,
+# ohne die sie nutzlos waere. Bewusst nur der alte Kern: Tabellen aus spaeteren
+# Phasen (push_subscriptions, activity, presence, app_meta) legt init_db() nach
+# dem Tausch additiv nach, sie hier zu fordern wuerde aeltere, voellig
+# legitime Sicherungen abweisen.
+# ── Positivliste der Objekte, die diese Anwendung selbst anlegt ──────────────
+#
+# Die Pruefung einer hochgeladenen Sicherung zaehlte frueher auf, was VERBOTEN
+# ist (Typ 'view' oder 'trigger'). Jede Runde fand die naechste Bauart, die
+# dort nicht stand: ein INDEX namens `app_meta` (DROP TABLE ist darauf ein
+# stilles Nichts, das folgende CREATE TABLE scheitert - die Installation hat
+# danach dauerhaft keine Kennung mehr), eine TABELLE namens
+# `idx_users_person` (init_db() stirbt beim CREATE INDEX, die App startet nie
+# wieder). Deshalb steht hier jetzt umgekehrt, was ERLAUBT ist: alles andere
+# faellt raus, unabhaengig vom Typ und unabhaengig davon, ob wir uns die
+# konkrete Schadwirkung vorstellen konnten.
+#
+# Name UND Typ muessen passen. Nur den Namen zu pruefen genuegt nicht: ein
+# Index namens `app_meta` traegt einen erlaubten Namen und ist trotzdem
+# genau der Angriff.
+#
+# ACHTUNG beim Erweitern des Schemas: eine neue Tabelle oder ein neuer Index
+# in init_db() MUSS hier nachgetragen werden, sonst lehnt die Anwendung ihre
+# eigenen Sicherungen ab. Der Gleichlauf ist getestet - siehe
+# test_erlaubte_objekte_bleiben_mit_init_db_im_gleichlauf in
+# tests/test_backup_restore_sicherheit.py: der Test baut eine frische
+# Datenbank ueber create_app() und vergleicht deren sqlite_master mit diesen
+# Mengen. Wer etwas hinzufuegt und diese Liste vergisst, bekommt Rot.
+_EIGENE_TABELLEN = frozenset({
+    'users', 'persons', 'categories', 'expenses', 'month_status',
+    'recurring_expenses', 'income', 'category_splits', 'push_subscriptions',
+    'activity', 'presence', 'app_meta',
+})
+_EIGENE_INDIZES = frozenset({
+    'idx_users_person', 'idx_expenses_year_month', 'idx_expenses_person_id',
+    'idx_expenses_category_id', 'idx_income_year_month', 'idx_income_person_id',
+    'idx_month_status_ym',
+})
+# Von SQLite selbst verwaltet, nicht von dieser Anwendung: der Zaehler fuer
+# AUTOINCREMENT. Er steht in jeder echten Sicherung.
+_SQLITE_EIGENE_TABELLEN = frozenset({'sqlite_sequence'})
+# Implizite Indizes hinter PRIMARY KEY/UNIQUE. SQLite benennt sie
+# `sqlite_autoindex_<tabelle>_<n>`; erlaubt sind sie nur zu einer Tabelle,
+# die auch sonst erlaubt ist.
+_AUTOINDEX_MUSTER = _re_modul.compile(r'^sqlite_autoindex_(?P<tabelle>.+)_\d+$')
+
+
+def _objekt_ist_eigenes(typ, name) -> bool:
+    """Wahr, wenn `name` ein Objekt ist, das init_db() selbst so anlegt.
+
+    Bezeichner sind in SQLite nicht gross-/kleinschreibungsempfindlich:
+    ein Index `APP_META` kollidiert mit der Tabelle `app_meta` genauso.
+    Der Vergleich laeuft deshalb ueber die Kleinschreibung.
+
+    Bewusst OHNE .strip() - und genauso im app_meta-Wortlautvergleich in
+    _pruefe_sicherung(), damit beide Stellen denselben Namen meinen.
+    Leerzeichen sind in einem (gequoteten) SQLite-Bezeichner Teil des Namens:
+    `"users "` ist eine ANDERE Tabelle als `users`. Kein Objekt, das diese
+    Anwendung anlegt, hat Leerzeichen am Rand; mit .strip() liefe eine solche
+    fremde Tabelle als eigenes Objekt durch die Positivliste.
+    """
+    typ_klein = str(typ or '').lower()
+    name_klein = str(name or '').lower()
+    if typ_klein == 'table':
+        return name_klein in _EIGENE_TABELLEN or name_klein in _SQLITE_EIGENE_TABELLEN
+    if typ_klein == 'index':
+        if name_klein in _EIGENE_INDIZES:
+            return True
+        treffer = _AUTOINDEX_MUSTER.match(name_klein)
+        return bool(treffer and treffer.group('tabelle') in _EIGENE_TABELLEN)
+    # 'view', 'trigger' - und alles, was SQLite kuenftig dazunimmt.
+    return False
+
+
+def _schema_normalisiert(sql) -> str:
+    """Vergleichsform einer CREATE-Anweisung aus sqlite_master.
+
+    Kleinschreibung, zusammengefasste Leerzeichen und ohne das optionale
+    `IF NOT EXISTS`. Letzteres ist noetig, weil app_meta bis zur Einfuehrung
+    des Herkunftsnachweises mit `CREATE TABLE IF NOT EXISTS ...` angelegt
+    wurde - sqlite_master speichert die Anweisung so, wie sie geschrieben
+    wurde, und aeltere echte Sicherungen tragen deshalb genau diese Form.
+    """
+    text = ' '.join(str(sql or '').split()).lower()
+    return text.replace('create table if not exists ', 'create table ')
+
+
+_APP_META_SCHEMA_NORMALISIERT = _schema_normalisiert(_APP_META_SCHEMA)
+
+
+_PFLICHT_TABELLEN = {
+    'users':              {'id', 'username', 'password_hash'},
+    'persons':            {'id', 'name'},
+    'categories':         {'id', 'name'},
+    'expenses':           {'id', 'year', 'month', 'day', 'amount'},
+    'income':             {'id', 'year', 'month', 'day', 'amount'},
+    'month_status':       {'year', 'month', 'settled'},
+    'recurring_expenses': {'id', 'description', 'amount'},
+    'category_splits':    {'category_id', 'person_id', 'share'},
+}
+
+
+# ── Zweiter Riegel vor init_db() (vierte Nachpruefung) ──────────────────────
+#
+# Die beiden folgenden Pruefungen weisen Formen ab, die eine echte Sicherung
+# nie haben kann, an denen init_db() nach dem Tausch aber gescheitert ist.
+# Sie sind ausdruecklich NICHT die Behebung: die steht in init_db()
+# (_startschritt), weil keine Liste an dieser Stelle je vollstaendig sein
+# kann - genau das haben vier Pruefrunden gezeigt. Beispiel: ein
+# password_hash 'x$y$z' ist ein nicht leerer Text und kam an der ersten
+# Pruefung vorbei (inzwischen faengt ihn _hat_unplausible_passwort_hashes).
+
+def _hat_ungueltige_passwort_hashes(con) -> bool:
+    """Wahr, wenn irgendeine users-Zeile keinen nicht leeren Text als Hash hat.
+
+    password_hash ist in jeder Fassung von init_db() `TEXT NOT NULL`, und
+    die Anwendung schreibt dort nur Ergebnisse von generate_password_hash().
+    NULL, eine Zahl, ein BLOB oder ein leerer Text koennen deshalb nur aus
+    einer gebastelten Datei stammen - und liessen check_password_hash bei
+    jedem Login (frueher auch in init_db()) mit AttributeError/TypeError
+    scheitern.
+    """
+    zeile = con.execute(
+        "SELECT COUNT(*) FROM users "
+        "WHERE typeof(password_hash) <> 'text' OR length(password_hash) = 0"
+    ).fetchone()
+    return bool(zeile and zeile[0])
+
+
+def _hat_unplausible_passwort_hashes(con) -> bool:
+    """Wahr, wenn ein password_hash nicht die Form und die Kosten hat, die
+    generate_password_hash() erzeugt (Positivliste: _hash_kosten_sind_plausibel).
+
+    Fuenfte Nachpruefung: ein nicht leerer Text wie
+    'pbkdf2:sha256:2147483647$s$h' kam durch _hat_ungueltige_passwort_hashes
+    und liess spaeter jede Pruefung dieses Hashes minutenlang rechnen. Die
+    Aufrufstellen sind selbst abgesichert (init_db() prueft gar keine Hashes
+    mehr, Login und Passwortwechsel fragen dieselbe Funktion) - dies hier ist
+    die zusaetzliche Ablehnung am Tor, damit ein solcher Wert gar nicht erst
+    in die laufende Datenbank gelangt.
+
+    Laesst sich eine Zeile nicht einmal lesen (z.B. Text, der kein gueltiges
+    UTF-8 ist), gilt die Datei ebenfalls als unplausibel.
+    """
+    try:
+        for zeile in con.execute('SELECT password_hash FROM users'):
+            if not _hash_kosten_sind_plausibel(zeile[0]):
+                return True
+        return False
+    except Exception:
+        return True
+
+
+def _generierte_spalten(con, tabellen) -> list:
+    """Liefert 'tabelle.spalte' fuer jede generierte (oder versteckte) Spalte.
+
+    PRAGMA table_xinfo meldet in der Spalte `hidden` 0 fuer eine gewoehnliche
+    Spalte, 2/3 fuer eine generierte (VIRTUAL/STORED) und 1 fuer eine
+    versteckte Spalte einer virtuellen Tabelle. init_db() legt nie etwas
+    anderes als 0 an. Eine generierte `is_active` oder `person_id` in users
+    liess die UPDATEs in _ensure_admin()/_autolink_single_person() mit
+    "cannot UPDATE generated column" scheitern.
+
+    Geprueft werden alle uebergebenen Tabellen, nicht nur die Pflichttabellen:
+    eine echte Sicherung hat nirgends eine generierte Spalte. Kennt die
+    SQLite-Fassung table_xinfo nicht, liefert das PRAGMA nichts - dann bleibt
+    es beim Rahmen in init_db().
+    """
+    gefunden = []
+    for tabelle in sorted(tabellen):
+        # Der Name stammt aus sqlite_master der Datei und hat die Positivliste
+        # bereits passiert (_objekt_ist_eigenes) - er ist also einer der
+        # eigenen, festen Tabellennamen.
+        for spalte in con.execute(f'PRAGMA table_xinfo("{tabelle}")'):
+            if spalte[6]:
+                gefunden.append(f'{tabelle}.{spalte[1]}')
+    return gefunden
+
+
+def _oeffne_sicherung(pfad: str):
+    """Oeffnet eine hochgeladene Sicherung zur Pruefung.
+
+    Befund I4: frueher wurde erst mit `PRAGMA key` geoeffnet und bei JEDEM
+    Fehler auf eine schluessellose Verbindung zurueckgefallen - eine
+    Klartext-Datenbank (z.B. das eigene *.unencrypted.bak-Artefakt) wurde so
+    akzeptiert und ueber die verschluesselte Datenbank kopiert. Danach
+    scheiterte jedes spaetere `PRAGMA key` mit "file is not a database", auf
+    JEDEM Request inklusive /login und diesem Endpunkt selbst - die Instanz war
+    nur noch mit Shell-Zugriff auf das Volume zu retten. Bei gesetztem
+    Schluessel gibt es diesen Rueckfall deshalb nicht mehr.
+    """
+    con = None
+    try:
+        con = _open_db(pfad)
+        con.execute('SELECT count(*) FROM sqlite_master').fetchone()
+        return con
+    except Exception:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+        if _SQLCIPHER_AVAILABLE and _DB_KEY:
+            raise _SicherungAbgelehnt('srv.restore_wrong_key')
+    # Ohne konfigurierten Schluessel laeuft die Instanz unverschluesselt -
+    # hier ist eine schluessellose Verbindung der Normalfall, kein Rueckfall.
+    try:
+        con = sqlite3.connect(pfad)
+        con.execute('SELECT count(*) FROM sqlite_master').fetchone()
+        return con
+    except Exception:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+        raise _SicherungAbgelehnt('srv.invalid_db_upload')
+
+
+def _pruefe_sicherung(pfad: str, admin_username: str,
+                      fremde_instanz_bestaetigt: bool = False) -> None:
+    """Prueft eine hochgeladene Sicherung, bevor sie die Datenbank ersetzt.
+
+    Befund K2: geprueft wurde frueher nur die Endung '.db' und ob die Datei
+    ueberhaupt als SQLite aufgeht. Eine 3 kB grosse, handgebaute Datei mit
+    einer eigenen users-Zeile (role='admin') wurde uebernommen - danach war das
+    echte Adminkonto weg. Eine 0-Byte-Datei ist eine gueltige leere
+    SQLite-Datenbank und loeschte den kompletten Bestand.
+
+    Blocker 1: der Benutzername des angemeldeten Admins taugt NICHT als
+    Herkunftsnachweis - er heisst nach dem Bootstrap 'admin', und den kann
+    ein Angreifer in seine gebastelte Datei genauso hineinschreiben. Der
+    Nachweis laeuft deshalb ueber die Instanzkennung aus app_meta: ein
+    Zufallswert, den nur eine echte Sicherung DIESER Installation kennt.
+    Der Namensabgleich bleibt als zweites, nachgelagertes Signal bestehen -
+    er faengt die echte, aber fremde Sicherung einer anderen Installation
+    zusaetzlich ab.
+
+    Wirft _SicherungAbgelehnt mit dem jeweiligen Grund; kehrt nur zurueck, wenn
+    die Datei plausibel aus dieser Anwendung stammt.
+    """
+    if os.path.getsize(pfad) == 0:
+        raise _SicherungAbgelehnt('srv.restore_empty')
+
+    con = _oeffne_sicherung(pfad)
+    try:
+        objekte = con.execute(
+            'SELECT type, name, sql FROM sqlite_master').fetchall()
+        if not objekte:
+            # Eine leere Datei ist eine gueltige leere SQLite-Datenbank -
+            # sie wuerde den gesamten Bestand loeschen.
+            raise _SicherungAbgelehnt('srv.restore_empty')
+
+        # Positivliste statt Verbotsliste (siehe _EIGENE_TABELLEN): abgelehnt
+        # wird jedes Objekt, das diese Anwendung nicht selbst so anlegt -
+        # unabhaengig von seinem Typ. Eine Verbotsliste ('view', 'trigger')
+        # liess jeweils die naechste Bauart durch; eine echte Sicherung ist
+        # dagegen eine Dateikopie der eigenen Datenbank und enthaelt per
+        # Definition nichts anderes als das eigene Schema.
+        auffaellig = sorted({str(zeile[1]) for zeile in objekte
+                             if not _objekt_ist_eigenes(zeile[0], zeile[1])})
+        if auffaellig:
+            raise _SicherungAbgelehnt('srv.restore_objects',
+                                      objekte=', '.join(auffaellig[:5]))
+
+        # app_meta traegt den Herkunftsnachweis. Bei ihr genuegt der richtige
+        # Name nicht: eine Tabelle
+        #   app_meta (key TEXT PRIMARY KEY, value TEXT CHECK (value='x'))
+        # bzw. mit `REFERENCES users(username)` sieht unter PRAGMA table_info
+        # exakt richtig aus und nimmt trotzdem kein INSERT an - die
+        # Installation haette danach dauerhaft keine eigene Kennung. Statt
+        # Bedingungsarten aufzuzaehlen wird der Wortlaut der Anweisung mit
+        # dem verglichen, den diese Anwendung selbst schreibt. Fehlt app_meta
+        # ganz, ist das der normale Fall einer alten Sicherung - dann greift
+        # weiter unten der Zweig 'keine Instanzkennung'.
+        # Namensvergleich wie in _objekt_ist_eigenes(): Kleinschreibung, aber
+        # bewusst ohne .strip() (Begruendung dort).
+        for zeile in objekte:
+            if str(zeile[0] or '').lower() == 'table' \
+                    and str(zeile[1] or '').lower() == 'app_meta' \
+                    and _schema_normalisiert(zeile[2]) != _APP_META_SCHEMA_NORMALISIERT:
+                raise _SicherungAbgelehnt('srv.restore_app_meta_fremd')
+
+        tabellen = {zeile[1] for zeile in objekte if zeile[0] == 'table'}
+        fehlend = []
+        for tabelle, pflichtspalten in _PFLICHT_TABELLEN.items():
+            if tabelle not in tabellen:
+                fehlend.append(tabelle)
+                continue
+            spalten = {r[1] for r in con.execute(f'PRAGMA table_info("{tabelle}")')}
+            luecken = pflichtspalten - spalten
+            if luecken:
+                fehlend.append(f'{tabelle}.{"/".join(sorted(luecken))}')
+        if fehlend:
+            raise _SicherungAbgelehnt('srv.restore_missing_tables',
+                                      fehlend=', '.join(fehlend))
+
+        # Zweiter Riegel (siehe _generierte_spalten): nicht uebersteuerbar,
+        # denn eine echte Sicherung hat nie eine generierte Spalte.
+        generiert = _generierte_spalten(con, tabellen)
+        if generiert:
+            raise _SicherungAbgelehnt('srv.restore_generated_column',
+                                      spalten=', '.join(generiert[:5]))
+
+        ergebnis = con.execute('PRAGMA integrity_check').fetchone()
+        if not ergebnis or str(ergebnis[0]).lower() != 'ok':
+            raise _SicherungAbgelehnt('srv.restore_integrity')
+
+        anzahl = con.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+        if not anzahl:
+            raise _SicherungAbgelehnt('srv.restore_no_users')
+
+        # Zweiter Riegel (siehe _hat_ungueltige_passwort_hashes): ebenfalls
+        # nicht uebersteuerbar - diese Form kann keine echte Sicherung haben.
+        if _hat_ungueltige_passwort_hashes(con):
+            raise _SicherungAbgelehnt('srv.restore_password_hash')
+        # Dritter Riegel (siehe _hat_unplausible_passwort_hashes): Form und
+        # Rechenaufwand jedes Hashes, ebenfalls nicht uebersteuerbar.
+        if _hat_unplausible_passwort_hashes(con):
+            raise _SicherungAbgelehnt('srv.restore_password_hash_kosten')
+
+        # ── Herkunftsnachweis (Blocker 1) ────────────────────────────────
+        # Die Instanzkennung steht in der Datenbank, also auch in jeder
+        # Sicherung dieser Installation. Ein Angreifer kann sie nicht raten;
+        # er muesste die laufende Datenbank bereits lesen koennen.
+        fremde = _lies_instanz_id(con)
+        eigene = _eigene_instanz_id()
+        if eigene is None:
+            # Nacharbeit: frueher stand hier `elif eigene is not None and
+            # fremde != eigene` - ohne eigene Kennung wurde der Zweig fuer
+            # die fremde Installation komplett uebersprungen und JEDE fremde
+            # Datei angenommen. Genau dieser Zustand liess sich herbeifuehren
+            # (kaputtes app_meta in einer einmal bestaetigten Altsicherung).
+            # Kann diese Installation ihre eigene Herkunft nicht angeben, ist
+            # der Nachweis nicht fuehrbar - dann wird nichts eingespielt.
+            raise _SicherungAbgelehnt('srv.restore_kein_eigener_nachweis')
+        if fremde is None:
+            # Sicherungen von VOR dieser Aenderung tragen die Kennung noch
+            # nicht. Sie pauschal abzulehnen wuerde dem Betreiber jeden
+            # bestehenden Rueckweg nehmen - also nur mit ausdruecklicher
+            # Bestaetigung aus der Oberflaeche.
+            if not fremde_instanz_bestaetigt:
+                raise _SicherungAbgelehnt('srv.restore_keine_instanz_id')
+            current_app.logger.warning(
+                "Restore OHNE Herkunftsnachweis freigegeben: Benutzer '%s' hat "
+                "ausdruecklich bestaetigt, dass die Sicherung ohne Instanzkennung "
+                "eingespielt werden soll. Die Datei kann aus einer fremden "
+                "Installation stammen und ersetzt alle Benutzerkonten.",
+                admin_username)
+        elif fremde != eigene:
+            # Eindeutig eine fremde Installation - hier hilft keine
+            # Bestaetigung, das ist nie ein gewolltes Wiederherstellen.
+            # Der Vergleich laeuft bedingungslos: `eigene` ist an dieser
+            # Stelle garantiert gesetzt (siehe oben).
+            raise _SicherungAbgelehnt('srv.restore_fremde_instanz')
+
+        # Zweites Signal, bewusst beibehalten: der gerade angemeldete Admin
+        # muss in der Datei vorkommen. Allein beweist das nichts (der Name ist
+        # nach dem Bootstrap 'admin'), aber es faengt eine mit Bestaetigung
+        # eingespielte, alte Sicherung ab, die die Instanz an unbekannte
+        # Konten uebergeben wuerde - _ensure_admin() wuerde eine solche Datei
+        # sonst sogar noch zu einem funktionierenden Adminkonto "reparieren".
+        bekannt = con.execute('SELECT 1 FROM users WHERE username = ?',
+                              (admin_username,)).fetchone()
+        if bekannt is None:
+            raise _SicherungAbgelehnt('srv.restore_admin_missing',
+                                      benutzer=admin_username)
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
 @main_bp.route('/api/backup/restore', methods=['POST'])
 @admin_required
 def api_backup_restore():
@@ -2632,22 +3789,38 @@ def api_backup_restore():
     _tf.close()
     tmp = Path(_tf.name)
     f.save(str(tmp))
+    # Vollstaendige Pruefung VOR dem Tausch (K2/I4). Erst wenn die Datei
+    # plausibel aus dieser Instanz stammt, wird die Datenbank angefasst.
+    _angemeldet = getattr(g, 'current_user', None)
+    _admin_name = _angemeldet['username'] if _angemeldet is not None else ''
+    # Ausdrueckliche Uebersteuerung fuer Sicherungen ohne Instanzkennung
+    # (Blocker 1). Kommt als Formularfeld, weil der Upload multipart ist.
+    _bestaetigt = str(request.form.get('fremde_instanz_bestaetigt', '')).lower() \
+        in ('1', 'true', 'on', 'yes', 'ja')
     try:
-        # Erst verschlüsselt prüfen, dann unverschlüsselt
-        con = _open_db(str(tmp))
-        con.row_factory = sqlite3.Row
-        con.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
-        con.close()
+        _pruefe_sicherung(str(tmp), _admin_name, fremde_instanz_bestaetigt=_bestaetigt)
+    except _SicherungAbgelehnt as ablehnung:
+        current_app.logger.warning(
+            "Backup-Restore abgelehnt (%s) - Datei '%s' von Benutzer '%s'",
+            ablehnung.schluessel, f.filename, _admin_name)
+        tmp.unlink(missing_ok=True)
+        # `grund` ist der maschinenlesbare Gegenpart zum uebersetzten Text:
+        # die Oberflaeche muss den Fall "keine Instanzkennung" erkennen
+        # koennen, ohne Fehlertexte zu vergleichen (die je nach Sprache
+        # anders lauten).
+        return jsonify(success=False, grund=ablehnung.schluessel,
+                       error=t(ablehnung.schluessel, **ablehnung.platzhalter)), 400
     except Exception:
-        try:
-            con = sqlite3.connect(str(tmp))
-            con.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
-            con.close()
-        except Exception as e:
-            current_app.logger.exception("Backup-Restore: hochgeladene Datei ist keine gültige SQLite-DB")
-            tmp.unlink(missing_ok=True)
-            return jsonify(success=False, error=t('srv.invalid_db_upload')), 400
-    create_backup("pre-restore")
+        current_app.logger.exception(
+            "Backup-Restore: hochgeladene Datei konnte nicht geprüft werden")
+        tmp.unlink(missing_ok=True)
+        return jsonify(success=False, error=t('srv.invalid_db_upload')), 400
+    # Die Kennung DIESER Installation vor dem Tausch festhalten. Sie
+    # bezeichnet die Installation, nicht den Datenbestand - siehe
+    # _instanz_id_festschreiben(). _pruefe_sicherung() ist gerade
+    # durchgelaufen, sie ist also gesetzt.
+    _eigene_kennung = _eigene_instanz_id()
+    create_backup("pre-restore", schutz=True)
     shutil.copy(str(tmp), db_path)
     # WAL-Sidecars der alten Datenbank entfernen: ein übrig gebliebenes -wal
     # würde Teile der gerade wiederhergestellten DB zurückrollen.
@@ -2657,6 +3830,12 @@ def api_backup_restore():
         except FileNotFoundError:
             pass
     tmp.unlink(missing_ok=True)
+    # Die Installation behaelt ihre Kennung ueber den Restore hinweg. Sonst
+    # praegte init_db() gleich darunter eine frische Kennung, und alle
+    # bestehenden Sicherungen dieser Installation - inklusive der eben
+    # angelegten Schutzkopie 'pre-restore' - waeren ab sofort
+    # 'srv.restore_fremde_instanz' und damit unerreichbar.
+    _instanz_id_festschreiben(db_path, _eigene_kennung)
     # Eine wiederhergestellte Datenbank kann aelter als die Profil-Migration
     # sein (z.B. eine vor Phase B geschriebene Sicherung). Seit dieser Phase
     # setzt JEDE Anfrage (login_required, login()) auf role/is_active/
@@ -2868,7 +4047,15 @@ def _get_vapid():
     """Lädt den VAPID-Schlüssel aus data/.vapid_private_key.pem und generiert ihn
     beim allerersten Aufruf automatisch (py_vapid.Vapid.from_file macht das selbst)."""
     from py_vapid import Vapid
-    return Vapid.from_file(_VAPID_KEY_PATH)
+    vapid = Vapid.from_file(_VAPID_KEY_PATH)
+    # Sicherheit (Befund I2): Vapid.from_file schreibt die Datei selbst (mit
+    # dem Standard-umask 644) - wir kontrollieren den Schreibvorgang nicht,
+    # deshalb erst NACH dem Aufruf nachträglich auf 0600 verengen.
+    try:
+        os.chmod(_VAPID_KEY_PATH, 0o600)
+    except OSError as exc:
+        log.warning(f"Konnte Rechte des VAPID-Schlüssels nicht auf 0600 setzen: {exc}")
+    return vapid
 
 
 def get_vapid_public_key_b64() -> str:
@@ -2983,6 +4170,65 @@ def check_and_send_reminders(app):
 # BELEG-UPLOAD
 # ════════════════════════════════════════════════════════════════════════════════
 
+def _belege_gesamtgroesse() -> int:
+    """Summe der Dateigroessen im Beleg-Verzeichnis in Bytes (Befund I5).
+
+    Bewusst bei jedem Upload frisch gerechnet statt in einem Zaehler gepflegt:
+    Belege werden auch ausserhalb der App geloescht (Restore, Aufraeumen von
+    Hand), ein persistenter Zaehler waere dann dauerhaft falsch und wuerde
+    Uploads sperren, obwohl Platz da ist. Das Verzeichnis ist flach und
+    enthaelt im Haushaltsbetrieb einige hundert Dateien - der Scan ist billig.
+    """
+    summe = 0
+    try:
+        with os.scandir(RECEIPTS_DIR) as eintraege:
+            for eintrag in eintraege:
+                try:
+                    if eintrag.is_file(follow_symlinks=False):
+                        summe += eintrag.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue   # Datei verschwand zwischen scandir und stat
+    except FileNotFoundError:
+        return 0
+    return summe
+
+
+def _verwaiste_belege_loeschen(conn, dateinamen) -> None:
+    """Loescht Belegdateien, auf die keine Ausgabe mehr zeigt (Befund I5).
+
+    Ohne das bleibt jeder Beleg fuer immer liegen, auch wenn die zugehoerige
+    Ausgabe geloescht oder ihr Beleg ausgetauscht wurde - das Verzeichnis
+    waechst monoton und laeuft irgendwann gegen die Obergrenze oder die Platte.
+
+    WICHTIG: der Dateiname ist inhaltsadressiert (MD5), zwei verschiedene
+    Ausgaben koennen also voellig legitim denselben Beleg referenzieren (z.B.
+    eine auf mehrere Personen aufgeteilte Rechnung). Deshalb wird erst
+    geloescht, wenn KEINE Zeile mehr auf den Namen zeigt - sonst verlieren
+    noch bestehende Ausgaben ihren Beleg.
+
+    Muss aufgerufen werden, NACHDEM das DELETE/UPDATE auf `conn` ausgefuehrt
+    wurde (die noch nicht committeten Aenderungen sieht dieselbe Verbindung
+    bereits), aber die Datei wird nur angefasst, wenn die Zaehlung 0 ergibt.
+    """
+    for name in {d for d in (dateinamen or ()) if d}:
+        sicher = os.path.basename(name)
+        if sicher != name or sicher in ('', '.', '..'):
+            continue   # Kein Path-Traversal ueber einen DB-Wert
+        noch_referenziert = conn.execute(
+            'SELECT 1 FROM expenses WHERE receipt_filename=? LIMIT 1', (sicher,)).fetchone()
+        if noch_referenziert:
+            continue
+        pfad = os.path.join(RECEIPTS_DIR, sicher)
+        try:
+            if os.path.isfile(pfad):
+                os.unlink(pfad)
+                log.info("Verwaisten Beleg geloescht: %s", sicher)
+        except OSError as exc:
+            # Ein nicht loeschbarer Beleg darf das Speichern nicht scheitern
+            # lassen - die Ausgabe ist schon weg, der Platz kommt spaeter frei.
+            log.warning("Verwaister Beleg %s konnte nicht geloescht werden: %s", sicher, exc)
+
+
 @main_bp.route('/api/receipt/upload', methods=['POST'])
 @login_required
 def api_receipt_upload():
@@ -3017,8 +4263,30 @@ def api_receipt_upload():
     md5 = hashlib.md5(data).hexdigest()
     filename = md5 + ext
     dest = os.path.join(RECEIPTS_DIR, filename)
+
+    # Sicherheit (Befund I5): Obergrenze fuer das gesamte Beleg-Verzeichnis.
+    # Erst hier geprueft, weil ein bereits vorhandener, inhaltsgleicher Beleg
+    # keinen zusaetzlichen Platz belegt und deshalb auch bei erreichter Grenze
+    # noch durchgehen darf - sonst wuerde das erneute Anhaengen desselben Bons
+    # an eine zweite Ausgabe grundlos scheitern.
+    if not os.path.exists(dest):
+        grenze = RECEIPTS_MAX_TOTAL_MB * 1024 * 1024
+        if _belege_gesamtgroesse() + len(data) > grenze:
+            log.warning("Beleg-Upload abgelehnt: Verzeichnis ueber der Grenze von %s MB",
+                        RECEIPTS_MAX_TOTAL_MB)
+            return jsonify(success=False,
+                           error=t('srv.receipts_quota_exceeded',
+                                   limit=RECEIPTS_MAX_TOTAL_MB)), 507
+
     with open(dest, 'wb') as out:
         out.write(data)
+    # Sicherheit (Befund I2): ein Beleg enthält personenbezogene Finanzdaten -
+    # ohne dies wäre er mit dem Standard-umask 644 für jeden mit Lesezugriff
+    # auf den Datenträger einsehbar.
+    try:
+        os.chmod(dest, 0o600)
+    except OSError as exc:
+        log.warning(f"Konnte Rechte des Belegs nicht auf 0600 setzen: {exc}")
 
     return jsonify(success=True, filename=filename)
 

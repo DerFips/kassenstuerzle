@@ -94,7 +94,11 @@ TRANSLATIONS = {
         'month.settlement_reopen_hint': 'Checkbox deaktivieren um die Abrechnung wieder zu öffnen.',
         'month.settlement_no_split_expenses': 'Keine gesplitteten Ausgaben diesen Monat.',
         'month.settlement_all_balanced': 'Alles ausgeglichen!',
-        'month.settlement_owes': '{payer} schuldet {payee}',
+        # Bewusst nur das Verb, ohne Platzhalter: die beiden Namen werden in
+        # der Vorlage einzeln und maskiert eingesetzt. translate() macht ein
+        # ungeschuetztes str.format() - ein Name mit Markup wuerde sonst als
+        # HTML ausgefuehrt (Sicherheitspruefung K1).
+        'month.settlement_owes_verb': 'schuldet',
         'month.settlement_details_hint': 'Details je Kategorie in der Monatsübersicht (⚖️-Zeilen). Checkbox aktivieren wenn beglichen.',
         'month.settlement_details_hint_short': 'Details in der Monatsübersicht (⚖️-Zeilen).',
         'month.formula_empty': 'Formel ist leer.',
@@ -299,6 +303,18 @@ TRANSLATIONS = {
         'settings.backup_restore_success': 'Backup erfolgreich wiederhergestellt! Die Seite wird neu geladen.',
         'settings.backup_restore_error': 'Fehler: {error}',
         'settings.backup_restore_generic_error': 'Ein Fehler ist aufgetreten',
+        # Blocker 1: die Datei trägt keine Instanzkennung. Das ist der Moment,
+        # in dem der Admin bewusst entscheiden muss - deshalb bewusst lang und
+        # ohne Beschönigung.
+        'settings.backup_restore_fremde_instanz_confirm':
+            'Diese Datei lässt sich NICHT als Sicherung dieser Installation nachweisen.\n\n'
+            'Sie enthält keine Instanzkennung. Entweder wurde sie vor dem letzten Update '
+            'erstellt – oder sie stammt gar nicht von dieser Installation.\n\n'
+            'Wenn du fortfährst, werden ALLE Daten UND ALLE Benutzerkonten dieser '
+            'Installation durch den Inhalt der Datei ersetzt. Stammt die Datei von '
+            'jemand anderem, verlierst du damit den Zugang zu deiner eigenen Installation.\n\n'
+            'Nur fortfahren, wenn du diese Sicherung selbst erstellt hast. Trotzdem '
+            'einspielen?',
         'settings.day': 'Tag',
         'settings.description': 'Beschreibung',
         'settings.person_placeholder': '– Person –',
@@ -361,6 +377,11 @@ TRANSLATIONS = {
         'srv.csrf_invalid': 'Ungültiger CSRF-Token',
         'srv.admin_only': 'Nur Administratoren dürfen das.',
         'srv.rate_limited': 'Zu viele Anfragen. Limit: {limit}',
+        # Befund I4: eigene 429-Seite statt der nackten Werkzeug-Standardseite.
+        'error.rate_limited_title': 'Zu viele Anfragen',
+        'error.rate_limited_text': 'Du hast diese Funktion in kurzer Zeit zu oft aufgerufen. '
+                                   'Bitte warte eine Minute und versuche es dann erneut.',
+        'error.rate_limited_back': 'Zurück zur Anmeldung',
         'srv.stale_client': 'Diese Seite ist nicht mehr aktuell. Bitte neu laden.',
         'srv.old_password_wrong': 'Altes Passwort ist falsch.',
         'srv.new_password_too_short': 'Neues Passwort muss mindestens 8 Zeichen lang sein.',
@@ -374,6 +395,9 @@ TRANSLATIONS = {
         'srv.no_file': 'Keine Datei',
         'srv.file_empty': 'Datei ist leer',
         'srv.file_too_large': 'Datei zu groß (max. 20 MB)',
+        # Befund I5: Obergrenze fürs Beleg-Verzeichnis
+        'srv.receipts_quota_exceeded': 'Der Belegspeicher ist voll (max. {limit} MB). '
+                                       'Bitte alte Belege löschen, bevor neue hochgeladen werden.',
         'srv.invalid_file_type': 'Ungültiger Dateityp. Erlaubt: {allowed}',
         'srv.invalid_image': 'Datei ist kein gültiges Bild',
         'srv.invalid_pdf': 'Datei ist kein gültiges PDF',
@@ -386,6 +410,60 @@ TRANSLATIONS = {
         'srv.save_transaction_error': 'Fehler beim Speichern einer Transaktion',
         'srv.only_db_allowed': 'Nur .db-Dateien erlaubt',
         'srv.invalid_db_upload': 'Die hochgeladene Datei ist keine gültige Datenbank',
+        # ── Prüfung einer hochgeladenen Sicherung (Befunde K2/I4) ─────────
+        'srv.restore_wrong_key': 'Die Sicherung ist unverschlüsselt oder mit einem anderen '
+                                 'Schlüssel verschlüsselt. Sie wurde abgelehnt, weil sie diese '
+                                 'Instanz dauerhaft unbrauchbar machen würde.',
+        'srv.restore_empty': 'Die Sicherung enthält keine Daten (leere Datenbank) und würde '
+                             'den gesamten Bestand löschen.',
+        'srv.restore_objects': 'Die Sicherung enthält Objekte, die Kassenstürzle selbst nie '
+                               'anlegt ({objekte}). Sie wurde abgelehnt, weil solche Objekte '
+                               'nach dem Einspielen eigenen SQL-Code ausführen oder den Start '
+                               'der Anwendung dauerhaft verhindern können.',
+        'srv.restore_app_meta_fremd': 'Die Tabelle „app_meta" in der Sicherung hat nicht die '
+                                      'Form, die Kassenstürzle selbst anlegt. Sie wurde '
+                                      'abgelehnt, weil diese Installation danach ihre eigene '
+                                      'Instanzkennung nicht mehr speichern könnte.',
+        'srv.restore_missing_tables': 'Die Sicherung stammt nicht aus Kassenstürzle – es fehlen: '
+                                      '{fehlend}',
+        'srv.restore_integrity': 'Die Sicherung ist beschädigt (Integritätsprüfung fehlgeschlagen).',
+        'srv.restore_no_users': 'Die Sicherung enthält kein einziges Benutzerkonto.',
+        'srv.restore_admin_missing': 'In der Sicherung fehlt das angemeldete Konto „{benutzer}". '
+                                     'Eine fremde Sicherung einzuspielen würde diese Instanz an '
+                                     'unbekannte Konten übergeben.',
+        'srv.restore_password_hash': 'Die Sicherung enthält Benutzerkonten ohne gültigen '
+                                     'Passwort-Hash. Kassenstürzle legt solche Konten nie an – '
+                                     'die Datei wurde abgelehnt.',
+        'srv.restore_password_hash_kosten': 'Die Sicherung enthält Passwort-Hashes in einer '
+                                            'Form oder mit einem Rechenaufwand, wie '
+                                            'Kassenstürzle sie nie erzeugt. Solche Werte '
+                                            'könnten die Anwendung bei jeder Anmeldung '
+                                            'minutenlang blockieren – die Datei wurde '
+                                            'abgelehnt.',
+        'srv.restore_generated_column': 'Die Sicherung enthält berechnete Spalten ({spalten}), '
+                                        'die Kassenstürzle selbst nie anlegt. Sie wurde '
+                                        'abgelehnt, weil die Anwendung nach dem Einspielen '
+                                        'nicht mehr darauf schreiben könnte.',
+        # ── Herkunftsnachweis über die Instanzkennung (Blocker 1) ─────────
+        'srv.restore_fremde_instanz': 'Diese Sicherung gehört zu einer anderen Kassenstürzle-'
+                                      'Installation. Sie wurde abgelehnt, weil sie alle Benutzer '
+                                      'dieser Installation ersetzen würde.',
+        'srv.restore_keine_instanz_id': 'Bei dieser Datei lässt sich nicht nachweisen, dass sie '
+                                        'aus dieser Installation stammt (keine Instanzkennung). '
+                                        'Sicherungen, die vor diesem Update erstellt wurden, '
+                                        'lassen sich nur nach ausdrücklicher Bestätigung '
+                                        'einspielen.',
+        # Bewusst KEIN "bitte neu starten": beim Neustart läuft dieselbe
+        # init_db() in denselben Fehler. Der Hinweis versprach eine Erholung,
+        # die er nicht einlösen konnte.
+        'srv.restore_kein_eigener_nachweis': 'Diese Installation kann ihre eigene '
+                                             'Instanzkennung nicht lesen. Damit lässt sich die '
+                                             'Herkunft einer Sicherung nicht prüfen, und es wird '
+                                             'nichts eingespielt. Ein Neustart behebt das nicht – '
+                                             'die Ursache steht im Server-Protokoll und muss '
+                                             'direkt an der Datenbank-Datei behoben werden.',
+        'srv.reserved_backup_label': 'Das Label „{label}" ist für automatische Schutzkopien '
+                                     'reserviert. Bitte ein anderes wählen.',
         'srv.ocr_unreadable': 'Beleg konnte nicht gelesen werden.',
         'srv.ocr_unavailable': 'OCR ist auf diesem Server nicht verfügbar (Tesseract fehlt).',
         'srv.ocr_no_text': 'Kein Text erkannt. Bitte ein schärferes/helleres Foto versuchen.',
@@ -481,7 +559,7 @@ TRANSLATIONS = {
         'month.settlement_reopen_hint': 'Disable the checkbox to reopen the settlement.',
         'month.settlement_no_split_expenses': 'No split expenses this month.',
         'month.settlement_all_balanced': 'All balanced!',
-        'month.settlement_owes': '{payer} owes {payee}',
+        'month.settlement_owes_verb': 'owes',
         'month.settlement_details_hint': 'See month overview (⚖️ rows) for details per category. Enable the checkbox once settled.',
         'month.settlement_details_hint_short': 'See month overview (⚖️ rows) for details.',
         'month.formula_empty': 'Formula is empty.',
@@ -686,6 +764,15 @@ TRANSLATIONS = {
         'settings.backup_restore_success': 'Backup restored successfully! The page will reload.',
         'settings.backup_restore_error': 'Error: {error}',
         'settings.backup_restore_generic_error': 'An error occurred',
+        # Blocker 1: the file carries no instance id.
+        'settings.backup_restore_fremde_instanz_confirm':
+            'This file CANNOT be proven to be a backup of this installation.\n\n'
+            'It carries no instance id. It was either created before the last update – '
+            'or it does not come from this installation at all.\n\n'
+            'If you continue, ALL data AND ALL user accounts of this installation will be '
+            'replaced by the contents of the file. If the file came from somebody else, you '
+            'will lose access to your own installation.\n\n'
+            'Only continue if you created this backup yourself. Restore anyway?',
         'settings.day': 'Day',
         'settings.description': 'Description',
         'settings.person_placeholder': '– Person –',
@@ -748,6 +835,11 @@ TRANSLATIONS = {
         'srv.csrf_invalid': 'Invalid CSRF token',
         'srv.admin_only': 'Administrators only.',
         'srv.rate_limited': 'Too many requests. Limit: {limit}',
+        # Finding I4: our own 429 page instead of Werkzeug's bare default.
+        'error.rate_limited_title': 'Too many requests',
+        'error.rate_limited_text': 'You called this feature too often in a short time. '
+                                   'Please wait a minute and try again.',
+        'error.rate_limited_back': 'Back to sign-in',
         'srv.stale_client': 'This page is out of date. Please reload.',
         'srv.old_password_wrong': 'The old password is incorrect.',
         'srv.new_password_too_short': 'The new password must be at least 8 characters long.',
@@ -761,6 +853,9 @@ TRANSLATIONS = {
         'srv.no_file': 'No file',
         'srv.file_empty': 'File is empty',
         'srv.file_too_large': 'File too large (max. 20 MB)',
+        # Finding I5: cap on the receipts directory
+        'srv.receipts_quota_exceeded': 'Receipt storage is full (max. {limit} MB). '
+                                       'Please delete old receipts before uploading new ones.',
         'srv.invalid_file_type': 'Invalid file type. Allowed: {allowed}',
         'srv.invalid_image': 'File is not a valid image',
         'srv.invalid_pdf': 'File is not a valid PDF',
@@ -773,6 +868,54 @@ TRANSLATIONS = {
         'srv.save_transaction_error': 'Error saving a transaction',
         'srv.only_db_allowed': 'Only .db files are allowed',
         'srv.invalid_db_upload': 'The uploaded file is not a valid database',
+        # ── Validation of an uploaded backup (findings K2/I4) ─────────────
+        'srv.restore_wrong_key': 'The backup is unencrypted or encrypted with a different key. '
+                                 'It was rejected because it would permanently break this '
+                                 'instance.',
+        'srv.restore_empty': 'The backup contains no data (empty database) and would wipe '
+                             'everything.',
+        'srv.restore_objects': 'The backup contains objects that Kassenstürzle never creates '
+                               'itself ({objekte}). It was rejected because such objects can '
+                               'execute their own SQL after a restore, or permanently prevent '
+                               'the application from starting.',
+        'srv.restore_app_meta_fremd': 'The "app_meta" table in the backup does not have the '
+                                      'shape Kassenstürzle creates itself. It was rejected '
+                                      'because this installation would no longer be able to '
+                                      'store its own instance id.',
+        'srv.restore_missing_tables': 'The backup does not come from Kassenstürzle – missing: '
+                                      '{fehlend}',
+        'srv.restore_integrity': 'The backup is corrupted (integrity check failed).',
+        'srv.restore_no_users': 'The backup does not contain a single user account.',
+        'srv.restore_admin_missing': 'The backup does not contain the account you are signed in '
+                                     'as ("{benutzer}"). Restoring a foreign backup would hand '
+                                     'this instance over to unknown accounts.',
+        'srv.restore_password_hash': 'The backup contains user accounts without a valid '
+                                     'password hash. Kassenstürzle never creates such '
+                                     'accounts – the file was rejected.',
+        'srv.restore_password_hash_kosten': 'The backup contains password hashes in a format '
+                                            'or with a computational cost that Kassenstürzle '
+                                            'never produces. Such values could block the '
+                                            'application for minutes on every login – the '
+                                            'file was rejected.',
+        'srv.restore_generated_column':'The backup contains computed columns ({spalten}) that '
+                                        'Kassenstürzle never creates itself. It was rejected '
+                                        'because the application could no longer write to '
+                                        'them after the restore.',
+        # ── Origin proof via the instance id (blocker 1) ──────────────────
+        'srv.restore_fremde_instanz': 'This backup belongs to a different Kassenstürzle '
+                                      'installation. It was rejected because it would replace '
+                                      'every user of this installation.',
+        'srv.restore_keine_instanz_id': 'This file cannot be proven to come from this '
+                                        'installation (no instance id). Backups created before '
+                                        'this update can only be restored after an explicit '
+                                        'confirmation.',
+        'srv.restore_kein_eigener_nachweis': 'This installation cannot read its own instance '
+                                             'id. The origin of a backup therefore cannot be '
+                                             'verified and nothing was restored. Restarting does '
+                                             'not help – the cause is in the server log and has '
+                                             'to be fixed on the database file itself.',
+        'srv.reserved_backup_label': 'The label "{label}" is reserved for automatic protective '
+                                     'copies. Please choose a different one.',
         'srv.ocr_unreadable': 'Receipt could not be read.',
         'srv.ocr_unavailable': 'OCR is not available on this server (Tesseract is missing).',
         'srv.ocr_no_text': 'No text recognized. Please try a sharper/brighter photo.',
