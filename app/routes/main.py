@@ -1386,7 +1386,19 @@ def login():
         # _DUMMY_PASSWORT_HASH. Das Ergebnis wird verworfen, nur die Rechenzeit
         # zaehlt. Siehe den ausfuehrlichen Kommentar bei _DUMMY_PASSWORT_HASH.
         if user is not None:
-            passwort_stimmt = check_password_hash(user['password_hash'], password)
+            try:
+                passwort_stimmt = check_password_hash(user['password_hash'], password)
+            except (ValueError, TypeError):
+                # Kann nur bei einem Hash passieren, der nicht von
+                # generate_password_hash() stammt - ausserhalb einer
+                # gebastelten, eingespielten Datei kommt das nicht vor (siehe
+                # _hat_ungueltige_passwort_hashes, der Riegel davor). Ohne
+                # dieses Auffangen waere dieses eine Konto nach einem
+                # bestaetigten Altrestore fuer immer gesperrt: jeder
+                # Loginversuch wuerfe einen 500er, behebbar nur per
+                # Datenbankzugriff. Ein ungueltiger Hash ist kein gueltiges
+                # Passwort - also schlicht als falsch behandeln.
+                passwort_stimmt = False
         else:
             check_password_hash(_DUMMY_PASSWORT_HASH, password)
             passwort_stimmt = False
@@ -1448,7 +1460,17 @@ def change_password():
     conn = get_db()
     user = conn.execute("SELECT password_hash FROM users WHERE id = ?", (session['user_id'],)).fetchone()
 
-    if not user or not check_password_hash(user['password_hash'], old_pw):
+    # try/except aus demselben Grund wie beim Login (main.py, check_password_hash
+    # dort): ein Hash, der nicht von generate_password_hash() stammt, kann nur
+    # aus einer eingespielten, gebastelten Datei kommen und liesse diese Route
+    # sonst mit einem 500er scheitern statt mit der eigentlich gemeinten
+    # Fehlermeldung "altes Passwort falsch".
+    try:
+        altes_passwort_stimmt = user and check_password_hash(user['password_hash'], old_pw)
+    except (ValueError, TypeError):
+        altes_passwort_stimmt = False
+
+    if not user or not altes_passwort_stimmt:
         conn.close()
         return jsonify({'success': False, 'error': t('srv.old_password_wrong')}), 400
 
