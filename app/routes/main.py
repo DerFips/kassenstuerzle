@@ -2611,10 +2611,14 @@ def debug_overview():
     conn.close()
     return jsonify({'status': 'use /overview for full data'})
 
-@main_bp.route('/overview')
-@login_required
-def overview():
-    conn = get_db()
+def _overview_daten(conn):
+    """Berechnet alle Kennzahlen der Übersichtsseite für ALLE Personen.
+
+    Ausgelagert aus overview(), damit /profile dieselbe Berechnung
+    wiederverwenden kann, gefiltert auf eine einzelne Person. Reine
+    Extraktion ohne Logikänderung - overview() selbst verhält sich danach
+    identisch (siehe test_overview_daten.py als Ankerwert).
+    """
     month_keys = [(r['year'],r['month']) for r in conn.execute(
         'SELECT DISTINCT year,month FROM expenses UNION SELECT DISTINCT year,month FROM income ORDER BY year DESC, month DESC')]
     settled_months = {(r['year'],r['month'])
@@ -2831,27 +2835,54 @@ def overview():
     grand_savings = round(grand_income - grand_expense, 2)
     open_settlements_count = len(set(month_keys) - settled_months)
 
+    return {
+        'structured': structured,
+        'inc_structured': inc_structured,
+        'gesamt_structured': gesamt_structured,
+        'cats_map': cats_map,
+        'month_keys': month_keys,
+        'settled_months': settled_months,
+        'persons_list': persons_list,
+        'income_map': income_map,
+        'exp_totals_by_month': exp_totals_by_month,
+        'chart_data_obj': chart_data_obj,
+        'overview_chart_json': overview_chart_json,
+        'person_totals': person_totals,
+        'person_totals_by_year': person_totals_by_year,
+        'months_by_year': months_by_year,
+        'grand_income': grand_income,
+        'grand_expense': grand_expense,
+        'grand_savings': grand_savings,
+        'open_settlements_count': open_settlements_count,
+    }
+
+
+@main_bp.route('/overview')
+@login_required
+def overview():
+    conn = get_db()
+    daten = _overview_daten(conn)
     conn.close()
     return render_template('overview.html', active='overview',
-        structured=structured,
-        inc_structured=inc_structured,
-        gesamt_structured=gesamt_structured,
-        all_cats=sorted(cats_map.items()),
-        month_keys=month_keys,
+        structured=daten['structured'],
+        inc_structured=daten['inc_structured'],
+        gesamt_structured=daten['gesamt_structured'],
+        all_cats=sorted(daten['cats_map'].items()),
+        month_keys=daten['month_keys'],
         month_names=MONTH_NAMES,
-        persons_list=persons_list,
-        settled_months=[(y,m) for y,m in settled_months],
-        income_map={(f'{k[0]}-{k[1]}'):v for k,v in income_map.items()},
-        exp_totals_by_month={k:round(v,2) for k,v in exp_totals_by_month.items()},
-        chart_data=chart_data_obj,
-        overview_chart_json=overview_chart_json,
-        grand_income=grand_income,
-        grand_expense=grand_expense,
-        grand_savings=grand_savings,
-        open_settlements_count=open_settlements_count,
-        months_by_year=months_by_year,
-        person_totals=person_totals,
-        person_totals_by_year=person_totals_by_year)
+        persons_list=daten['persons_list'],
+        settled_months=[(y,m) for y,m in daten['settled_months']],
+        income_map={(f'{k[0]}-{k[1]}'):v for k,v in daten['income_map'].items()},
+        exp_totals_by_month={k:round(v,2) for k,v in daten['exp_totals_by_month'].items()},
+        chart_data=daten['chart_data_obj'],
+        overview_chart_json=daten['overview_chart_json'],
+        grand_income=daten['grand_income'],
+        grand_expense=daten['grand_expense'],
+        grand_savings=daten['grand_savings'],
+        open_settlements_count=daten['open_settlements_count'],
+        months_by_year=daten['months_by_year'],
+        person_totals=daten['person_totals'],
+        person_totals_by_year=daten['person_totals_by_year'])
 
 
 # ── PDF Kontoauszug Import ─────────────────────────────────────────────────────
