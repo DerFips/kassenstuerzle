@@ -1399,26 +1399,30 @@ def test_create_app_startet_nach_restore_mit_users_die_ensure_admin_sprengt(
         'Die Instanzkennung ist nach dem Restore weg oder rotiert')
 
 
-@pytest.mark.parametrize('wert', [None, 42, 'x$y$z'], ids=['null', 'zahl', 'text_ohne_verfahren'])
+@pytest.mark.parametrize('wert', [None, 42, 'x$y$z', 'pbkdf2:sha256:99999999999999999999$s$h'],
+                         ids=['null', 'zahl', 'text_ohne_verfahren', 'ueberlauf'])
 def test_create_app_startet_nach_restore_mit_unbrauchbarem_passwort_hash(
         app, auth_client, csrf, sicherung_bauen, datenbank_zuruecksetzen,
-        monkeypatch, caplog, wert):
+        monkeypatch, wert):
     """Vierte Nachpruefung, Fundstelle 1: check_password_hash in init_db().
 
     werkzeug ruft darin `pwhash.split('$', 2)` auf. NULL oder eine Zahl
     werfen AttributeError, ein Text wie 'x$y$z' ValueError ('Invalid hash
-    method') - beides frueher ungefangen, beides in create_app().
+    method'), eine riesige Iterationszahl OverflowError - frueher alles in
+    create_app().
 
-    NULL und Zahl weist die Restore-Pruefung inzwischen ab (siehe
-    test_restore_lehnt_unbrauchbaren_passwort_hash_ab); dieser Riegel wird
-    hier abgeschaltet. 'x$y$z' dagegen ist ein nicht leerer Text und kommt
-    auch MIT Riegel durch - der Beleg dafuer, dass nur der Rahmen in
-    init_db() die Luecke wirklich schliesst.
+    Seit der fuenften Nachpruefung prueft init_db() gar keinen Hash mehr
+    (siehe test_init_db_ruft_keine_passwort_kdf_auf), und die Restore-Pruefung
+    weist alle vier Werte ab (test_restore_lehnt_unbrauchbaren_passwort_hash_ab,
+    test_restore_lehnt_hash_mit_unplausiblen_kosten_ab). Beide Riegel werden
+    hier abgeschaltet - so, als waere die Datei auf anderem Weg ins Volume
+    gelangt. Dann muss create_app() trotzdem starten, und der Login fuer das
+    betroffene Konto muss "falsches Passwort" melden statt 500.
     """
     from app import create_app
 
-    if not isinstance(wert, str):
-        monkeypatch.setattr(m, '_hat_ungueltige_passwort_hashes', lambda con: False)
+    monkeypatch.setattr(m, '_hat_ungueltige_passwort_hashes', lambda con: False)
+    monkeypatch.setattr(m, '_hat_unplausible_passwort_hashes', lambda con: False)
     kennung_vorher = m._eigene_instanz_id()
     assert kennung_vorher
 
@@ -1433,20 +1437,23 @@ def test_create_app_startet_nach_restore_mit_unbrauchbarem_passwort_hash(
     con.commit()
     con.close()
 
-    with caplog.at_level('WARNING', logger=m.log.name):
-        antwort = _hochladen(auth_client, csrf, datei, bestaetigt=True)
+    antwort = _hochladen(auth_client, csrf, datei, bestaetigt=True)
     assert antwort.status_code == 200, antwort.get_data(as_text=True)
-    assert any('Standardpasswort' in w for w in _startschritt_warnungen(caplog)), (
-        'Keine Warnung, die die Standardpasswort-Pruefung als ausgefallen benennt')
 
     zweite = create_app()      # darf nicht an check_password_hash sterben
-    assert zweite.test_client().get('/login').status_code == 200
+    besucher = zweite.test_client()
+    assert besucher.get('/login').status_code == 200
+    m._login_attempts.clear()
+    m._ip_attempts.clear()
+    anmeldung = besucher.post('/login', data={'username': 'admin', 'password': 'admin'})
+    m._login_attempts.clear()
+    m._ip_attempts.clear()
+    assert anmeldung.status_code == 200, 'Login mit kaputtem Hash endet nicht als falsches Passwort'
     assert m._eigene_instanz_id() == kennung_vorher
 
 
 @pytest.mark.parametrize('ziel', [
     '_ensure_instanz_id', '_ensure_admin', '_autolink_single_person',
-    'check_password_hash',
 ])
 def test_unvorhergesehener_fehler_in_einem_startschritt_verhindert_den_start_nicht(
         app, monkeypatch, caplog, ziel):
@@ -1461,7 +1468,6 @@ def test_unvorhergesehener_fehler_in_einem_startschritt_verhindert_den_start_nic
       3. die UEBRIGEN Schritte laufen weiter (kein grosses try um alles, das
          nach dem ersten Fehler still aufhoert).
     """
-    import werkzeug.security
     from app import create_app
 
     kennung_vorher = m._eigene_instanz_id()
@@ -1482,11 +1488,10 @@ def test_unvorhergesehener_fehler_in_einem_startschritt_verhindert_den_start_nic
     for name in beobachtet:
         if name != ziel:
             monkeypatch.setattr(m, name, mitschreiben(name, getattr(m, name)))
-    if ziel == 'check_password_hash':
-        # init_db() importiert die Funktion lokal aus werkzeug.security.
-        monkeypatch.setattr(werkzeug.security, 'check_password_hash', unvorhergesehen)
-    else:
-        monkeypatch.setattr(m, ziel, unvorhergesehen)
+    # Frueher gab es hier auch den Fall 'check_password_hash' (die
+    # Standardpasswort-Pruefung). Den Schritt gibt es nicht mehr - siehe
+    # test_init_db_ruft_keine_passwort_kdf_auf.
+    monkeypatch.setattr(m, ziel, unvorhergesehen)
 
     with caplog.at_level('WARNING', logger=m.log.name):
         zweite = create_app()
@@ -1495,9 +1500,8 @@ def test_unvorhergesehener_fehler_in_einem_startschritt_verhindert_den_start_nic
     warnungen = _startschritt_warnungen(caplog)
     assert any('irgendwas Unvorhergesehenes' in w for w in warnungen), (
         f'Der Fehler wurde nicht als ausgefallener Start-Schritt gemeldet: {warnungen}')
-    if ziel != 'check_password_hash':
-        assert any(ziel in w for w in warnungen), (
-            f'Die Warnung benennt den Schritt {ziel} nicht: {warnungen}')
+    assert any(ziel in w for w in warnungen), (
+        f'Die Warnung benennt den Schritt {ziel} nicht: {warnungen}')
 
     uebrige = [n for n in beobachtet if n != ziel]
     assert all(n in gelaufen for n in uebrige), (
@@ -1566,3 +1570,132 @@ def test_positivliste_haelt_namen_mit_randleerzeichen_fuer_fremd(typ, name):
     .strip() als eigenes Objekt durch die Positivliste."""
     assert not m._objekt_ist_eigenes(typ, name)
     assert m._objekt_ist_eigenes(typ, name.strip())
+
+
+# ── Fuenfte Nachpruefung: Rechenaufwand statt Ausnahme ───────────────────────
+#
+# Ein werkzeug-Hash traegt seine Kostenparameter selbst. 'pbkdf2:sha256:
+# 2147483647$...' ist ein nicht leerer Text, kam also durch jede bisherige
+# Pruefung - und liess check_password_hash() in init_db() ueber zwei Minuten
+# rechnen. gunicorn (timeout=120) toetete den Worker mitten in create_app(),
+# fuer immer. Kein try/except haelt das auf, weil nichts geworfen wird.
+#
+# Keiner dieser Tests rechnet den boesen Hash wirklich durch: eine Regression
+# soll sofort rot werden, nicht die Suite 150 Sekunden lang anhalten.
+
+_HEX64 = 'ab' * 32
+_TEURE_HASHES = {
+    'pbkdf2_maximal': f'pbkdf2:sha256:2147483647$salzsalzsalzsalz${_HEX64}',
+    'pbkdf2_ueberlauf': f'pbkdf2:sha256:99999999999999999999$salz${_HEX64}',
+    'pbkdf2_knapp_ueber_grenze': f'pbkdf2:sha256:2000001$salz${_HEX64}',
+    'pbkdf2_fremdes_verfahren': f'pbkdf2:md5:1000$salz${_HEX64}',
+    'scrypt_speicher': f'scrypt:1073741824:8:1$salzsalzsalzsalz${_HEX64}',
+    'scrypt_r': f'scrypt:32768:100000:1$salzsalzsalzsalz${_HEX64}',
+    'scrypt_p': f'scrypt:32768:8:100000$salzsalzsalzsalz${_HEX64}',
+    'scrypt_n_keine_zweierpotenz': f'scrypt:30000:8:1$salz${_HEX64}',
+    'text_ohne_verfahren': 'x$y$z',
+    'nicht_ascii': f'scrypt:32768:8:1$salz$ä{_HEX64}',
+    'ueberlang': f'scrypt:32768:8:1${"s" * 10_000}${_HEX64}',
+}
+
+
+@pytest.mark.parametrize('boeser_hash', list(_TEURE_HASHES.values()), ids=list(_TEURE_HASHES))
+def test_restore_lehnt_hash_mit_unplausiblen_kosten_ab(
+        auth_client, csrf, sicherung_bauen, kein_dateitausch, boeser_hash):
+    """Dritter Riegel am Tor: nur Hashes in der Form und mit dem Aufwand, den
+    generate_password_hash() erzeugt. Auch mit Bestaetigung nicht zu retten -
+    und die Ablehnung selbst darf den Hash natuerlich nicht durchrechnen."""
+    import time
+    datei = sicherung_bauen('kosten.db', instanz_id=None)
+    con = _sqlite3.connect(str(datei))
+    con.execute("UPDATE users SET password_hash=? WHERE username='admin'", (boeser_hash,))
+    con.commit()
+    con.close()
+
+    for bestaetigt in (False, True):
+        start = time.monotonic()
+        res = _hochladen(auth_client, csrf, datei, bestaetigt=bestaetigt)
+        dauer = time.monotonic() - start
+        assert res.status_code == 400, res.get_data(as_text=True)
+        assert res.get_json()['grund'] == 'srv.restore_password_hash_kosten'
+        assert res.get_json()['error'] == translate('de', 'srv.restore_password_hash_kosten')
+        assert dauer < 2, f'Die Ablehnung brauchte {dauer:.1f} s'
+    assert kein_dateitausch == []
+
+
+def test_restore_lehnt_nicht_lesbaren_hash_ab(auth_client, csrf, sicherung_bauen,
+                                              kein_dateitausch):
+    """Text, der kein gueltiges UTF-8 ist, besteht die typeof-Pruefung, laesst
+    sich in Python aber nicht einmal lesen - also ebenfalls unplausibel."""
+    datei = sicherung_bauen('utf8.db', instanz_id=None)
+    con = _sqlite3.connect(str(datei))
+    con.execute("UPDATE users SET password_hash = CAST(x'ff24ff24ff' AS TEXT) "
+                "WHERE username='admin'")
+    con.commit()
+    con.close()
+    res = _hochladen(auth_client, csrf, datei, bestaetigt=True)
+    assert res.status_code == 400
+    assert res.get_json()['grund'] == 'srv.restore_password_hash_kosten'
+    assert kein_dateitausch == []
+
+
+def test_echte_sicherung_besteht_die_kostenpruefung(sicherung_bauen):
+    """Gegenprobe: eine echte Sicherung - auch eine aus aelteren
+    werkzeug-Fassungen mit pbkdf2-Hashes - wird NICHT abgelehnt."""
+    from werkzeug.security import generate_password_hash
+    datei = sicherung_bauen('echt.db', benutzer=(
+        ('admin', 'test-password-123', 'admin'), ('zweiter', 'geheim-123', 'member')))
+    con = _sqlite3.connect(str(datei))
+    try:
+        assert not m._hat_unplausible_passwort_hashes(con)
+        for verfahren in ('pbkdf2:sha256:260000', 'pbkdf2:sha256:600000', 'pbkdf2', 'scrypt'):
+            con.execute("UPDATE users SET password_hash=? WHERE username='zweiter'",
+                        (generate_password_hash('geheim-123', verfahren),))
+            assert not m._hat_unplausible_passwort_hashes(con), verfahren
+    finally:
+        con.close()
+
+
+def test_neuer_ablehnungsgrund_kosten_ist_uebersetzt():
+    de = translate('de', 'srv.restore_password_hash_kosten')
+    en = translate('en', 'srv.restore_password_hash_kosten')
+    assert de != 'srv.restore_password_hash_kosten'
+    assert en != 'srv.restore_password_hash_kosten'
+    assert de != en
+
+
+def test_init_db_ruft_keine_passwort_kdf_auf(app, tmp_path, monkeypatch):
+    """init_db() laeuft in JEDEM create_app() und darf keinen gespeicherten
+    Hash pruefen - nach einem Restore stammen dessen Kostenparameter aus der
+    hochgeladenen Datei. Frueher warnte ein Schritt, falls das Admin-Passwort
+    noch 'admin' lautete, per check_password_hash().
+
+    Die Wegwerf-Datenbank enthaelt genau den Hash aus dem Bericht. Der Spion
+    rechnet nichts, er notiert nur - eine Regression wird sofort rot statt
+    150 Sekunden zu rechnen."""
+    import werkzeug.security
+
+    db_pfad = str(tmp_path / 'wegwerf.db')
+    monkeypatch.setattr(m, 'DB_PATH', db_pfad)
+    with app.app_context():
+        m.init_db()
+    con = m._open_db(db_pfad)
+    con.execute("UPDATE users SET password_hash=? WHERE username='admin'",
+                (_TEURE_HASHES['pbkdf2_maximal'],))
+    con.commit()
+    con.close()
+
+    aufrufe = []
+
+    def verboten(pwhash, password):
+        aufrufe.append(pwhash)
+        return False
+
+    # Beide Wege: init_db() importierte die Funktion frueher lokal aus
+    # werkzeug.security, der Modulname in main.py ist der zweite.
+    monkeypatch.setattr(werkzeug.security, 'check_password_hash', verboten)
+    monkeypatch.setattr(m, 'check_password_hash', verboten)
+    with app.app_context():
+        m.init_db()
+    assert aufrufe == [], f'init_db() hat check_password_hash aufgerufen: {aufrufe}'
+

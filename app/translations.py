@@ -434,6 +434,12 @@ TRANSLATIONS = {
         'srv.restore_password_hash': 'Die Sicherung enthält Benutzerkonten ohne gültigen '
                                      'Passwort-Hash. Kassenstürzle legt solche Konten nie an – '
                                      'die Datei wurde abgelehnt.',
+        'srv.restore_password_hash_kosten': 'Die Sicherung enthält Passwort-Hashes in einer '
+                                            'Form oder mit einem Rechenaufwand, wie '
+                                            'Kassenstürzle sie nie erzeugt. Solche Werte '
+                                            'könnten die Anwendung bei jeder Anmeldung '
+                                            'minutenlang blockieren – die Datei wurde '
+                                            'abgelehnt.',
         'srv.restore_generated_column': 'Die Sicherung enthält berechnete Spalten ({spalten}), '
                                         'die Kassenstürzle selbst nie anlegt. Sie wurde '
                                         'abgelehnt, weil die Anwendung nach dem Einspielen '
@@ -886,7 +892,12 @@ TRANSLATIONS = {
         'srv.restore_password_hash': 'The backup contains user accounts without a valid '
                                      'password hash. Kassenstürzle never creates such '
                                      'accounts – the file was rejected.',
-        'srv.restore_generated_column': 'The backup contains computed columns ({spalten}) that '
+        'srv.restore_password_hash_kosten': 'The backup contains password hashes in a format '
+                                            'or with a computational cost that Kassenstürzle '
+                                            'never produces. Such values could block the '
+                                            'application for minutes on every login – the '
+                                            'file was rejected.',
+        'srv.restore_generated_column':'The backup contains computed columns ({spalten}) that '
                                         'Kassenstürzle never creates itself. It was rejected '
                                         'because the application could no longer write to '
                                         'them after the restore.',

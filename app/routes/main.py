@@ -788,26 +788,20 @@ def init_db():
             _cur = conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
                                 ('admin', default_hash))
             _bootstrap_admin_id = _cur.lastrowid
-    else:
-        # Prüfe ob noch das alte Default-Passwort 'admin' aktiv ist.
-        #
-        # Reine Diagnose - und ein Schritt, der Werte aus einer eingespielten
-        # Datei verarbeitet (Regel: siehe _startschritt). check_password_hash
-        # wirft bei password_hash = NULL oder einer Zahl AttributeError und
-        # bei einem Text wie 'x$y$z' ValueError ("Invalid hash method").
-        # Letzteres ist ein nicht leerer Text und kommt damit auch an der
-        # Restore-Pruefung vorbei; nur dieser Rahmen haelt ihn auf.
-        with _startschritt(conn, "Pruefung auf das Standardpasswort 'admin'",
-                           "es wird nur nicht gewarnt, falls das Admin-Passwort "
-                           "noch 'admin' lautet"):
-            from werkzeug.security import check_password_hash as _cph
-            _row = conn.execute("SELECT password_hash FROM users WHERE username = 'admin'").fetchone()
-            if _row and _cph(_row['password_hash'], 'admin'):
-                import logging as _lg
-                _lg.getLogger(__name__).warning(
-                    "SICHERHEITSWARNUNG: Admin-Passwort ist noch 'admin'. "
-                    "Bitte sofort unter Einstellungen → Passwort ändern!"
-                )
+    # Hier stand frueher eine Pruefung "ist das Admin-Passwort noch 'admin'?"
+    # per check_password_hash(). Bewusst ENTFERNT, nicht nur eingerahmt
+    # (fuenfte Nachpruefung): sie war reine Diagnose, lief bei jedem
+    # create_app() und rechnete mit Kostenparametern, die nach einem Restore
+    # aus der hochgeladenen Datei stammen. Ein Hash wie
+    # 'pbkdf2:sha256:2147483647$...' wirft nichts - er rechnet nur ueber zwei
+    # Minuten, und gunicorn (timeout=120, preload_app=False) beendet den
+    # Worker waehrend load_wsgi(), startet ihn neu, und so fort. Gegen
+    # Rechenzeit hilft _startschritt nicht. Regel daraus: nichts, was
+    # bedingungslos in create_app() laeuft, darf wiederherstellbare Daten an
+    # ein kostenparametrisiertes Verfahren (KDF) geben. Das Standardpasswort
+    # 'admin' vergibt die Anwendung ohnehin seit Befund I8 nicht mehr (das
+    # Bootstrap-Passwort ist zufaellig und muss beim ersten Login geaendert
+    # werden) - die Warnung galt nur noch sehr alten Installationen.
 
     conn.execute("""CREATE TABLE IF NOT EXISTS persons (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
@@ -1348,6 +1342,93 @@ _DUMMY_PASSWORT = 'kassenstuerzle-dummy-nie-ein-konto'
 _DUMMY_PASSWORT_HASH = generate_password_hash(_DUMMY_PASSWORT)
 
 
+# ── Kostenobergrenze fuer gespeicherte Passwort-Hashes (fuenfte Nachpruefung) ─
+#
+# Ein werkzeug-Hash traegt seine Kostenparameter selbst im Text:
+#   scrypt:<n>:<r>:<p>$<salt>$<hex>     pbkdf2:<hash>:<iterationen>$<salt>$<hex>
+# check_password_hash() liest sie aus und reicht sie UNGEPRUEFT an hashlib
+# weiter. Ein eingespielter Hash 'pbkdf2:sha256:2147483647$...' rechnet damit
+# minutenlang, ein 'scrypt:<riesig>:...' belegt Gigabytes - und dagegen hilft
+# kein try/except, denn es wird nichts geworfen, es dauert nur. Vier
+# Pruefrunden lang wurde hier gegen AUSNAHMEN abgesichert; diese Luecke ist
+# eine andere Klasse: Rechenzeit und Speicher.
+#
+# Deshalb geht ein Hash aus der Datenbank nur dann an check_password_hash(),
+# wenn diese Funktion ihn als Positivliste bestaetigt: bekanntes Verfahren,
+# genau die Form, die werkzeug selbst erzeugt, und Kosten hoechstens das
+# Doppelte der werkzeug-Voreinstellung. Alles andere zaehlt wie ein falsches
+# Passwort (Login, Passwortwechsel) bzw. als ungueltige Sicherung (Restore).
+#
+# Obergrenzen, abgeleitet aus Werkzeug 3.1.8 (requirements.txt):
+#   * pbkdf2: werkzeug.security.DEFAULT_PBKDF2_ITERATIONS (dort 1_000_000),
+#     zur Laufzeit gelesen - hebt ein werkzeug-Update die Voreinstellung an,
+#     wandert die Grenze mit, und frisch erzeugte Hashes bleiben gueltig.
+#   * scrypt: werkzeug setzt n=2**15, r=8, p=1 fest im Code von
+#     _hash_internal(), ohne Konstante. Begrenzt wird das Produkt n*r*p:
+#     Rechenzeit waechst mit n*r*p, Speicher (128*n*r Byte) mit n*r, beides
+#     ist damit gedeckelt (bei p >= 1). Ein Test prueft, dass
+#     generate_password_hash() in beiden Verfahren diese Grenze einhaelt -
+#     aendert ein Update die scrypt-Voreinstellung, faellt das dort auf und
+#     nicht erst beim Login der Nutzer.
+_HASH_KOSTEN_FAKTOR = 2
+_SCRYPT_STANDARD_AUFWAND = (2 ** 15) * 8 * 1
+_PBKDF2_HASHVERFAHREN = frozenset({'sha1', 'sha224', 'sha256', 'sha384', 'sha512'})
+# Ein echter Hash ist 100-170 Zeichen lang. Die Grenze haelt auch die
+# Laenge des Salts (geht einmal in die Rechnung ein) und int() vom Hals.
+_HASH_MAX_LAENGE = 512
+
+
+def _pbkdf2_obergrenze() -> int:
+    import werkzeug.security as _ws
+    return _HASH_KOSTEN_FAKTOR * int(getattr(_ws, 'DEFAULT_PBKDF2_ITERATIONS', 1_000_000))
+
+
+def _hash_kosten_sind_plausibel(hash_str) -> bool:
+    """Wahr nur fuer einen Hash, den check_password_hash() in bekannter,
+    begrenzter Zeit und mit begrenztem Speicher pruefen kann.
+
+    Zerlegt den Text genau so wie werkzeug (split('$', 2), dann
+    split(':') und int()) - damit bewertet diese Funktion dieselben Zahlen,
+    die werkzeug anschliessend verwenden wuerde. Wirft nie; jede
+    Unregelmaessigkeit ergibt False.
+    """
+    try:
+        if not isinstance(hash_str, str) or not hash_str:
+            return False
+        if len(hash_str) > _HASH_MAX_LAENGE or not hash_str.isascii():
+            # Nicht-ASCII laesst ausserdem hmac.compare_digest mit TypeError
+            # scheitern.
+            return False
+        teile = hash_str.split('$', 2)
+        if len(teile) != 3:
+            return False
+        verfahren, salz, wert = teile
+        if not salz or not wert:
+            return False
+        name, *parameter = verfahren.split(':')
+        if name == 'scrypt':
+            if not parameter:
+                return True     # werkzeug nimmt dann seine Voreinstellung
+            if len(parameter) != 3:
+                return False
+            n, r, p = (int(x) for x in parameter)
+            if n < 2 or (n & (n - 1)) != 0 or r < 1 or p < 1:
+                return False
+            return n * r * p <= _HASH_KOSTEN_FAKTOR * _SCRYPT_STANDARD_AUFWAND
+        if name == 'pbkdf2':
+            if len(parameter) > 2:
+                return False
+            if parameter and parameter[0] not in _PBKDF2_HASHVERFAHREN:
+                return False
+            if len(parameter) < 2:
+                return True     # werkzeug nimmt dann seine Voreinstellung
+            iterationen = int(parameter[1])
+            return 1 <= iterationen <= _pbkdf2_obergrenze()
+        return False
+    except Exception:
+        return False
+
+
 @main_bp.route('/login', methods=['GET', 'POST'])
 def login():
     ip = request.remote_addr or 'unknown'
@@ -1385,10 +1466,16 @@ def login():
         # dann, wenn es den Benutzernamen gar nicht gibt: dann eben gegen
         # _DUMMY_PASSWORT_HASH. Das Ergebnis wird verworfen, nur die Rechenzeit
         # zaehlt. Siehe den ausfuehrlichen Kommentar bei _DUMMY_PASSWORT_HASH.
-        if user is not None:
+        #
+        # Ein gespeicherter Hash mit unplausiblen Kosten (siehe
+        # _hash_kosten_sind_plausibel) geht NICHT an check_password_hash -
+        # er koennte den Worker minutenlang blockieren. Stattdessen laeuft
+        # der Dummy-Vergleich, damit auch dieser Fall nicht an der
+        # Antwortzeit erkennbar ist; das Ergebnis ist "falsches Passwort".
+        if user is not None and _hash_kosten_sind_plausibel(user['password_hash']):
             try:
                 passwort_stimmt = check_password_hash(user['password_hash'], password)
-            except (ValueError, TypeError):
+            except Exception:
                 # Kann nur bei einem Hash passieren, der nicht von
                 # generate_password_hash() stammt - ausserhalb einer
                 # gebastelten, eingespielten Datei kommt das nicht vor (siehe
@@ -1398,6 +1485,12 @@ def login():
                 # Loginversuch wuerfe einen 500er, behebbar nur per
                 # Datenbankzugriff. Ein ungueltiger Hash ist kein gueltiges
                 # Passwort - also schlicht als falsch behandeln.
+                #
+                # Bewusst `Exception` und keine Aufzaehlung: frueher stand
+                # hier (ValueError, TypeError), und werkzeug warf bei einer
+                # zu grossen Iterationszahl OverflowError - wieder ein 500er.
+                # Eine Liste bekannter Ausnahmen ist genau das Muster, das
+                # fuenf Pruefrunden lang die jeweils naechste Luecke liess.
                 passwort_stimmt = False
         else:
             check_password_hash(_DUMMY_PASSWORT_HASH, password)
@@ -1465,10 +1558,16 @@ def change_password():
     # aus einer eingespielten, gebastelten Datei kommen und liesse diese Route
     # sonst mit einem 500er scheitern statt mit der eigentlich gemeinten
     # Fehlermeldung "altes Passwort falsch".
-    try:
-        altes_passwort_stimmt = user and check_password_hash(user['password_hash'], old_pw)
-    except (ValueError, TypeError):
-        altes_passwort_stimmt = False
+    #
+    # Ein Hash mit unplausiblen Kosten wird gar nicht erst berechnet (siehe
+    # _hash_kosten_sind_plausibel) - und `except Exception` statt einer Liste
+    # aus demselben Grund wie beim Login (OverflowError fehlte dort).
+    altes_passwort_stimmt = False
+    if user and _hash_kosten_sind_plausibel(user['password_hash']):
+        try:
+            altes_passwort_stimmt = check_password_hash(user['password_hash'], old_pw)
+        except Exception:
+            altes_passwort_stimmt = False
 
     if not user or not altes_passwort_stimmt:
         conn.close()
@@ -3385,8 +3484,8 @@ _PFLICHT_TABELLEN = {
 # Sie sind ausdruecklich NICHT die Behebung: die steht in init_db()
 # (_startschritt), weil keine Liste an dieser Stelle je vollstaendig sein
 # kann - genau das haben vier Pruefrunden gezeigt. Beispiel: ein
-# password_hash 'x$y$z' ist ein nicht leerer Text, kommt hier also durch,
-# und laesst check_password_hash trotzdem mit ValueError scheitern.
+# password_hash 'x$y$z' ist ein nicht leerer Text und kam an der ersten
+# Pruefung vorbei (inzwischen faengt ihn _hat_unplausible_passwort_hashes).
 
 def _hat_ungueltige_passwort_hashes(con) -> bool:
     """Wahr, wenn irgendeine users-Zeile keinen nicht leeren Text als Hash hat.
@@ -3394,14 +3493,39 @@ def _hat_ungueltige_passwort_hashes(con) -> bool:
     password_hash ist in jeder Fassung von init_db() `TEXT NOT NULL`, und
     die Anwendung schreibt dort nur Ergebnisse von generate_password_hash().
     NULL, eine Zahl, ein BLOB oder ein leerer Text koennen deshalb nur aus
-    einer gebastelten Datei stammen - und liessen check_password_hash in
-    init_db() (und bei jedem Login) mit AttributeError/TypeError scheitern.
+    einer gebastelten Datei stammen - und liessen check_password_hash bei
+    jedem Login (frueher auch in init_db()) mit AttributeError/TypeError
+    scheitern.
     """
     zeile = con.execute(
         "SELECT COUNT(*) FROM users "
         "WHERE typeof(password_hash) <> 'text' OR length(password_hash) = 0"
     ).fetchone()
     return bool(zeile and zeile[0])
+
+
+def _hat_unplausible_passwort_hashes(con) -> bool:
+    """Wahr, wenn ein password_hash nicht die Form und die Kosten hat, die
+    generate_password_hash() erzeugt (Positivliste: _hash_kosten_sind_plausibel).
+
+    Fuenfte Nachpruefung: ein nicht leerer Text wie
+    'pbkdf2:sha256:2147483647$s$h' kam durch _hat_ungueltige_passwort_hashes
+    und liess spaeter jede Pruefung dieses Hashes minutenlang rechnen. Die
+    Aufrufstellen sind selbst abgesichert (init_db() prueft gar keine Hashes
+    mehr, Login und Passwortwechsel fragen dieselbe Funktion) - dies hier ist
+    die zusaetzliche Ablehnung am Tor, damit ein solcher Wert gar nicht erst
+    in die laufende Datenbank gelangt.
+
+    Laesst sich eine Zeile nicht einmal lesen (z.B. Text, der kein gueltiges
+    UTF-8 ist), gilt die Datei ebenfalls als unplausibel.
+    """
+    try:
+        for zeile in con.execute('SELECT password_hash FROM users'):
+            if not _hash_kosten_sind_plausibel(zeile[0]):
+                return True
+        return False
+    except Exception:
+        return True
 
 
 def _generierte_spalten(con, tabellen) -> list:
@@ -3567,6 +3691,10 @@ def _pruefe_sicherung(pfad: str, admin_username: str,
         # nicht uebersteuerbar - diese Form kann keine echte Sicherung haben.
         if _hat_ungueltige_passwort_hashes(con):
             raise _SicherungAbgelehnt('srv.restore_password_hash')
+        # Dritter Riegel (siehe _hat_unplausible_passwort_hashes): Form und
+        # Rechenaufwand jedes Hashes, ebenfalls nicht uebersteuerbar.
+        if _hat_unplausible_passwort_hashes(con):
+            raise _SicherungAbgelehnt('srv.restore_password_hash_kosten')
 
         # ── Herkunftsnachweis (Blocker 1) ────────────────────────────────
         # Die Instanzkennung steht in der Datenbank, also auch in jeder
