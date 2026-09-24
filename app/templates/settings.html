@@ -1001,12 +1001,19 @@ let _wizardDaten = null;
 
 async function wizardLaden() {
   const d = await (await fetch('/api/setup/profiles')).json();
-  if (!d.success || d.done) return;
+  if (!d.success) return;
   _wizardDaten = d;
   // Der Vorschlagsschritt (weitere Logins fuer unverknuepfte Personen
   // anlegen) entfaellt (Task 5) - die kombinierte Tabelle deckt das jetzt
   // direkt ab. Der Assistent lohnt sich nur noch, solange das eigene Konto
   // keiner Person zugeordnet ist.
+  //
+  // Bewusst UNABHAENGIG von d.done: eine bereits abgeschlossene Ersteinrichtung
+  // (profiles_setup_done=1) mit einem seitdem unverknuepften Konto - z.B. der
+  // haeufigste Bestandsfall, ein Admin, der "Fertig" ohne Zuordnung geklickt
+  // hat - haette sonst KEINEN Weg mehr, sich selbst zu verknuepfen: seit der
+  // 1:1-Pflicht lehnt jede neue Buchung ein unverknuepftes Konto serverseitig
+  // ab, und die alte Vorschlagsliste (die das frueher auffing) ist entfernt.
   if (!d.me || !d.me.person_id) document.getElementById('setup-wizard-wrap').hidden = false;
 }
 
