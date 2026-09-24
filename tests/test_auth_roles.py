@@ -307,3 +307,21 @@ def test_check_password_hash_laeuft_auch_fuer_unbekannten_benutzernamen(client, 
     finally:
         m._login_attempts.clear()
         m._ip_attempts.clear()
+
+
+def test_personen_widget_nur_fuer_admin_sichtbar(auth_client, db):
+    """Alle Felder der Personen-Karte sind seit den Profil-Seiten auch ueber
+    /profile aufrufbar/einstellbar - Mitglieder brauchen das Widget fuer
+    FREMDE Personen nicht mehr, nur noch Admins zur Verwaltung."""
+    _als_member(db)
+    try:
+        html = auth_client.get('/settings').get_data(as_text=True)
+        assert 'id="persons-list"' not in html, (
+            'Die Personen-Karte ist fuer ein Mitglied weiterhin sichtbar')
+        assert 'id="save-persons-btn"' not in html
+    finally:
+        _als_admin(db)
+
+    html = auth_client.get('/settings').get_data(as_text=True)
+    assert 'id="persons-list"' in html, 'Admin muss die Personen-Karte weiterhin sehen'
+    assert 'id="save-persons-btn"' in html

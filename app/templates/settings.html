@@ -8,7 +8,10 @@
     <div id="settingsActivityBar" class="mb-3 d-flex flex-wrap gap-2"></div>
   </div>
 
-  <!-- Personen -->
+  <!-- Personen (admin-only: alle Felder sind jetzt auch ueber das eigene
+       Profil aufrufbar/einstellbar - Mitglieder brauchen dieses Widget
+       fuer FREMDE Personen nicht mehr, nur noch Admins zur Verwaltung. -->
+  {% if current_role == 'admin' %}
   <div class="col-12 col-lg-6">
     <div class="card shadow-sm h-100">
       <div class="card-header bg-success text-white fw-semibold">
@@ -20,23 +23,22 @@
           <div class="input-group mb-2 person-row" data-id="{{ p.id }}">
             <input type="text" class="form-control person-name" value="{{ p.name }}" placeholder="Name">
             <input type="month" class="form-control person-wallet-date"
-                   value="{{ p.wallet_start_date or '' }}" title="Bargeld-Startdatum" style="max-width:160px">
+                   value="{{ p.wallet_start_date or '' }}" title="Bargeld-Startdatum"
+                   placeholder="{{ t('settings.wallet_start_date_placeholder') }}" style="max-width:160px">
             <input type="number" step="0.01" class="form-control person-wallet-amount"
                    value="{{ p.wallet_start_amount or '' }}" placeholder="{{ t('settings.wallet_start_amount_placeholder') }}" style="max-width:130px">
-            {% if current_role == 'admin' %}
             <!-- Loeschen passiert nur noch ueber die Kontofelder (Task-5-Review,
                  Befund 2): jede Person hat seit Task 4 zwingend ein Konto, der
                  fruehere eigene Loesch-Button hier fuehrte ueber
                  /api/persons/save zu einem zweiten, abweichenden Loeschpfad
                  (blockierte stillschweigend bei aktivem Konto, loeschte bei
                  deaktiviertem Konto die Person und liess das Konto verwaist
-                 zurueck). -->
+                 zurueck). Die ganze Karte ist seit eben ohnehin admin-only,
+                 ein eigenes {% raw %}{% if %}{% endraw %} hier waere nur noch redundant. -->
             <span class="input-group-text person-account-slot bg-white" style="min-width:0;"></span>
-            {% endif %}
           </div>
           {% endfor %}
         </div>
-        {% if current_role == 'admin' %}
         <!-- Konten ohne verknuepfte Person (Bestand aus der Zeit vor der
              1:1-Regel). Nur sichtbar, wenn es mindestens eines gibt - sonst
              waeren sie in der kombinierten Tabelle unerreichbar. -->
@@ -48,7 +50,6 @@
         <button class="btn btn-outline-success btn-sm mt-1" id="add-person-btn">
           <i class="bi bi-plus-circle me-1"></i>{{ t('settings.add_person') }}
         </button>
-        {% endif %}
         <div class="mt-3">
           <button class="btn btn-success" id="save-persons-btn">
             <i class="bi bi-save me-1"></i>{{ t('settings.save_persons') }}
@@ -57,6 +58,7 @@
       </div>
     </div>
   </div>
+  {% endif %}
 
   <!-- Kategorien -->
   <div class="col-12 col-lg-6">
@@ -592,11 +594,16 @@ function applyIdMap(idMap, selector) {
   });
 }
 
-// Personen
+{% if current_role == 'admin' %}
+// Personen (nur fuer Admins gerendert - siehe die Karte oben. Dieser ganze
+// Block muss deshalb ebenfalls admin-only sein: ohne dieses {% raw %}{% if %}{% endraw %}
+// wuerfe "save-persons-btn" bei einem Mitglied sofort beim Laden einen
+// Fehler (das Element existiert fuer Mitglieder nicht mehr) und wuerde den
+// Rest dieses Inline-Skripts abbrechen.
 // Zwingende 1:1-Kopplung (Task 4): "+ Person hinzufuegen" legt jetzt sofort
-// (admin-only) Konto+Person atomar an, genau wie der fruehere add-user-btn -
-// keine leere, erst per Bulk-Save zu speichernde Zeile mehr.
-document.getElementById('add-person-btn')?.addEventListener('click', async () => {
+// Konto+Person atomar an, genau wie der fruehere add-user-btn - keine
+// leere, erst per Bulk-Save zu speichernde Zeile mehr.
+document.getElementById('add-person-btn').addEventListener('click', async () => {
   const name = prompt(t('settings.person_add_prompt'));
   if (!name) return;
   const d = await (await fetch('/api/users', {
@@ -636,6 +643,7 @@ document.getElementById('save-persons-btn').addEventListener('click', async () =
     showToast(t('settings.toast_error', {error: d.error||''}), 'danger');
   }
 });
+{% endif %}
 
 // Kategorien
 function toggleCatSplitPanel(cb) {

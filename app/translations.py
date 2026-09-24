@@ -331,6 +331,7 @@ TRANSLATIONS = {
         'settings.category_placeholder': '– Kategorie –',
         'settings.wallet_start_amount_placeholder': 'Startbetrag €',
         'settings.wallet_start_date_label': 'Bargeld-Startmonat',
+        'settings.wallet_start_date_placeholder': 'JJJJ-MM',
 
         # ── Suche (search.html) ──────────────────────────────────────────
         'search.title': 'Suche',
@@ -802,6 +803,7 @@ TRANSLATIONS = {
         'settings.category_placeholder': '– Category –',
         'settings.wallet_start_amount_placeholder': 'Starting amount €',
         'settings.wallet_start_date_label': 'Cash start month',
+        'settings.wallet_start_date_placeholder': 'YYYY-MM',
 
         # ── Search (search.html) ──────────────────────────────────────────
         'search.title': 'Search',

@@ -62,7 +62,8 @@
         <div class="mb-2">
           <label class="form-label small text-muted" for="profileWalletDate">{{ t('settings.wallet_start_date_label') }}</label>
           <input type="month" id="profileWalletDate" class="form-control form-control-sm"
-                 value="{{ person.wallet_start_date or '' }}">
+                 value="{{ person.wallet_start_date or '' }}"
+                 placeholder="{{ t('settings.wallet_start_date_placeholder') }}">
         </div>
         <div class="mb-2">
           <label class="form-label small text-muted" for="profileWalletAmount">{{ t('settings.wallet_start_amount_placeholder') }}</label>
