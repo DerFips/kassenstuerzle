@@ -3007,8 +3007,7 @@ def overview():
         grand_savings=daten['grand_savings'],
         open_settlements_count=daten['open_settlements_count'],
         months_by_year=daten['months_by_year'],
-        person_totals=daten['person_totals'],
-        person_totals_by_year=daten['person_totals_by_year'])
+        person_totals=daten['person_totals'])
 
 
 @main_bp.route('/profile')

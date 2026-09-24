@@ -1,4 +1,5 @@
 {% extends 'base.html' %}
+{% import 'macros.html' as m %}
 {% block title %}{{ t('profile.title') }} – {{ t('nav.brand') }}{% endblock %}
 
 {% block content %}
@@ -75,37 +76,112 @@
     </div>
   </div>
 
+  {% if person_totals_by_year %}
   <div class="col-12">
     <div class="card shadow-sm">
       <div class="card-header py-3">
         <h5 class="mb-0"><i class="fas fa-calendar me-2 text-warning"></i>{{ t('profile.years_title') }}</h5>
       </div>
-      <div class="card-body">
-        {% for year, jahresdaten in person_totals_by_year.items() | sort(reverse=true) %}
-        <div class="mb-3">
-          <div class="fw-semibold">{{ year }} — {{ '%.2f'|format(jahresdaten.savings) }} €</div>
-          <table class="table table-sm mb-0">
-            <thead class="table-light">
-              <tr><th>{{ t('nav.month') }}</th><th class="text-end">{{ t('overview.stat_income') }}</th>
-                  <th class="text-end">{{ t('overview.stat_expense') }}</th>
-                  <th class="text-end">{{ t('profile.stat_savings') }}</th></tr>
-            </thead>
-            <tbody>
-              {% for m in jahresdaten.months %}
-              <tr>
-                <td>{{ month_names[m.month - 1] }}</td>
-                <td class="text-end">{{ '%.2f'|format(m.inc) }} €</td>
-                <td class="text-end">{{ '%.2f'|format(m.exp) }} €</td>
-                <td class="text-end">{{ '%.2f'|format(m.savings) }} €</td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+      <div class="card-body p-0">
+        {# Umgezogen von der Uebersichtsseite (AP6 "Personen-Uebersicht"):
+           dort blieb nur noch die schlichte Vergleichstabelle aller
+           Personen nebeneinander - dieser eigene, detaillierte
+           Monats-fuer-Monats-Ausblick mit Abrechnungsstatus gehoert der
+           einzelnen Person und lebt deshalb hier auf ihrem eigenen Profil. #}
+        <div class="accordion accordion-flush" id="profileYearAccordion">
+        {% for year_y, ydata in person_totals_by_year.items() %}
+        {%- set ysav = ydata.inc - ydata.exp %}
+        <div class="accordion-item border-0 border-top">
+          <h2 class="accordion-header">
+            <button class="accordion-button flex-wrap row-gap-1 {% if not loop.first %}collapsed{% endif %} py-2 px-3"
+                    type="button" data-bs-toggle="collapse"
+                    data-bs-target="#profileYear-{{ year_y }}"
+                    aria-expanded="{{ 'true' if loop.first else 'false' }}">
+              <span class="fw-semibold me-3" style="min-width:44px">{{ year_y }}</span>
+              <span class="badge bg-success me-1">+{{ m.eur(ydata.inc) }} €</span>
+              <span class="badge bg-danger me-1">{{ m.eur(ydata.exp) }} €</span>
+              <span class="badge {% if ysav >= 0 %}bg-primary{% else %}bg-warning text-dark{% endif %}">
+                {% if ysav >= 0 %}+{% endif %}{{ m.eur(ysav) }} €
+              </span>
+            </button>
+          </h2>
+          <div id="profileYear-{{ year_y }}"
+               class="accordion-collapse collapse {% if loop.first %}show{% endif %}">
+            <div class="accordion-body p-0">
+              <div class="table-responsive">
+              <table class="table table-sm table-hover mb-0">
+                <thead class="table-light">
+                  <tr>
+                    <th class="ps-3" style="min-width:110px">{{ t('overview.month_col') }}</th>
+                    <th class="text-end text-success">{{ t('overview.income_col') }}</th>
+                    <th class="text-end text-danger">{{ t('overview.expense_col') }}</th>
+                    <th class="text-end">{{ t('overview.savings_col') }}</th>
+                    <th class="text-center" style="min-width:120px">{{ t('overview.status_settlement') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in ydata.months %}
+                  {% if row.inc != 0 or row.exp != 0 %}
+                  {%- set sav = row.inc - row.exp %}
+                  <tr>
+                    <td class="ps-3">
+                      <a href="/month/{{ year_y }}/{{ row.month }}"
+                         class="text-decoration-none">{{ month_names[row.month-1] }}</a>
+                    </td>
+                    <td class="text-end {% if row.inc > 0 %}text-success{% else %}text-muted{% endif %}">
+                      {% if row.inc != 0 %}+{{ m.eur(row.inc) }} €
+                      {% else %}—{% endif %}
+                    </td>
+                    <td class="text-end {% if row.exp > 0 %}text-danger{% else %}text-muted{% endif %}">
+                      {% if row.exp != 0 %}{{ m.eur(row.exp) }} €
+                      {% else %}—{% endif %}
+                    </td>
+                    <td class="text-end fw-semibold {% if sav >= 0 %}text-success{% else %}text-danger{% endif %}">
+                      {% if sav >= 0 %}+{% endif %}{{ m.eur(sav) }} €
+                    </td>
+                    <td class="text-center">
+                      {% if row.settled %}
+                        <span class="badge bg-success">
+                          <i class="fas fa-check me-1"></i>{{ t('overview.settled') }}
+                        </span>
+                        {% if row.sett_delta is not none and row.sett_delta != 0 %}
+                        <br>
+                        <small class="fw-semibold {% if row.sett_delta > 0 %}text-success{% else %}text-danger{% endif %}"
+                               title="{{ t('overview.settlement_delta_title') }}">
+                          {% if row.sett_delta > 0 %}▲ +{% else %}▼ {% endif %}{{ m.eur(row.sett_delta) }} €
+                        </small>
+                        {% endif %}
+                      {% else %}
+                        <span class="badge bg-secondary bg-opacity-50">{{ t('overview.open') }}</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                  {% endif %}
+                  {% endfor %}
+                </tbody>
+                <tfoot class="table-secondary fw-bold">
+                  {%- set ytot_sav = ydata.inc - ydata.exp %}
+                  <tr>
+                    <td class="ps-3">{{ t('overview.year_total', year=year_y) }}</td>
+                    <td class="text-end text-success">+{{ m.eur(ydata.inc) }} €</td>
+                    <td class="text-end text-danger">{{ m.eur(ydata.exp) }} €</td>
+                    <td class="text-end {% if ytot_sav >= 0 %}text-success{% else %}text-danger{% endif %}">
+                      {% if ytot_sav >= 0 %}+{% endif %}{{ m.eur(ytot_sav) }} €
+                    </td>
+                    <td></td>
+                  </tr>
+                </tfoot>
+              </table>
+              </div>
+            </div>
+          </div>
         </div>
         {% endfor %}
+        </div>
       </div>
     </div>
   </div>
+  {% endif %}
   {% endif %}
 </div>
 {% endblock %}
