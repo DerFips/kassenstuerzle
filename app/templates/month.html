@@ -88,9 +88,11 @@
             <input type="text" class="form-control form-control-sm" id="receiptDesc">
           </div>
           <div class="row g-2 mb-3">
+            <!-- "Wer" ist serverseitig gesperrt (Task 3): die neue Zeile gehoert
+                 immer der eigenen Person - nur Anzeige, keine Auswahl. -->
             <div class="col-6">
-              <label class="form-label small mb-1">{{ t('month.person') }}</label>
-              <select class="form-select form-select-sm" id="receiptPerson"></select>
+              <div class="form-label small mb-1">{{ t('month.person') }}</div>
+              <div class="small fw-semibold pt-1" id="receiptPersonName">{{ current_user_person_name or '' }}</div>
             </div>
             <div class="col-6">
               <label class="form-label small mb-1">{{ t('month.category') }}</label>
@@ -992,7 +994,10 @@ async function insertRecurring() {
     const res = await fetch(`/api/recurring/for-month/${YEAR}/${MONTH}`);
     const data = await res.json();
     if (data.recurring && data.recurring.length) {
-      data.recurring.forEach(r => addRow(r.day || '', r.description || '', r.person_id || '', r.category_id || '', r.amount || '', !!r.is_cash, r.paid_for_person_id || '', r.receipt_filename || '', false));
+      // Leeres pid statt r.person_id: der Server setzt "Wer" beim Speichern
+      // ohnehin auf die eigene Person - so zeigt die Zeile sofort genau das
+      // an, statt kurz den Namen aus der Vorlage.
+      data.recurring.forEach(r => addRow(r.day || '', r.description || '', '', r.category_id || '', r.amount || '', !!r.is_cash, r.paid_for_person_id || '', r.receipt_filename || '', false));
       showToast(t('month.toast_recurring_inserted', {count: data.recurring.length}), 'success');
     } else { showToast(t('month.toast_recurring_none'), 'warning'); }
   } catch (e) { showToast(t('month.toast_error', {message: e.message}), 'danger'); }
@@ -1297,7 +1302,6 @@ async function scanReceipt() {
       document.getElementById('receiptDay').value = d.day || '';
       document.getElementById('receiptAmount').value = d.amount != null ? fmt(d.amount) : '';
       document.getElementById('receiptDesc').value = d.description || '';
-      fillPersonSelect(document.getElementById('receiptPerson'), '');
       fillCatSelect(document.getElementById('receiptCat'), '');
       fieldsEl.style.display = 'block';
     }
@@ -1312,7 +1316,6 @@ async function applyReceiptScan() {
   const day  = document.getElementById('receiptDay').value;
   const desc = document.getElementById('receiptDesc').value;
   const amt  = document.getElementById('receiptAmount').value;
-  const pid  = document.getElementById('receiptPerson').value;
   const cid  = document.getElementById('receiptCat').value;
 
   const applyBtn = document.getElementById('receiptApplyBtn');
@@ -1329,7 +1332,8 @@ async function applyReceiptScan() {
     } catch (e) { /* Beleg-Anhang ist optional - Fehler hier ignorieren */ }
   }
 
-  addRow(day, desc, pid, cid, amt, false, '', receiptFn, true);
+  // Leeres pid: neue Zeile zeigt sofort die eigene Person (wie gespeichert).
+  addRow(day, desc, '', cid, amt, false, '', receiptFn, true);
 
   bootstrap.Modal.getInstance(document.getElementById('receiptModal'))?.hide();
   showToast(t('month.receipt_applied'), 'success');

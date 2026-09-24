@@ -171,17 +171,17 @@ def test_eigenes_passwort_nicht_zuruecksetzbar(auth_client, csrf, db):
     assert nachher['session_epoch'] == eigene['session_epoch']
 
 
-def test_reine_personen_verknuepfung_bumped_session_nicht(auth_client, csrf, db):
-    """Regression Important 5: die Nutzerverwaltung zeigt einen
-    Personen-Selektor auch auf der eigenen Zeile. Wuerde eine reine
-    Personen-Aenderung die Session beenden, wuerde ein Admin sich beim
-    Verknuepfen der eigenen Person selbst aussperren - benutzerLaden()
-    bekaeme danach ein 302 statt JSON und die Seite wirkt eingefroren."""
+def test_person_id_im_update_wird_ignoriert_und_bumped_session_nicht(auth_client, csrf, db):
+    """Frueher Regression Important 5 (reine Personen-Verknuepfung ueber diesen
+    Endpunkt durfte die eigene Sitzung nicht beenden). Seit der strikten
+    1:1-Kopplung nimmt POST /api/users/<id> `person_id` gar nicht mehr an
+    (Befund I3) - ein mitgesendeter Wert aendert weder die Verknuepfung noch
+    beendet er die Sitzung."""
     cur = db.execute("INSERT INTO persons (name) VALUES ('Ivo')")
     pid = cur.lastrowid
     db.commit()
     try:
-        eigene = db.execute("SELECT id, session_epoch FROM users"
+        eigene = db.execute("SELECT id, session_epoch, person_id FROM users"
                             " WHERE username='admin'").fetchone()
         res = auth_client.post(f'/api/users/{eigene["id"]}', json={'person_id': pid},
                                headers={'X-CSRF-Token': csrf})
@@ -189,7 +189,8 @@ def test_reine_personen_verknuepfung_bumped_session_nicht(auth_client, csrf, db)
         nachher = db.execute("SELECT session_epoch, person_id FROM users"
                              " WHERE id=?", (eigene['id'],)).fetchone()
         assert nachher['session_epoch'] == eigene['session_epoch']
-        assert nachher['person_id'] == pid
+        assert nachher['person_id'] == eigene['person_id'], \
+            'person_id wurde ueber das Update-Payload uebernommen'
     finally:
         db.execute("UPDATE users SET person_id=NULL WHERE username='admin'")
         db.execute('DELETE FROM persons WHERE id=?', (pid,))

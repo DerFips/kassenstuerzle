@@ -8,6 +8,8 @@ import re
 
 import pytest
 
+from app.routes import main as _main
+
 # Klassisches Markup-Payload: wirkt in HTML-Senken (|safe, innerHTML).
 MARKUP_PAYLOAD = '<img src=x onerror=alert(1)>'
 MARKUP_MASKIERT = '&lt;img src=x onerror=alert(1)&gt;'
@@ -45,6 +47,16 @@ def _kategorie(client, csrf, name, color='#ff8800', is_split=True):
 
 
 def _ausgabe(client, csrf, person_id, category_id, betrag=100.0):
+    # "Wer" einer neuen Zeile kommt serverseitig aus der Sitzung (Task 3), und
+    # ein Konto ohne Person darf keine neuen Zeilen anlegen (Befund I2) - der
+    # Test-Admin wird deshalb der Person zugeordnet, deren Name geprueft wird.
+    # Zurueckgesetzt ueber die db-Fixture (Personen weg -> ON DELETE SET NULL).
+    con = _main._open_db(_main.DB_PATH)
+    try:
+        con.execute("UPDATE users SET person_id=? WHERE username='admin'", (person_id,))
+        con.commit()
+    finally:
+        con.close()
     res = client.post('/api/expenses/save',
                       json={'v': 2, 'year': JAHR, 'month': MONAT, 'deleted_ids': [],
                             'rows': [{'client_key': 'e', 'day': 3, 'description': 'Test',

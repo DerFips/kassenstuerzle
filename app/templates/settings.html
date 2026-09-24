@@ -37,6 +37,14 @@
           {% endfor %}
         </div>
         {% if current_role == 'admin' %}
+        <!-- Konten ohne verknuepfte Person (Bestand aus der Zeit vor der
+             1:1-Regel). Nur sichtbar, wenn es mindestens eines gibt - sonst
+             waeren sie in der kombinierten Tabelle unerreichbar. -->
+        <div id="orphan-accounts" class="mt-2 mb-2" hidden>
+          <div class="fw-semibold small">{{ t('settings.orphan_accounts_title') }}</div>
+          <p class="text-muted small mb-2">{{ t('settings.orphan_accounts_hint') }}</p>
+          <div id="orphan-accounts-list"></div>
+        </div>
         <button class="btn btn-outline-success btn-sm mt-1" id="add-person-btn">
           <i class="bi bi-plus-circle me-1"></i>{{ t('settings.add_person') }}
         </button>
@@ -800,10 +808,21 @@ initActivityWatch({ scope: 'settings', version: ACTIVITY_VERSION, container: 'se
 // benutzerZeile() entfaellt bewusst - die 1:1-Kopplung Person<->Konto ist seit
 // Task 4 atomar, ein Umhaengen auf eine andere Person hat in dieser Ansicht
 // keinen natuerlichen Platz mehr.
+/** Setzt die Kontofelder eines Kontos in die Personen-Zeile seiner Person.
+ * false, wenn es keine passende Zeile gibt (Konto ohne Person) - der Aufrufer
+ * zeigt es dann in der separaten Liste "Konten ohne Person" an. */
 function kontoFelderEinfuegen(u) {
+  if (u.person_id == null) return false;
   const zeile = document.querySelector(`.person-row[data-id="${u.person_id}"]`);
   const slot = zeile?.querySelector('.person-account-slot');
-  if (!slot) return;  // Zeile (noch) nicht im DOM, z.B. gerade erst angelegt
+  if (!slot) return false;
+  kontoFelderBauen(u, slot, false);
+  return true;
+}
+
+/** Baut Benutzername, Rolle, Aktiv, letzte Anmeldung, Reset und Loeschen in
+ * `slot` - gemeinsam fuer verknuepfte Konten und Konten ohne Person. */
+function kontoFelderBauen(u, slot, ohnePerson) {
   slot.innerHTML = '';
 
   const badge = document.createElement('span');
@@ -848,16 +867,67 @@ function kontoFelderEinfuegen(u) {
   del.type = 'button';
   del.className = 'btn btn-sm btn-outline-danger';
   del.innerHTML = '<i class="bi bi-trash"></i>';
-  del.title = t('settings.user_delete_confirm', {name: u.username});
-  del.addEventListener('click', () => benutzerLoeschen(u.id, u.username));
+  del.title = t('settings.user_delete');
+  del.addEventListener('click', () => benutzerLoeschen(u.id, u.username, ohnePerson));
   slot.appendChild(del);
+}
+
+/** Person ohne Konto (Bestand aus der Zeit vor der 1:1-Regel): statt leerer
+ * Kontofelder ein "Konto anlegen"-Button, der ein Konto fuer GENAU diese
+ * Person anlegt (POST /api/users mit ihrer person_id). */
+function kontoAnlegenEinfuegen(zeile, slot) {
+  slot.innerHTML = '';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-sm btn-outline-success js-account-create';
+  btn.innerHTML = '<i class="bi bi-person-plus me-1"></i>';
+  btn.appendChild(document.createTextNode(t('settings.account_create')));
+  btn.addEventListener('click', async () => {
+    const personId = parseInt(zeile.dataset.id, 10);
+    const personName = zeile.querySelector('.person-name').value.trim();
+    // Vorschlag = Personenname (wie bei "+ Person hinzufuegen"), aber
+    // editierbar - z.B. wenn der Name schon als Login vergeben ist.
+    const name = prompt(t('settings.account_create_prompt', {name: personName}), personName);
+    if (!name || !name.trim()) return;
+    const d = await (await fetch('/api/users', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: name.trim(), role: 'member', person_id: personId})
+    })).json();
+    if (!d.success) { showToast(d.error, 'danger'); return; }
+    zeigeInitialpasswort(name.trim(), d.password, personenNeuLaden);
+  });
+  slot.appendChild(btn);
+}
+
+/** Konten ohne Person in der separaten Liste unter der Tabelle - nur
+ * eingeblendet, wenn es mindestens eines gibt. */
+function kontenOhnePersonZeigen(konten) {
+  const wrap = document.getElementById('orphan-accounts');
+  const liste = document.getElementById('orphan-accounts-list');
+  liste.innerHTML = '';
+  konten.forEach(u => {
+    const zeile = document.createElement('div');
+    zeile.className = 'd-flex flex-wrap align-items-center gap-1 border rounded px-2 py-1 mb-2 orphan-account-row';
+    zeile.dataset.userId = u.id;
+    kontoFelderBauen(u, zeile, true);
+    liste.appendChild(zeile);
+  });
+  wrap.hidden = konten.length === 0;
 }
 
 /** Fuellt die Kontofelder aller Personen-Zeilen aus /api/users (einmalig beim
  * Seitenaufbau - fuer Aenderungen danach siehe personenNeuLaden()). */
 async function kontoFelderLaden() {
   const benutzer = (await (await fetch('/api/users')).json()).users || [];
-  benutzer.forEach(kontoFelderEinfuegen);
+  const ohnePerson = benutzer.filter(u => !kontoFelderEinfuegen(u));
+  const mitKonto = new Set(benutzer.filter(u => u.person_id != null).map(u => String(u.person_id)));
+  document.querySelectorAll('.person-row').forEach(zeile => {
+    const slot = zeile.querySelector('.person-account-slot');
+    if (slot && zeile.dataset.id && !mitKonto.has(String(zeile.dataset.id))) {
+      kontoAnlegenEinfuegen(zeile, slot);
+    }
+  });
+  kontenOhnePersonZeigen(ohnePerson);
 }
 
 /** Nach Anlegen/Aendern/Loeschen neu vom Server holen. Es gibt (bewusst
@@ -885,8 +955,11 @@ async function passwortZuruecksetzen(id, name) {
   else showToast(d.error, 'danger');
 }
 
-async function benutzerLoeschen(id, name) {
-  if (!confirm(t('settings.user_delete_confirm', {name}))) return;
+async function benutzerLoeschen(id, name, ohnePerson) {
+  // Mit Person: deutlicher Hinweis auf Person + Buchungshistorie und die
+  // Alternative "deaktivieren". Ohne Person faellt nur das Konto weg.
+  const frage = ohnePerson ? 'settings.user_delete_confirm_unlinked' : 'settings.user_delete_confirm';
+  if (!confirm(t(frage, {name}))) return;
   const d = await (await fetch(`/api/users/${id}`, {method: 'DELETE'})).json();
   showToast(d.success ? t('settings.user_deleted') : d.error, d.success ? 'success' : 'danger');
   personenNeuLaden();

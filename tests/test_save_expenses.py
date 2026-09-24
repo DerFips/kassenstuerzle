@@ -3,7 +3,12 @@ import pytest
 
 @pytest.fixture()
 def person(db):
+    """Person 'Alice', mit dem Test-Admin verknuepft: neue Zeilen bekommen ihr
+    "Wer" serverseitig aus der Sitzung, und ein Konto ohne Person darf keine
+    neuen Zeilen anlegen (Befund I2). Aufgeraeumt ueber die db-Fixture - das
+    Loeschen der Person setzt users.person_id per ON DELETE SET NULL zurueck."""
     cur = db.execute("INSERT INTO persons (name) VALUES ('Alice')")
+    db.execute("UPDATE users SET person_id=? WHERE username='admin'", (cur.lastrowid,))
     db.commit()
     return cur.lastrowid
 
