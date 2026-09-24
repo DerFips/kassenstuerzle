@@ -110,3 +110,31 @@ def test_detaillierte_monatsuebersicht_ist_von_uebersicht_ins_profil_umgezogen(a
     finally:
         db.execute("UPDATE users SET person_id=NULL WHERE username='admin'")
         db.commit()
+
+
+def test_kategorie_monats_matrix_ist_von_uebersicht_ins_profil_umgezogen(auth_client, db):
+    """Die einklappbare Kategorie-Monats-Matrix mit den drei Reitern
+    (Ausgaben/Einnahmen/Gesamt) gehoert nach Nutzerwunsch nun ausschliesslich
+    der eigenen Profilseite, nicht mehr /overview."""
+    db.execute("INSERT INTO persons (name) VALUES ('Anna')")
+    anna = db.execute("SELECT id FROM persons WHERE name='Anna'").fetchone()['id']
+    db.execute("INSERT INTO categories (name, color) VALUES ('Essen', '#111111')")
+    kat = db.execute("SELECT id FROM categories WHERE name='Essen'").fetchone()['id']
+    db.execute("INSERT INTO expenses (year,month,day,description,person_id,category_id,amount)"
+               " VALUES (2026,3,1,'Testausgabe',?,?,25)", (anna, kat))
+    db.execute("UPDATE users SET person_id=? WHERE username='admin'", (anna,))
+    db.commit()
+    try:
+        profil_html = auth_client.get('/profile').get_data(as_text=True)
+        assert 'id="profileDetailsSection"' in profil_html, (
+            'Die Kategorie-Monats-Matrix ist auf /profile nicht vorhanden')
+        assert 'id="profileOvTabs"' in profil_html
+
+        uebersicht_html = auth_client.get('/overview').get_data(as_text=True)
+        assert 'id="detailsSection"' not in uebersicht_html, (
+            'Die Kategorie-Monats-Matrix ist auf /overview immer noch vorhanden - '
+            'sie sollte ausschliesslich auf /profile stehen')
+        assert 'id="ovTabs"' not in uebersicht_html
+    finally:
+        db.execute("UPDATE users SET person_id=NULL WHERE username='admin'")
+        db.commit()

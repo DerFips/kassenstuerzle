@@ -3031,6 +3031,7 @@ def profile():
     pn = person['name']
 
     eigene_kategorien = daten['structured'].get(pn, {})
+    eigene_einnahmen = daten['inc_structured'].get(pn, {})
     eigene_jahre = daten['person_totals_by_year'].get(pn, {})
     eigene_totale = daten['person_totals'].get(pn, {'inc': 0, 'exp': 0, 'savings': 0})
     eigenes_chart_json = {
@@ -3043,7 +3044,10 @@ def profile():
     return render_template('profile.html', active='profile', unlinked=False,
         person=person, person_name=pn, month_names=MONTH_NAMES,
         person_totals=eigene_totale, person_totals_by_year=eigene_jahre,
-        profile_chart_json=eigenes_chart_json)
+        profile_chart_json=eigenes_chart_json,
+        # Fuer die detaillierte Kategorie-Monats-Matrix (umgezogen von /overview):
+        structured=eigene_kategorien, inc_structured=eigene_einnahmen,
+        all_cats=sorted(daten['cats_map'].items()), month_keys=daten['month_keys'])
 
 
 # ── PDF Kontoauszug Import ─────────────────────────────────────────────────────
