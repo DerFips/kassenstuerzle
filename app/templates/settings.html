@@ -108,65 +108,9 @@
     </div>
   </div>
 
-  <!-- Wiederkehrende Ausgaben -->
-  <div class="col-12">
-    <div class="card shadow-sm">
-      <div class="card-header bg-warning text-dark fw-semibold">
-        <i class="bi bi-arrow-repeat me-1"></i>{{ t('settings.recurring') }}
-      </div>
-      <div class="card-body">
-        <div id="recurring-list">
-          {% for r in recurring %}
-          <div class="row g-2 mb-2 recurring-row" data-id="{{ r.id }}">
-            <div class="col-6 col-md-2">
-              <input type="number" min="1" max="31" class="form-control rec-day" value="{{ r.day }}" placeholder="{{ t('settings.day') }}">
-            </div>
-            <div class="col-6 col-md-3">
-              <input type="text" class="form-control rec-desc" value="{{ r.description }}" placeholder="{{ t('settings.description') }}">
-            </div>
-            <div class="col-6 col-md-2">
-              <select class="form-select rec-person">
-                <option value="">{{ t('settings.person_placeholder') }}</option>
-                {% for p in persons %}
-                <option value="{{ p.id }}" {% if r.person_id == p.id %}selected{% endif %}>{{ p.name }}</option>
-                {% endfor %}
-              </select>
-            </div>
-            <div class="col-6 col-md-2">
-              <select class="form-select rec-cat">
-                <option value="">{{ t('settings.category_placeholder') }}</option>
-                {% for c in categories %}
-                <option value="{{ c.id }}" {% if r.category_id == c.id %}selected{% endif %}>{{ c.name }}</option>
-                {% endfor %}
-              </select>
-            </div>
-            <div class="col-4 col-md-1">
-              <input type="number" step="0.01" class="form-control rec-amount" value="{{ r.amount }}" placeholder="€">
-            </div>
-            <div class="col-4 col-md-1">
-              <select class="form-select rec-freq">
-                <option value="monthly" {% if r.frequency=='monthly' %}selected{% endif %}>{{ t('settings.monthly') }}</option>
-                <option value="quarterly" {% if r.frequency=='quarterly' %}selected{% endif %}>{{ t('settings.quarterly') }}</option>
-                <option value="yearly" {% if r.frequency=='yearly' %}selected{% endif %}>{{ t('settings.yearly') }}</option>
-              </select>
-            </div>
-            <div class="col-4 col-md-1">
-              <button class="btn btn-outline-danger btn-sm remove-rec-btn w-100"><i class="bi bi-trash"></i></button>
-            </div>
-          </div>
-          {% endfor %}
-        </div>
-        <button class="btn btn-outline-warning btn-sm mt-1" id="add-rec-btn">
-          <i class="bi bi-plus-circle me-1"></i>{{ t('settings.add') }}
-        </button>
-        <div class="mt-3">
-          <button class="btn btn-warning" id="save-recurring-btn">
-            <i class="bi bi-save me-1"></i>{{ t('settings.save_recurring') }}
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
+  {# Wiederkehrende Ausgaben: umgezogen auf die eigene Profilseite jeder
+     Person (Nutzerentscheidung) - streng persoenlich, kein globales Widget
+     mehr, auch fuer Admins nicht. #}
 
   <!-- PDF Import Link -->
   <div class="col-12 col-md-6">
@@ -578,7 +522,6 @@ function urlBase64ToUint8Array(base64String) {
 const PERSONS_FOR_SPLITS = {{ persons | tojson }};
 const ACTIVITY_VERSION = {{ activity_version | tojson }};
 let _pendingCatDeletes = [];
-let _pendingRecurDeletes = [];
 let _ckSeq = 0;
 function nextClientKey(el) {
   if (!el.dataset.clientKey) el.dataset.clientKey = 'c' + (++_ckSeq);
@@ -729,69 +672,9 @@ document.getElementById('save-cats-btn').addEventListener('click', async () => {
   }
 });
 
-// Wiederkehrende
-// Namen als JSON, nicht als vorgefertigtes Markup in einem Template-Literal:
-// Jinja maskiert dort zwar < > ", aber NICHT $ { } und Backtick - `${...}`
-// in einem Namen war deshalb eine lebende Substitution (K1). Die Optionen
-// entstehen jetzt per new Option(), also rein ueber den DOM.
-const REC_PERSONS = {{ persons | tojson }};
-const REC_CATS    = {{ categories | tojson }};
-
-/** Fuellt ein <select> mit Namen; Reihenfolge wie bisher (Server sortiert). */
-function fillRecSelect(sel, items) {
-  if (!sel) return;
-  items.forEach(it => sel.appendChild(new Option(it.name, it.id)));
-}
-document.getElementById('add-rec-btn').addEventListener('click', () => {
-  const div = document.createElement('div');
-  div.className = 'row g-2 mb-2 recurring-row'; div.dataset.id = '';
-  div.innerHTML = `
-    <div class="col-6 col-md-2"><input type="number" min="1" max="31" class="form-control rec-day" placeholder="${t('settings.day')}"></div>
-    <div class="col-6 col-md-3"><input type="text" class="form-control rec-desc" placeholder="${t('settings.description')}"></div>
-    <div class="col-6 col-md-2"><select class="form-select rec-person"><option value="">${t('settings.person_placeholder')}</option></select></div>
-    <div class="col-6 col-md-2"><select class="form-select rec-cat"><option value="">${t('settings.category_placeholder')}</option></select></div>
-    <div class="col-4 col-md-1"><input type="number" step="0.01" class="form-control rec-amount" placeholder="€"></div>
-    <div class="col-4 col-md-1"><select class="form-select rec-freq">
-      <option value="monthly">${t('settings.monthly')}</option>
-      <option value="quarterly">${t('settings.quarterly')}</option>
-      <option value="yearly">${t('settings.yearly')}</option></select></div>
-    <div class="col-4 col-md-1"><button class="btn btn-outline-danger btn-sm remove-rec-btn w-100"><i class="bi bi-trash"></i></button></div>`;
-  fillRecSelect(div.querySelector('.rec-person'), REC_PERSONS);
-  fillRecSelect(div.querySelector('.rec-cat'), REC_CATS);
-  document.getElementById('recurring-list').appendChild(div);
-});
-document.getElementById('recurring-list').addEventListener('click', e => {
-  if (e.target.closest('.remove-rec-btn')) {
-    const row = e.target.closest('.recurring-row');
-    if (row.dataset.id) _pendingRecurDeletes.push(parseInt(row.dataset.id, 10));
-    row.remove();
-  }
-});
-document.getElementById('save-recurring-btn').addEventListener('click', async () => {
-  const rows = [...document.querySelectorAll('.recurring-row')].map(r => ({
-    ...rowIdentity(r),
-    day: parseInt(r.querySelector('.rec-day').value) || 1,
-    description: r.querySelector('.rec-desc').value.trim(),
-    person_id: r.querySelector('.rec-person').value || null,
-    category_id: r.querySelector('.rec-cat').value || null,
-    amount: parseFloat(r.querySelector('.rec-amount').value) || 0,
-    frequency: r.querySelector('.rec-freq').value,
-    start_month: 1
-  }));
-  const sentDeletes = _pendingRecurDeletes.slice();
-  const res = await fetch('/api/recurring/save', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ v: 2, rows, deleted_ids: sentDeletes })
-  });
-  const d = await res.json();
-  if (d.success) {
-    applyIdMap(d.id_map, '.recurring-row');
-    _pendingRecurDeletes = _pendingRecurDeletes.filter(id => !sentDeletes.includes(id));
-    if (typeof activityWatchVersion === 'function') activityWatchVersion(d.activity_version);
-  }
-  showToast(d.success ? t('settings.toast_recurring_saved') : t('settings.toast_error', {error: d.error||''}),
-            d.success ? 'success' : 'danger');
-});
+// Wiederkehrende Ausgaben: umgezogen auf die eigene Profilseite jeder
+// Person (Nutzerentscheidung) - siehe profile.html. Dieses Widget und sein
+// JS gibt es hier nicht mehr, fuer niemanden, auch nicht fuer Admins.
 
 // CSV Import
 document.getElementById('csv-import-btn').addEventListener('click', async () => {

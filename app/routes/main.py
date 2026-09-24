@@ -1277,8 +1277,18 @@ def calculate_wallet(year, month, conn):
 
 
 
-def get_recurring_for_month(year, month, conn):
-    rows = conn.execute('SELECT * FROM recurring_expenses WHERE active=1').fetchall()
+def get_recurring_for_month(year, month, conn, person_id=None):
+    """Aktive Vorlagen fuer einen Monat - optional auf eine Person gefiltert.
+
+    Wiederkehrende Vorlagen sind streng persoenlich (Nutzerentscheidung):
+    beim Einfuegen im Monat sieht jede Person nur noch ihre eigenen
+    Vorlagen, nicht mehr die aller Haushaltsmitglieder.
+    """
+    if person_id is not None:
+        rows = conn.execute('SELECT * FROM recurring_expenses WHERE active=1 AND person_id=?',
+                            (person_id,)).fetchall()
+    else:
+        rows = conn.execute('SELECT * FROM recurring_expenses WHERE active=1').fetchall()
     result = []
     for r in rows:
         freq, sm = r['frequency'], r['start_month']
@@ -2469,17 +2479,32 @@ def save_recurring():
     stale = _require_v2(d)
     if stale:
         return stale
+    rows = d.get('rows') or []
+    deleted_ids = d.get('deleted_ids') or []
+    # Wiederkehrende Vorlagen sind streng persoenlich (Nutzerentscheidung):
+    # jede Person verwaltet nur noch ihre eigenen, kein globales Widget mehr,
+    # keine Ausnahme fuer Admins. Serverseitig durchgesetzt, nicht nur im
+    # Frontend versteckt - sonst liesse sich das per direktem API-Aufruf umgehen.
+    eigene_person_id = g.current_user['person_id']
+    if (rows or deleted_ids) and eigene_person_id is None:
+        return jsonify(success=False, error=t('srv.account_not_linked')), 400
+
     conn = get_db()
     id_map = {}
 
-    for raw in (d.get('deleted_ids') or []):
+    for raw in deleted_ids:
         try:
             did = int(raw)
         except (TypeError, ValueError):
             continue
-        conn.execute('DELETE FROM recurring_expenses WHERE id=?', (did,))
+        # AND person_id=? verhindert, dass jemand per direktem API-Aufruf eine
+        # fremde Vorlage loescht - die Oberflaeche zeigt ohnehin nur die
+        # eigenen an, ein Nichttreffer ist im Normalbetrieb unerreichbar und
+        # wird deshalb bewusst still ignoriert statt einen Fehler zu melden.
+        conn.execute('DELETE FROM recurring_expenses WHERE id=? AND person_id=?',
+                     (did, eigene_person_id))
 
-    for r in (d.get('rows') or []):
+    for r in rows:
         try:
             amt = float(r.get('amount') or 0)
         except (TypeError, ValueError):
@@ -2493,31 +2518,38 @@ def save_recurring():
         if not desc and amt == 0:
             # Geleerte Zeile: bestehende Zeile löschen, nie ausgefüllte ignorieren
             if rid is not None:
-                conn.execute('DELETE FROM recurring_expenses WHERE id=?', (rid,))
+                conn.execute('DELETE FROM recurring_expenses WHERE id=? AND person_id=?',
+                             (rid, eigene_person_id))
             continue
-        pid  = int(r['person_id'])   if r.get('person_id')   else None
         cid  = int(r['category_id']) if r.get('category_id') else None
         freq = r.get('frequency', 'monthly')
         sm   = int(r.get('start_month', 1)) if freq != 'monthly' else 1
         day  = int(r.get('day') or 1)
 
         if rid is not None:
+            # person_id fehlt hier bewusst in der SET-Klausel (gleiches Prinzip
+            # wie beim Wer-Feld bei Ausgaben/Einnahmen) - eine Vorlage laesst
+            # sich nicht umhaengen, und AND person_id=? sorgt dafuer, dass nur
+            # die eigene ueberhaupt getroffen wird.
             conn.execute(
-                'UPDATE recurring_expenses SET day=?, description=?, person_id=?, category_id=?,'
-                ' amount=?, frequency=?, start_month=? WHERE id=?',
-                (day, desc, pid, cid, amt, freq, sm, rid))
+                'UPDATE recurring_expenses SET day=?, description=?, category_id=?,'
+                ' amount=?, frequency=?, start_month=? WHERE id=? AND person_id=?',
+                (day, desc, cid, amt, freq, sm, rid, eigene_person_id))
         else:
+            # Neue Vorlage: person_id kommt IMMER aus der Sitzung, nie vom
+            # Client - serverseitig erzwungen, siehe Kommentar oben.
             cur = conn.execute(
                 'INSERT INTO recurring_expenses (day,description,person_id,category_id,amount,'
                 'frequency,start_month,active) VALUES (?,?,?,?,?,?,?,1)',
-                (day, desc, pid, cid, amt, freq, sm))
+                (day, desc, eigene_person_id, cid, amt, freq, sm))
             ck = r.get('client_key')
             if ck:
                 id_map[str(ck)] = cur.lastrowid
 
     activity_version = _bump_activity(conn, 'settings')
     conn.commit()
-    result = [dict(r) for r in conn.execute('SELECT * FROM recurring_expenses ORDER BY id')]
+    result = [dict(r) for r in conn.execute(
+        'SELECT * FROM recurring_expenses WHERE person_id=? ORDER BY id', (eigene_person_id,))]
     conn.close()
     return jsonify({'success': True, 'recurring': result,
                     'id_map': id_map, 'activity_version': activity_version})
@@ -2526,7 +2558,7 @@ def save_recurring():
 @login_required
 def recurring_for_month(year, month):
     conn = get_db()
-    result = get_recurring_for_month(year, month, conn)
+    result = get_recurring_for_month(year, month, conn, person_id=g.current_user['person_id'])
     conn.close()
     return jsonify({'recurring': result})
 
@@ -2657,13 +2689,12 @@ def settings():
     activity_version = _act_row['version'] if _act_row else 0
     persons   = [dict(r) for r in conn.execute('SELECT * FROM persons ORDER BY name')]
     cats      = [dict(r) for r in conn.execute('SELECT * FROM categories ORDER BY name')]
-    recurring = [dict(r) for r in conn.execute('SELECT * FROM recurring_expenses ORDER BY id')]
     category_splits = get_category_splits_map(conn)
     conn.close()
     aktuelle_rolle = getattr(g, 'current_user', None)
     aktuelle_rolle = aktuelle_rolle['role'] if aktuelle_rolle else 'member'
     return render_template('settings.html', active='settings', persons=persons, categories=cats,
-                            recurring=recurring, category_splits=category_splits,
+                            category_splits=category_splits,
                             activity_version=activity_version, current_role=aktuelle_rolle)
 
 
@@ -3039,6 +3070,11 @@ def profile():
         'categories': daten['overview_chart_json']['categories'],
         'category_by_month': eigene_kategorien,
     }
+    # Wiederkehrende Vorlagen sind streng persoenlich (Nutzerentscheidung) -
+    # nur die eigenen, kein globales Widget mehr (siehe auch save_recurring()).
+    eigene_wiederkehrende = [dict(r) for r in conn.execute(
+        'SELECT * FROM recurring_expenses WHERE person_id=? ORDER BY id', (person_id,))]
+    alle_kategorien = [dict(r) for r in conn.execute('SELECT * FROM categories ORDER BY name')]
     conn.close()
 
     return render_template('profile.html', active='profile', unlinked=False,
@@ -3047,7 +3083,9 @@ def profile():
         profile_chart_json=eigenes_chart_json,
         # Fuer die detaillierte Kategorie-Monats-Matrix (umgezogen von /overview):
         structured=eigene_kategorien, inc_structured=eigene_einnahmen,
-        all_cats=sorted(daten['cats_map'].items()), month_keys=daten['month_keys'])
+        all_cats=sorted(daten['cats_map'].items()), month_keys=daten['month_keys'],
+        # Fuer die eigenen wiederkehrenden Ausgaben (umgezogen von /settings):
+        recurring=eigene_wiederkehrende, categories=alle_kategorien)
 
 
 # ── PDF Kontoauszug Import ─────────────────────────────────────────────────────

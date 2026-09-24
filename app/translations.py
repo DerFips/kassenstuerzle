@@ -36,6 +36,7 @@ TRANSLATIONS = {
         'profile.categories_title': 'Meine Kategorien',
         'profile.years_title': 'Nach Jahr',
         'profile.wallet_title': 'Meine Geldbörse',
+        'profile.recurring_title': 'Meine wiederkehrenden Ausgaben',
 
         # ── Login ────────────────────────────────────────────────────────
         'login.subtitle': 'Bitte melde dich an',
@@ -515,6 +516,7 @@ TRANSLATIONS = {
         'profile.categories_title': 'My Categories',
         'profile.years_title': 'By Year',
         'profile.wallet_title': 'My Wallet',
+        'profile.recurring_title': 'My Recurring Expenses',
 
         # ── Login ────────────────────────────────────────────────────────
         'login.subtitle': 'Please sign in',

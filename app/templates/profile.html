@@ -77,6 +77,60 @@
     </div>
   </div>
 
+  {# Umgezogen von den Einstellungen: wiederkehrende Vorlagen sind streng
+     persoenlich (Nutzerentscheidung) - kein globales Widget mehr, auch fuer
+     Admins nicht. Kein Personen-Feld mehr, da immer die eigene Person. #}
+  <div class="col-12">
+    <div class="card shadow-sm">
+      <div class="card-header bg-warning text-dark fw-semibold">
+        <i class="bi bi-arrow-repeat me-1"></i>{{ t('profile.recurring_title') }}
+      </div>
+      <div class="card-body">
+        <div id="profileRecurringList">
+          {% for r in recurring %}
+          <div class="row g-2 mb-2 recurring-row" data-id="{{ r.id }}">
+            <div class="col-6 col-md-3">
+              <input type="number" min="1" max="31" class="form-control rec-day" value="{{ r.day }}" placeholder="{{ t('settings.day') }}">
+            </div>
+            <div class="col-6 col-md-4">
+              <input type="text" class="form-control rec-desc" value="{{ r.description }}" placeholder="{{ t('settings.description') }}">
+            </div>
+            <div class="col-6 col-md-3">
+              <select class="form-select rec-cat">
+                <option value="">{{ t('settings.category_placeholder') }}</option>
+                {% for c in categories %}
+                <option value="{{ c.id }}" {% if r.category_id == c.id %}selected{% endif %}>{{ c.name }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-4 col-md-1">
+              <input type="number" step="0.01" class="form-control rec-amount" value="{{ r.amount }}" placeholder="€">
+            </div>
+            <div class="col-6 col-md-2">
+              <select class="form-select rec-freq">
+                <option value="monthly" {% if r.frequency=='monthly' %}selected{% endif %}>{{ t('settings.monthly') }}</option>
+                <option value="quarterly" {% if r.frequency=='quarterly' %}selected{% endif %}>{{ t('settings.quarterly') }}</option>
+                <option value="yearly" {% if r.frequency=='yearly' %}selected{% endif %}>{{ t('settings.yearly') }}</option>
+              </select>
+            </div>
+            <div class="col-2 col-md-1">
+              <button class="btn btn-outline-danger btn-sm remove-rec-btn w-100"><i class="bi bi-trash"></i></button>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        <button class="btn btn-outline-warning btn-sm mt-1" id="profileAddRecBtn">
+          <i class="bi bi-plus-circle me-1"></i>{{ t('settings.add') }}
+        </button>
+        <div class="mt-3">
+          <button class="btn btn-warning" id="profileSaveRecurringBtn">
+            <i class="bi bi-save me-1"></i>{{ t('settings.save_recurring') }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   {% if person_totals_by_year %}
   <div class="col-12">
     <div class="card shadow-sm">
@@ -462,6 +516,74 @@ document.getElementById('profileWalletSave').addEventListener('click', async () 
   });
   const d = await res.json();
   showToast(d.success ? t('settings.toast_persons_saved') : t('settings.toast_error', {error: d.error || ''}),
+            d.success ? 'success' : 'danger');
+});
+
+// Meine wiederkehrenden Ausgaben (umgezogen von den Einstellungen).
+// rowIdentity/applyIdMap/nextClientKey sind bewusst eine eigene, kleine Kopie
+// statt eines gemeinsamen Moduls - jedes Template in diesem Projekt ist
+// eigenstaendig, keine gemeinsame externe JS-Datei.
+const PROFILE_CATS = {{ categories | tojson }};
+let _profileRecCkSeq = 0;
+let _profilePendingRecDeletes = [];
+function profileNextClientKey(el) {
+  if (!el.dataset.clientKey) el.dataset.clientKey = 'pc' + (++_profileRecCkSeq);
+  return el.dataset.clientKey;
+}
+function profileRowIdentity(el) {
+  return el.dataset.id ? { id: parseInt(el.dataset.id, 10) } : { client_key: profileNextClientKey(el) };
+}
+function profileApplyIdMap(idMap, selector) {
+  Object.entries(idMap || {}).forEach(([ck, id]) => {
+    const el = document.querySelector(`${selector}[data-client-key="${ck}"]`);
+    if (el) { el.dataset.id = id; delete el.dataset.clientKey; }
+  });
+}
+document.getElementById('profileAddRecBtn').addEventListener('click', () => {
+  const div = document.createElement('div');
+  div.className = 'row g-2 mb-2 recurring-row'; div.dataset.id = '';
+  div.innerHTML = `
+    <div class="col-6 col-md-3"><input type="number" min="1" max="31" class="form-control rec-day" placeholder="${t('settings.day')}"></div>
+    <div class="col-6 col-md-4"><input type="text" class="form-control rec-desc" placeholder="${t('settings.description')}"></div>
+    <div class="col-6 col-md-3"><select class="form-select rec-cat"><option value="">${t('settings.category_placeholder')}</option></select></div>
+    <div class="col-4 col-md-1"><input type="number" step="0.01" class="form-control rec-amount" placeholder="€"></div>
+    <div class="col-6 col-md-2"><select class="form-select rec-freq">
+      <option value="monthly">${t('settings.monthly')}</option>
+      <option value="quarterly">${t('settings.quarterly')}</option>
+      <option value="yearly">${t('settings.yearly')}</option></select></div>
+    <div class="col-2 col-md-1"><button class="btn btn-outline-danger btn-sm remove-rec-btn w-100"><i class="bi bi-trash"></i></button></div>`;
+  const sel = div.querySelector('.rec-cat');
+  PROFILE_CATS.forEach(c => sel.appendChild(new Option(c.name, c.id)));
+  document.getElementById('profileRecurringList').appendChild(div);
+});
+document.getElementById('profileRecurringList').addEventListener('click', e => {
+  if (e.target.closest('.remove-rec-btn')) {
+    const row = e.target.closest('.recurring-row');
+    if (row.dataset.id) _profilePendingRecDeletes.push(parseInt(row.dataset.id, 10));
+    row.remove();
+  }
+});
+document.getElementById('profileSaveRecurringBtn').addEventListener('click', async () => {
+  const rows = [...document.querySelectorAll('#profileRecurringList .recurring-row')].map(r => ({
+    ...profileRowIdentity(r),
+    day: parseInt(r.querySelector('.rec-day').value) || 1,
+    description: r.querySelector('.rec-desc').value.trim(),
+    category_id: r.querySelector('.rec-cat').value || null,
+    amount: parseFloat(r.querySelector('.rec-amount').value) || 0,
+    frequency: r.querySelector('.rec-freq').value,
+    start_month: 1
+  }));
+  const sentDeletes = _profilePendingRecDeletes.slice();
+  const res = await fetch('/api/recurring/save', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ v: 2, rows, deleted_ids: sentDeletes })
+  });
+  const d = await res.json();
+  if (d.success) {
+    profileApplyIdMap(d.id_map, '.recurring-row');
+    _profilePendingRecDeletes = _profilePendingRecDeletes.filter(id => !sentDeletes.includes(id));
+  }
+  showToast(d.success ? t('settings.toast_recurring_saved') : t('settings.toast_error', {error: d.error||''}),
             d.success ? 'success' : 'danger');
 });
 </script>

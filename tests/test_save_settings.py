@@ -1,3 +1,19 @@
+import pytest
+
+
+@pytest.fixture()
+def person(db):
+    """Person 'Alice', mit dem Test-Admin verknuepft: wiederkehrende Vorlagen
+    sind seit dem Umzug ins Profil strikt an die eigene Person gebunden, ein
+    Konto ohne Person darf gar keine speichern. Aufgeraeumt ueber die
+    db-Fixture - das Loeschen der Person setzt users.person_id per
+    ON DELETE SET NULL zurueck."""
+    cur = db.execute("INSERT INTO persons (name) VALUES ('Alice')")
+    db.execute("UPDATE users SET person_id=? WHERE username='admin'", (cur.lastrowid,))
+    db.commit()
+    return cur.lastrowid
+
+
 def _save_persons(client, csrf, **payload):
     body = {'v': 2, 'rows': [], 'deleted_ids': []}
     body.update(payload)
@@ -148,7 +164,7 @@ def test_recurring_legacy_array_rejected(auth_client, csrf):
     assert res.status_code == 409
 
 
-def test_recurring_added_by_other_user_survives(auth_client, csrf, db):
+def test_recurring_added_by_other_user_survives(auth_client, csrf, db, person):
     netflix = _save_recur(auth_client, csrf, rows=[
         {'client_key': 'a', 'day': 1, 'description': 'Netflix', 'amount': 17.99}]).get_json()['id_map']['a']
     _save_recur(auth_client, csrf, rows=[
@@ -162,7 +178,7 @@ def test_recurring_added_by_other_user_survives(auth_client, csrf, db):
     assert descs == {'Netflix', 'Spotify'}
 
 
-def test_recurring_update_and_explicit_delete(auth_client, csrf, db):
+def test_recurring_update_and_explicit_delete(auth_client, csrf, db, person):
     rid = _save_recur(auth_client, csrf, rows=[
         {'client_key': 'a', 'day': 1, 'description': 'Netflix', 'amount': 17.99}]).get_json()['id_map']['a']
 
@@ -179,7 +195,7 @@ def test_recurring_update_and_explicit_delete(auth_client, csrf, db):
     assert db.execute('SELECT COUNT(*) c FROM recurring_expenses').fetchone()['c'] == 0
 
 
-def test_recurring_blanked_row_is_deleted(auth_client, csrf, db):
+def test_recurring_blanked_row_is_deleted(auth_client, csrf, db, person):
     """Eine geleerte Zeile (leere Beschreibung, Betrag 0) mit vorhandener id
     muss verschwinden statt beim naechsten Laden wieder aufzutauchen."""
     rid = _save_recur(auth_client, csrf, rows=[
@@ -192,9 +208,35 @@ def test_recurring_blanked_row_is_deleted(auth_client, csrf, db):
                       (rid,)).fetchone()['c'] == 0
 
 
-def test_recurring_monthly_forces_start_month_one(auth_client, csrf, db):
+def test_recurring_monthly_forces_start_month_one(auth_client, csrf, db, person):
     rid = _save_recur(auth_client, csrf, rows=[
         {'client_key': 'a', 'day': 1, 'description': 'Miete', 'amount': 750.0,
          'frequency': 'monthly', 'start_month': 7}]).get_json()['id_map']['a']
     row = db.execute('SELECT start_month FROM recurring_expenses WHERE id=?', (rid,)).fetchone()
     assert row['start_month'] == 1
+
+
+def test_fremde_wiederkehrende_vorlage_bleibt_unangetastet(auth_client, csrf, db, person):
+    """Serverseitig erzwungen: wiederkehrende Vorlagen sind streng persoenlich
+    (Nutzerentscheidung, kein globales Widget, keine Ausnahme fuer Admins). Ein
+    direkter API-Aufruf mit der id einer fremden Vorlage darf sie weder
+    umschreiben noch loeschen - das Frontend zeigt ohnehin nur die eigenen an,
+    aber das ist keine Sicherheitsgrenze."""
+    ben = db.execute("INSERT INTO persons (name) VALUES ('Ben')").lastrowid
+    db.commit()
+    fremde = db.execute(
+        "INSERT INTO recurring_expenses (day, description, person_id, amount, frequency, start_month, active)"
+        " VALUES (1, 'Bens Miete', ?, 500.0, 'monthly', 1, 1)", (ben,)).lastrowid
+    db.commit()
+
+    _save_recur(auth_client, csrf, rows=[
+        {'id': fremde, 'day': 9, 'description': 'gekapert', 'amount': 999.0}])
+    row = db.execute('SELECT description, amount, person_id FROM recurring_expenses WHERE id=?',
+                     (fremde,)).fetchone()
+    assert row['description'] == 'Bens Miete', 'fremde Vorlage wurde umgeschrieben'
+    assert row['amount'] == 500.0
+    assert row['person_id'] == ben
+
+    _save_recur(auth_client, csrf, deleted_ids=[fremde])
+    assert db.execute('SELECT COUNT(*) c FROM recurring_expenses WHERE id=?',
+                      (fremde,)).fetchone()['c'] == 1, 'fremde Vorlage wurde geloescht'

@@ -315,7 +315,15 @@ def test_monatsseite_zeigt_harmlosen_namen_weiter_an(auth_client, csrf, db):
 
 def test_einstellungen_namen_nicht_in_template_literal(auth_client, csrf, db):
     """settings.html baute die <option>-Liste in einem Backtick-Literal.
-    Jinja maskiert dort $ { } nicht, `${...}` war also ausfuehrbarer Code."""
+    Jinja maskiert dort $ { } nicht, `${...}` war also ausfuehrbarer Code.
+
+    Die Personen-Auswahl der wiederkehrenden Ausgaben (REC_PERSONS), auf die
+    sich dieser Test urspruenglich mitbezog, gibt es seitdem gar nicht mehr:
+    wiederkehrende Vorlagen sind jetzt streng persoenlich und leben auf der
+    eigenen Profilseite ohne Personen-Feld (immer die eigene Person) - dieser
+    Teil der Angriffsflaeche ist damit nicht behoben, sondern entfernt. Der
+    Kategorie-Payload-Nachweis wandert deshalb mit dem Feature nach
+    test_profil_baut_kategorie_optionen_per_dom unten."""
     _person(auth_client, csrf, LITERAL_PAYLOAD_PERSON)
     _kategorie(auth_client, csrf, LITERAL_PAYLOAD_KATEGORIE)
 
@@ -329,17 +337,41 @@ def test_einstellungen_namen_nicht_in_template_literal(auth_client, csrf, db):
         assert LITERAL_PAYLOAD_KATEGORIE not in lit, \
             f'Kategoriename steht in einem Template-Literal: {lit[:120]!r}'
 
-    # Die Daten muessen weiterhin ankommen - jetzt als JSON.
+    # Die Personendaten muessen weiterhin ankommen - jetzt als JSON
+    # (PERSONS_FOR_SPLITS, fuer die Kategorie-Split-Anteile).
     assert LITERAL_PAYLOAD_PERSON in html
-    assert LITERAL_PAYLOAD_KATEGORIE in html
-    assert 'REC_PERSONS' in html and 'REC_CATS' in html
 
 
 def test_einstellungen_baut_optionen_per_dom(auth_client, csrf, db):
     html = _text(auth_client, '/settings')
     assert 'personsOpts' not in html
     assert 'catsOpts' not in html
-    assert 'new Option(' in html
+
+
+def test_profil_baut_kategorie_optionen_per_dom(auth_client, csrf, db):
+    """Nachfolger von REC_CATS auf settings.html: die Kategorie-Auswahl der
+    (jetzt eigenen) wiederkehrenden Ausgaben lebt auf /profile und baut ihre
+    <option>-Liste per new Option(), nicht per Template-Literal."""
+    pid = _person(auth_client, csrf, 'Normalo')
+    auth_client.application  # nur zur Klarheit, dass wir dieselbe App nutzen
+    db.execute("UPDATE users SET person_id=? WHERE username='admin'", (pid,))
+    db.commit()
+    try:
+        _kategorie(auth_client, csrf, LITERAL_PAYLOAD_KATEGORIE)
+
+        html = _text(auth_client, '/profile')
+
+        literale = _template_literale(html)
+        for lit in literale:
+            assert LITERAL_PAYLOAD_KATEGORIE not in lit, \
+                f'Kategoriename steht in einem Template-Literal: {lit[:120]!r}'
+
+        assert LITERAL_PAYLOAD_KATEGORIE in html, \
+            'Kategoriename kommt gar nicht mehr an (PROFILE_CATS als JSON)'
+        assert 'new Option(' in html
+    finally:
+        db.execute("UPDATE users SET person_id=NULL WHERE username='admin'")
+        db.commit()
 
 
 # ── Senke 3: innerHTML in month.html ────────────────────────────────────────
