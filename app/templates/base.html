@@ -30,6 +30,7 @@
       max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .bottom-nav a.active, .bottom-nav a:hover { color: #198754; }
+    .profile-link:hover { text-decoration: underline !important; }
     .bottom-nav i { font-size: 1.3rem; margin-bottom: 1px; }
     @media (min-width: 768px) { .bottom-nav { display: none; } body { padding-bottom: 0; } }
     #toast-container {
@@ -136,9 +137,10 @@ function t(key, vars) {
       <a href="{{ url_for('main.set_language', lang='en') }}"
          class="btn btn-sm {% if current_lang == 'en' %}btn-light{% else %}btn-outline-light{% endif %}">EN</a>
       {% if session.get('logged_in') %}
-      <span class="text-white-50 small d-none d-lg-inline">
+      <a href="{{ url_for('main.profile') }}"
+         class="text-white-50 small d-none d-lg-inline text-decoration-none profile-link">
         <i class="bi bi-person-circle me-1"></i>{{ session.get('username', '') }}
-      </span>
+      </a>
       <a href="{{ url_for('main.logout') }}"
          class="btn btn-sm btn-outline-light"
          title="{{ t('nav.logout') }}">
@@ -189,6 +191,9 @@ function t(key, vars) {
   </a>
   <a href="{{ url_for('main.search') }}" class="{% if active=='search' %}active{% endif %}">
     <i class="bi bi-search"></i><span>{{ t('nav.search') }}</span>
+  </a>
+  <a href="{{ url_for('main.profile') }}" class="{% if active=='profile' %}active{% endif %}">
+    <i class="bi bi-person-circle"></i><span>{{ t('nav.profile') }}</span>
   </a>
   <a href="{{ url_for('main.settings') }}" class="{% if active=='settings' %}active{% endif %}">
     <i class="bi bi-gear"></i><span>{{ t('nav.settings') }}</span>

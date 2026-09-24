@@ -1656,19 +1656,42 @@ def api_users_create():
     d = request.get_json(silent=True) or {}
     username = (d.get('username') or '').strip()
     role = d.get('role') if d.get('role') in ('admin', 'member') else 'member'
-    person_id = int(d['person_id']) if d.get('person_id') else None
+    try:
+        person_id = int(d['person_id']) if d.get('person_id') else None
+    except (TypeError, ValueError):
+        return jsonify(success=False, error=t('srv.missing_data')), 400
     if not username:
         return jsonify(success=False, error=t('srv.missing_data')), 400
 
-    conn_pruef = get_db()
-    if person_id is not None and conn_pruef.execute(
-            'SELECT id FROM users WHERE person_id=?', (person_id,)).fetchone():
+    conn = get_db()
+    # "Konto anlegen" fuer eine bestehende Person ohne Konto (Bestand aus der
+    # Zeit vor der 1:1-Regel): gibt es die Person nicht (mehr), scheiterte der
+    # Insert sonst am Fremdschluessel und meldete irrefuehrend "Benutzername
+    # bereits vergeben".
+    if person_id is not None and conn.execute(
+            'SELECT 1 FROM persons WHERE id=?', (person_id,)).fetchone() is None:
+        return jsonify(success=False, error=t('srv.person_not_found')), 404
+    # Zwingende 1:1-Kopplung (Nutzerentscheidung): fehlt person_id, entsteht
+    # die Person automatisch mit demselben Namen, atomar mit dem Konto. Eine
+    # einzige Verbindung fuer Person-Insert, Vorab-Pruefung und User-Insert,
+    # damit ein conn.rollback() bei einem fehlschlagenden User-Insert auch
+    # das zuvor angelegte Person-Insert zurücknimmt. Ein Aufruf MIT
+    # person_id bleibt unveraendert moeglich.
+    if person_id is None:
+        try:
+            cur_p = conn.execute('INSERT INTO persons (name) VALUES (?)', (username,))
+            person_id = cur_p.lastrowid
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return jsonify(success=False, error=t('settings.name_conflict', names=username)), 409
+
+    if conn.execute('SELECT id FROM users WHERE person_id=?', (person_id,)).fetchone():
         # Vorab pruefen, damit die Meldung stimmt: der IntegrityError unten
         # kann sowohl vom Benutzernamen als auch vom Personen-Index kommen.
+        conn.rollback()
         return jsonify(success=False, error=t('srv.person_already_linked')), 409
 
     passwort = _neues_initialpasswort()
-    conn = get_db()
     try:
         cur = conn.execute(
             'INSERT INTO users (username, password_hash, role, is_active,'
@@ -1677,7 +1700,10 @@ def api_users_create():
             (username, generate_password_hash(passwort), role,
              datetime.now().isoformat(timespec='seconds'), person_id))
     except sqlite3.IntegrityError:
-        # Benutzername oder Personen-Verknuepfung bereits vergeben
+        # Benutzername oder Personen-Verknuepfung bereits vergeben. Rollback
+        # nimmt auch eine oben in dieser Transaktion automatisch angelegte
+        # Person wieder zurueck - sonst bliebe sie verwaist zurueck.
+        conn.rollback()
         return jsonify(success=False, error=t('srv.username_taken')), 409
     conn.commit()
     # Das Initialpasswort wird genau einmal zurueckgegeben (Entscheidung P1).
@@ -1717,24 +1743,18 @@ def api_users_update(user_id):
         felder.append('role=?'); werte.append(neue_rolle)
     if neu_aktiv is not None:
         felder.append('is_active=?'); werte.append(neu_aktiv)
-    if 'person_id' in d:
-        felder.append('person_id=?')
-        werte.append(int(d['person_id']) if d['person_id'] else None)
+    # `person_id` wird hier bewusst NICHT mehr uebernommen (ein mitgesendeter
+    # Wert wird ignoriert, genau wie `username`): die Verknuepfung Person<->Konto
+    # entsteht ausschliesslich atomar beim Anlegen (POST /api/users) und
+    # verschwindet nur gemeinsam beim Loeschen. Ein Umhaengen oder Loesen
+    # ({"person_id": null}) liesse sonst Konto und Person verwaist zurueck.
     if not felder:
         return jsonify(success=True)
 
     werte.append(user_id)
-    try:
-        conn.execute(f"UPDATE users SET {', '.join(felder)} WHERE id=?", werte)
-    except sqlite3.IntegrityError:
-        return jsonify(success=False, error=t('srv.person_already_linked')), 409
-    if neue_rolle is not None or neu_aktiv is not None:
-        # Nur Rollen- und Statuswechsel beenden bestehende Sitzungen. Eine
-        # reine Personen-Verknuepfung darf das nicht - sonst wuerde ein Admin,
-        # der auf der eigenen Zeile nur die Person auswaehlt, sich selbst
-        # aussperren (der Setup-Wizard macht das fuer einen reinen
-        # Personen-Wechsel in Schritt 1 bewusst genauso nicht).
-        _bump_session_epoch(conn, user_id)
+    conn.execute(f"UPDATE users SET {', '.join(felder)} WHERE id=?", werte)
+    # Rollen- und Statuswechsel beenden bestehende Sitzungen.
+    _bump_session_epoch(conn, user_id)
     conn.commit()
     return jsonify(success=True)
 
@@ -1764,7 +1784,7 @@ def api_users_reset_password(user_id):
 @admin_required
 def api_users_delete(user_id):
     conn = get_db()
-    row = conn.execute('SELECT role FROM users WHERE id=?', (user_id,)).fetchone()
+    row = conn.execute('SELECT role, person_id FROM users WHERE id=?', (user_id,)).fetchone()
     if row is None:
         return jsonify(success=False, error=t('srv.user_not_found')), 404
     if user_id == session.get('user_id'):
@@ -1772,6 +1792,11 @@ def api_users_delete(user_id):
     if row['role'] == 'admin' and _anzahl_aktiver_admins(conn, ausser_id=user_id) == 0:
         return jsonify(success=False, error=t('srv.last_admin')), 400
     conn.execute('DELETE FROM users WHERE id=?', (user_id,))
+    # Zwingende 1:1-Kopplung (Nutzerentscheidung): die verknuepfte Person
+    # verschwindet atomar mit dem Konto. Kein Fehler, falls keine
+    # verknuepft ist (Bestand aus der Zeit vor dieser Regel).
+    if row['person_id'] is not None:
+        conn.execute('DELETE FROM persons WHERE id=?', (row['person_id'],))
     conn.commit()
     return jsonify(success=True)
 
@@ -1844,11 +1869,33 @@ def api_setup_profiles_self():
     conn = get_db()
 
     if 'person_id' in d:
-        person_id = int(d['person_id']) if d.get('person_id') else None
         try:
-            conn.execute('UPDATE users SET person_id=? WHERE id=?', (person_id, eigene_id))
-        except sqlite3.IntegrityError:
-            return jsonify(success=False, error=t('srv.person_already_linked')), 409
+            person_id = int(d['person_id']) if d.get('person_id') else None
+        except (TypeError, ValueError):
+            return jsonify(success=False, error=t('srv.missing_data')), 400
+        aktuell = g.current_user['person_id']
+        if aktuell is not None:
+            # Strikte 1:1-Kopplung: dieser Endpunkt ist nur fuer die
+            # ERSTMALIGE Selbstzuordnung eines noch unverknuepften Kontos da.
+            # Ein bereits verknuepftes Konto darf hier weder umgehaengt noch
+            # geloest werden - sonst bliebe die bisherige Person ohne Konto.
+            # Dieselbe Person erneut zu senden ist ein harmloser No-op.
+            if person_id != aktuell:
+                return jsonify(success=False, error=t('srv.account_already_linked')), 400
+        elif person_id is not None:
+            if conn.execute('SELECT 1 FROM persons WHERE id=?',
+                            (person_id,)).fetchone() is None:
+                return jsonify(success=False, error=t('srv.person_not_found')), 404
+            # Die Zielperson darf noch kein Konto haben. Der UNIQUE-Index
+            # idx_users_person erzwingt das ohnehin; die Vorab-Pruefung
+            # sorgt nur fuer eine eindeutige Meldung.
+            if conn.execute('SELECT 1 FROM users WHERE person_id=?',
+                            (person_id,)).fetchone():
+                return jsonify(success=False, error=t('srv.person_already_linked')), 409
+            try:
+                conn.execute('UPDATE users SET person_id=? WHERE id=?', (person_id, eigene_id))
+            except sqlite3.IntegrityError:
+                return jsonify(success=False, error=t('srv.person_already_linked')), 409
 
     umbenannt = False
     if neuer_name:
@@ -1912,6 +1959,11 @@ def month_view(year, month):
     if is_settled and ov_settlements:
         all_pnames = [p['name'] for p in persons]
         ov_p = apply_settlements_to_ov(ov_p, ov_settlements, all_pnames)
+    eigene_person_row = None
+    if g.current_user['person_id'] is not None:
+        eigene_person_row = conn.execute(
+            'SELECT name FROM persons WHERE id=?', (g.current_user['person_id'],)).fetchone()
+    current_user_person_name = eigene_person_row['name'] if eigene_person_row else None
     conn.close()
     pm = month-1 if month>1 else 12; py = year if month>1 else year-1
     nm = month+1 if month<12 else 1; ny = year if month<12 else year+1
@@ -1929,7 +1981,38 @@ def month_view(year, month):
         ov_settlements=ov_settlements, wallet=wallet, savings_pp=savings_pp,
         is_settled=is_settled, settled_at=settled_at,
         prev_year=py, prev_month=pm, next_year=ny, next_month=nm,
-        activity_scope=_scope, activity_version=activity_version)
+        activity_scope=_scope, activity_version=activity_version,
+        current_user_person_name=current_user_person_name)
+
+def _legt_neue_zeile_an(rows) -> bool:
+    """True, wenn mindestens eine Zeile dieses Speicherns NEU angelegt wuerde
+    (kein gueltiges `id`, Betrag ungleich 0) - dieselbe Unterscheidung wie in
+    den Schleifen von save_expenses()/save_income()."""
+    for r in rows:
+        try:
+            amt = float(r.get('amount') or 0)
+        except (TypeError, ValueError):
+            amt = 0
+        try:
+            rid = int(r['id']) if r.get('id') else None
+        except (TypeError, ValueError):
+            rid = None
+        if amt != 0 and rid is None:
+            return True
+    return False
+
+
+def _konto_ohne_person_abweisen():
+    """400, wenn das eigene Konto keiner Person zugeordnet ist.
+
+    Neue Buchungen bekommen ihr "Wer" zwingend aus der Sitzung. Ohne
+    verknuepfte Person landete sonst still person_id=NULL in der Datenbank
+    (Auswertung: "Unbekannt", leere Wer-Zelle) - stattdessen eine klare
+    Meldung, die zum Administrator verweist."""
+    if g.current_user['person_id'] is None:
+        return jsonify(success=False, error=t('srv.account_not_linked')), 400
+    return None
+
 
 @main_bp.route('/api/expenses/save', methods=['POST'])
 @login_required
@@ -1941,6 +2024,13 @@ def save_expenses():
     year, month = int(d['year']), int(d['month'])
     rows = d.get('rows') or []
     deleted_ids = d.get('deleted_ids') or []
+    # Vor jedem Schreibzugriff pruefen: der Request wird als Ganzes abgewiesen,
+    # nicht halb ausgefuehrt. Bearbeiten/Loeschen bestehender Zeilen braucht
+    # keine eigene Person und bleibt erlaubt.
+    if _legt_neue_zeile_an(rows):
+        abgewiesen = _konto_ohne_person_abweisen()
+        if abgewiesen:
+            return abgewiesen
     conn = get_db()
     id_map = {}
     # Belege, deren letzte Referenz in diesem Request verschwinden koennte.
@@ -1983,7 +2073,6 @@ def save_expenses():
                              (rid, year, month))
             continue
 
-        pid     = int(e['person_id'])          if e.get('person_id')          else None
         cid     = int(e['category_id'])        if e.get('category_id')        else None
         pfpid   = int(e['paid_for_person_id']) if e.get('paid_for_person_id') else None
         is_cash = 1 if e.get('is_cash') else 0
@@ -2002,15 +2091,23 @@ def save_expenses():
             # (z.B. aus einem alten Tab), damit der Beleg von der Platte
             # verschwindet: rfn wird None, die Zeile zeigt auf nichts mehr,
             # und _verwaiste_belege_loeschen() raeumt die Datei weg.
+            #
+            # "Wer" ist nach dem Anlegen unveraenderbar (Nutzerentscheidung) -
+            # person_id fehlt hier deshalb bewusst in der SET-Klausel, ein
+            # vom Client mitgesendeter Wert wird vollstaendig ignoriert.
             _alter_beleg = _beleg_von(rid)
             if _alter_beleg and _alter_beleg != rfn and not _name_abgelehnt:
                 _belegkandidaten.add(_alter_beleg)
             conn.execute(
-                'UPDATE expenses SET day=?, description=?, person_id=?, category_id=?,'
+                'UPDATE expenses SET day=?, description=?, category_id=?,'
                 ' amount=?, is_cash=?, paid_for_person_id=?, receipt_filename=?'
                 ' WHERE id=? AND year=? AND month=?',
-                (day, desc, pid, cid, amt, is_cash, pfpid, rfn, rid, year, month))
+                (day, desc, cid, amt, is_cash, pfpid, rfn, rid, year, month))
         else:
+            # Neue Zeile: "Wer" kommt IMMER aus der Sitzung, nie vom Client -
+            # serverseitig erzwungen, nicht nur im Frontend entfernt (sonst
+            # liesse sich das per direktem API-Aufruf umgehen).
+            pid = g.current_user['person_id']
             cur = conn.execute(
                 'INSERT INTO expenses (year,month,day,description,person_id,category_id,'
                 'amount,is_cash,paid_for_person_id,receipt_filename) VALUES (?,?,?,?,?,?,?,?,?,?)',
@@ -2051,6 +2148,22 @@ def save_persons():
     stale = _require_v2(d)
     if stale:
         return stale
+    # Zwingende 1:1-Kopplung Person<->Konto: Anlegen und Loeschen einer Person
+    # laufen seit Task 4 ausschliesslich ueber die Admin-Endpunkte /api/users
+    # (atomar mit dem Konto). Ein Mitglied darf hier nur noch Name und
+    # Geldboerse BESTEHENDER Personen bearbeiten - ein Loeschwunsch oder eine
+    # Zeile ohne gueltige id wird ausdruecklich abgewiesen statt still
+    # verworfen. Geprueft vor jedem Schreibzugriff.
+    if g.current_user['role'] != 'admin':
+        def _hat_gueltige_id(p):
+            try:
+                return bool(p.get('id')) and int(p['id']) > 0
+            except (TypeError, ValueError):
+                return False
+        if (d.get('deleted_ids') or []) or \
+                any(not _hat_gueltige_id(p) for p in (d.get('rows') or [])):
+            return jsonify(success=False, error=t('srv.persons_admin_only')), 403
+
     conn = get_db()
     id_map = {}
     conflicts = []
@@ -2061,11 +2174,13 @@ def save_persons():
             did = int(raw)
         except (TypeError, ValueError):
             continue
-        # Eine Person, an der ein aktiver Login haengt, darf nicht verschwinden -
-        # sonst zeigt das Konto ins Leere.
+        # Eine Person, an der ein Login haengt, darf hier nicht verschwinden -
+        # sonst zeigt das Konto ins Leere. Das gilt auch fuer ein
+        # DEAKTIVIERTES Konto (frueher nur is_active=1 geprueft): Person und
+        # Konto verschwinden nur gemeinsam, ueber DELETE /api/users/<id>.
         verknuepft = conn.execute(
             'SELECT u.username, p.name FROM users u JOIN persons p ON p.id = u.person_id'
-            ' WHERE u.person_id=? AND u.is_active=1', (did,)).fetchone()
+            ' WHERE u.person_id=?', (did,)).fetchone()
         if verknuepft:
             blocked.append(verknuepft['name'])
             continue
@@ -2425,6 +2540,11 @@ def save_income():
     year, month = int(d['year']), int(d['month'])
     rows = d.get('rows') or []
     deleted_ids = d.get('deleted_ids') or []
+    # Wie in save_expenses(): vor jedem Schreibzugriff, der ganze Request.
+    if _legt_neue_zeile_an(rows):
+        abgewiesen = _konto_ohne_person_abweisen()
+        if abgewiesen:
+            return abgewiesen
     conn = get_db()
     id_map = {}
 
@@ -2451,17 +2571,23 @@ def save_income():
                              (rid, year, month))
             continue
 
-        pid  = int(i['person_id'])   if i.get('person_id')   else None
         cid  = int(i['category_id']) if i.get('category_id') else None
         day  = int(i.get('day') or 1)
         desc = i.get('description', '')
 
         if rid is not None:
+            # "Wer" ist nach dem Anlegen unveraenderbar (Nutzerentscheidung) -
+            # person_id fehlt hier deshalb bewusst in der SET-Klausel, ein
+            # vom Client mitgesendeter Wert wird vollstaendig ignoriert.
             conn.execute(
-                'UPDATE income SET day=?, description=?, person_id=?, category_id=?, amount=?'
+                'UPDATE income SET day=?, description=?, category_id=?, amount=?'
                 ' WHERE id=? AND year=? AND month=?',
-                (day, desc, pid, cid, amt, rid, year, month))
+                (day, desc, cid, amt, rid, year, month))
         else:
+            # Neue Zeile: "Wer" kommt IMMER aus der Sitzung, nie vom Client -
+            # serverseitig erzwungen, nicht nur im Frontend entfernt (sonst
+            # liesse sich das per direktem API-Aufruf umgehen).
+            pid = g.current_user['person_id']
             cur = conn.execute(
                 'INSERT INTO income (year,month,day,description,person_id,category_id,amount)'
                 ' VALUES (?,?,?,?,?,?,?)',
@@ -2611,10 +2737,14 @@ def debug_overview():
     conn.close()
     return jsonify({'status': 'use /overview for full data'})
 
-@main_bp.route('/overview')
-@login_required
-def overview():
-    conn = get_db()
+def _overview_daten(conn):
+    """Berechnet alle Kennzahlen der Übersichtsseite für ALLE Personen.
+
+    Ausgelagert aus overview(), damit /profile dieselbe Berechnung
+    wiederverwenden kann, gefiltert auf eine einzelne Person. Reine
+    Extraktion ohne Logikänderung - overview() selbst verhält sich danach
+    identisch (siehe test_overview_daten.py als Ankerwert).
+    """
     month_keys = [(r['year'],r['month']) for r in conn.execute(
         'SELECT DISTINCT year,month FROM expenses UNION SELECT DISTINCT year,month FROM income ORDER BY year DESC, month DESC')]
     settled_months = {(r['year'],r['month'])
@@ -2831,27 +2961,90 @@ def overview():
     grand_savings = round(grand_income - grand_expense, 2)
     open_settlements_count = len(set(month_keys) - settled_months)
 
+    return {
+        'structured': structured,
+        'inc_structured': inc_structured,
+        'gesamt_structured': gesamt_structured,
+        'cats_map': cats_map,
+        'month_keys': month_keys,
+        'settled_months': settled_months,
+        'persons_list': persons_list,
+        'income_map': income_map,
+        'exp_totals_by_month': exp_totals_by_month,
+        'chart_data_obj': chart_data_obj,
+        'overview_chart_json': overview_chart_json,
+        'person_totals': person_totals,
+        'person_totals_by_year': person_totals_by_year,
+        'months_by_year': months_by_year,
+        'grand_income': grand_income,
+        'grand_expense': grand_expense,
+        'grand_savings': grand_savings,
+        'open_settlements_count': open_settlements_count,
+    }
+
+
+@main_bp.route('/overview')
+@login_required
+def overview():
+    conn = get_db()
+    daten = _overview_daten(conn)
     conn.close()
     return render_template('overview.html', active='overview',
-        structured=structured,
-        inc_structured=inc_structured,
-        gesamt_structured=gesamt_structured,
-        all_cats=sorted(cats_map.items()),
-        month_keys=month_keys,
+        structured=daten['structured'],
+        inc_structured=daten['inc_structured'],
+        gesamt_structured=daten['gesamt_structured'],
+        all_cats=sorted(daten['cats_map'].items()),
+        month_keys=daten['month_keys'],
         month_names=MONTH_NAMES,
-        persons_list=persons_list,
-        settled_months=[(y,m) for y,m in settled_months],
-        income_map={(f'{k[0]}-{k[1]}'):v for k,v in income_map.items()},
-        exp_totals_by_month={k:round(v,2) for k,v in exp_totals_by_month.items()},
-        chart_data=chart_data_obj,
-        overview_chart_json=overview_chart_json,
-        grand_income=grand_income,
-        grand_expense=grand_expense,
-        grand_savings=grand_savings,
-        open_settlements_count=open_settlements_count,
-        months_by_year=months_by_year,
-        person_totals=person_totals,
-        person_totals_by_year=person_totals_by_year)
+        persons_list=daten['persons_list'],
+        settled_months=[(y,m) for y,m in daten['settled_months']],
+        income_map={(f'{k[0]}-{k[1]}'):v for k,v in daten['income_map'].items()},
+        exp_totals_by_month={k:round(v,2) for k,v in daten['exp_totals_by_month'].items()},
+        chart_data=daten['chart_data_obj'],
+        overview_chart_json=daten['overview_chart_json'],
+        grand_income=daten['grand_income'],
+        grand_expense=daten['grand_expense'],
+        grand_savings=daten['grand_savings'],
+        open_settlements_count=daten['open_settlements_count'],
+        months_by_year=daten['months_by_year'],
+        person_totals=daten['person_totals'],
+        person_totals_by_year=daten['person_totals_by_year'])
+
+
+@main_bp.route('/profile')
+@login_required
+def profile():
+    conn = get_db()
+    person_id = g.current_user['person_id']
+    if person_id is None:
+        conn.close()
+        return render_template('profile.html', active='profile', unlinked=True)
+
+    person = conn.execute('SELECT * FROM persons WHERE id=?', (person_id,)).fetchone()
+    if person is None:
+        # Verknuepfte Person existiert nicht mehr (ON DELETE SET NULL sollte
+        # das eigentlich verhindern) - Schutz gegen einen inkonsistenten
+        # Zwischenstand statt eines 500ers.
+        conn.close()
+        return render_template('profile.html', active='profile', unlinked=True)
+
+    daten = _overview_daten(conn)
+    pn = person['name']
+
+    eigene_kategorien = daten['structured'].get(pn, {})
+    eigene_jahre = daten['person_totals_by_year'].get(pn, {})
+    eigene_totale = daten['person_totals'].get(pn, {'inc': 0, 'exp': 0, 'savings': 0})
+    eigenes_chart_json = {
+        'months': daten['overview_chart_json']['months'],
+        'categories': daten['overview_chart_json']['categories'],
+        'category_by_month': eigene_kategorien,
+    }
+    conn.close()
+
+    return render_template('profile.html', active='profile', unlinked=False,
+        person=person, person_name=pn, month_names=MONTH_NAMES,
+        person_totals=eigene_totale, person_totals_by_year=eigene_jahre,
+        profile_chart_json=eigenes_chart_json)
 
 
 # ── PDF Kontoauszug Import ─────────────────────────────────────────────────────
@@ -3092,10 +3285,16 @@ def extract_bank_statement(pdf_bytes):
 @main_bp.route('/import/pdf')
 @login_required
 def import_pdf_page():
+    # Keine Personenauswahl mehr: der Import gehoert immer der eigenen Person
+    # (serverseitig in api_commit_pdf erzwungen), die Seite zeigt sie nur an.
     conn = get_db()
-    persons = [dict(r) for r in conn.execute('SELECT id,name FROM persons ORDER BY name')]
+    eigene = None
+    if g.current_user['person_id'] is not None:
+        eigene = conn.execute('SELECT name FROM persons WHERE id=?',
+                              (g.current_user['person_id'],)).fetchone()
     conn.close()
-    return render_template('import_pdf.html', active='import_pdf', persons=persons)
+    return render_template('import_pdf.html', active='import_pdf',
+                           current_user_person_name=eigene['name'] if eigene else None)
 
 
 @main_bp.route('/api/import/pdf/parse', methods=['POST'])
@@ -3131,12 +3330,19 @@ def api_parse_pdf():
 @login_required
 def api_commit_pdf():
     """Save confirmed transactions from PDF import."""
-    data      = request.json
-    # Frontend sendet 'personid' (ohne Unterstrich) – beide Varianten akzeptieren
-    person_id = data.get('person_id') or data.get('personid')
-    txns      = data.get('transactions', [])
-    if not person_id or not txns:
-        current_app.logger.warning("PDF-Commit: Fehlende Daten – person_id=%r, txns_count=%d", person_id, len(txns))
+    data      = request.get_json(silent=True) or {}
+    # "Wer" ist wie in save_expenses()/save_income() serverseitig gesperrt:
+    # jede importierte Zeile gehoert IMMER der Person der eigenen Sitzung. Ein
+    # vom Client gesendetes person_id/personid wird vollstaendig ignoriert
+    # (ein Kontoauszug ist der eines einzelnen Menschen). Der CSV-Import
+    # (import_csv) ist davon bewusst ausgenommen - Sammel-/Restore-Werkzeug.
+    abgewiesen = _konto_ohne_person_abweisen()
+    if abgewiesen:
+        return abgewiesen
+    person_id = g.current_user['person_id']
+    txns      = data.get('transactions') or []
+    if not txns:
+        current_app.logger.warning("PDF-Commit: Fehlende Daten – keine Transaktionen")
         return jsonify({'success': False, 'error': t('srv.missing_data')}), 400
     conn = get_db()
     imported_exp = imported_inc = 0

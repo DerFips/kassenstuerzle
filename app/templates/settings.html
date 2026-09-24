@@ -23,13 +23,32 @@
                    value="{{ p.wallet_start_date or '' }}" title="Bargeld-Startdatum" style="max-width:160px">
             <input type="number" step="0.01" class="form-control person-wallet-amount"
                    value="{{ p.wallet_start_amount or '' }}" placeholder="{{ t('settings.wallet_start_amount_placeholder') }}" style="max-width:130px">
-            <button class="btn btn-outline-danger remove-person-btn" type="button"><i class="bi bi-trash"></i></button>
+            {% if current_role == 'admin' %}
+            <!-- Loeschen passiert nur noch ueber die Kontofelder (Task-5-Review,
+                 Befund 2): jede Person hat seit Task 4 zwingend ein Konto, der
+                 fruehere eigene Loesch-Button hier fuehrte ueber
+                 /api/persons/save zu einem zweiten, abweichenden Loeschpfad
+                 (blockierte stillschweigend bei aktivem Konto, loeschte bei
+                 deaktiviertem Konto die Person und liess das Konto verwaist
+                 zurueck). -->
+            <span class="input-group-text person-account-slot bg-white" style="min-width:0;"></span>
+            {% endif %}
           </div>
           {% endfor %}
+        </div>
+        {% if current_role == 'admin' %}
+        <!-- Konten ohne verknuepfte Person (Bestand aus der Zeit vor der
+             1:1-Regel). Nur sichtbar, wenn es mindestens eines gibt - sonst
+             waeren sie in der kombinierten Tabelle unerreichbar. -->
+        <div id="orphan-accounts" class="mt-2 mb-2" hidden>
+          <div class="fw-semibold small">{{ t('settings.orphan_accounts_title') }}</div>
+          <p class="text-muted small mb-2">{{ t('settings.orphan_accounts_hint') }}</p>
+          <div id="orphan-accounts-list"></div>
         </div>
         <button class="btn btn-outline-success btn-sm mt-1" id="add-person-btn">
           <i class="bi bi-plus-circle me-1"></i>{{ t('settings.add_person') }}
         </button>
+        {% endif %}
         <div class="mt-3">
           <button class="btn btn-success" id="save-persons-btn">
             <i class="bi bi-save me-1"></i>{{ t('settings.save_persons') }}
@@ -184,45 +203,8 @@
         <div class="alert alert-warning py-2 small" id="wizard-rename-warn" hidden>
           {{ t('settings.wizard_rename_warn') }}
         </div>
-        <hr>
-        <h6 class="fw-semibold">{{ t('settings.wizard_step2') }}</h6>
-        <p class="text-muted small mb-2">{{ t('settings.wizard_hint') }}</p>
-        <div id="wizard-list" class="d-flex flex-column gap-2"></div>
-        <div class="mt-3 d-flex flex-wrap gap-2">
-          <button class="btn btn-success" id="wizard-create-btn">{{ t('settings.wizard_create') }}</button>
+        <div class="mt-3">
           <button class="btn btn-outline-secondary" id="wizard-done-btn">{{ t('settings.wizard_done') }}</button>
-        </div>
-        <div class="alert alert-warning mt-3 mb-0" id="wizard-cleanup" hidden>
-          {{ t('settings.wizard_cleanup') }}
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Benutzer -->
-  <div class="col-12">
-    <div class="card shadow-sm border-dark">
-      <div class="card-header bg-dark text-white fw-semibold d-flex flex-wrap justify-content-between align-items-center gap-2">
-        <span><i class="bi bi-person-badge me-1"></i>{{ t('settings.users') }}</span>
-        <button class="btn btn-sm btn-light" id="add-user-btn">
-          <i class="bi bi-plus-circle me-1"></i>{{ t('settings.user_add') }}
-        </button>
-      </div>
-      <div class="card-body">
-        <div class="table-responsive">
-          <table class="table table-sm align-middle mb-0">
-            <thead class="table-light">
-              <tr>
-                <th>{{ t('settings.user_name') }}</th>
-                <th>{{ t('settings.user_person') }}</th>
-                <th>{{ t('settings.user_role') }}</th>
-                <th>{{ t('settings.user_active') }}</th>
-                <th>{{ t('settings.user_last_login') }}</th>
-                <th class="text-end">{{ t('settings.backup_action') }}</th>
-              </tr>
-            </thead>
-            <tbody id="users-tbody"></tbody>
-          </table>
         </div>
       </div>
     </div>
@@ -593,7 +575,6 @@ function urlBase64ToUint8Array(base64String) {
 <script nonce="{{ csp_nonce() }}">
 const PERSONS_FOR_SPLITS = {{ persons | tojson }};
 const ACTIVITY_VERSION = {{ activity_version | tojson }};
-let _pendingPersonDeletes = [];
 let _pendingCatDeletes = [];
 let _pendingRecurDeletes = [];
 let _ckSeq = 0;
@@ -612,22 +593,25 @@ function applyIdMap(idMap, selector) {
 }
 
 // Personen
-document.getElementById('add-person-btn').addEventListener('click', () => {
-  const div = document.createElement('div');
-  div.className = 'input-group mb-2 person-row'; div.dataset.id = '';
-  div.innerHTML = `<input type="text" class="form-control person-name" placeholder="Name">
-    <input type="month" class="form-control person-wallet-date" style="max-width:160px">
-    <input type="number" step="0.01" class="form-control person-wallet-amount" placeholder="${t('settings.wallet_start_amount_placeholder')}" style="max-width:130px">
-    <button class="btn btn-outline-danger remove-person-btn" type="button"><i class="bi bi-trash"></i></button>`;
-  document.getElementById('persons-list').appendChild(div);
+// Zwingende 1:1-Kopplung (Task 4): "+ Person hinzufuegen" legt jetzt sofort
+// (admin-only) Konto+Person atomar an, genau wie der fruehere add-user-btn -
+// keine leere, erst per Bulk-Save zu speichernde Zeile mehr.
+document.getElementById('add-person-btn')?.addEventListener('click', async () => {
+  const name = prompt(t('settings.person_add_prompt'));
+  if (!name) return;
+  const d = await (await fetch('/api/users', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username: name.trim(), role: 'member', person_id: null})
+  })).json();
+  if (!d.success) { showToast(d.error, 'danger'); return; }
+  // Neuladen erst wenn die Admin-Person das Einmalpasswort per Klick
+  // bestaetigt (Task-5-Review, Befund 3) - ein Timer koennte die Box
+  // (P1: wird nur genau jetzt angezeigt) wegreloaden, bevor sie gelesen ist.
+  zeigeInitialpasswort(name.trim(), d.password, personenNeuLaden);
 });
-document.getElementById('persons-list').addEventListener('click', e => {
-  if (e.target.closest('.remove-person-btn')) {
-    const row = e.target.closest('.person-row');
-    if (row.dataset.id) _pendingPersonDeletes.push(parseInt(row.dataset.id, 10));
-    row.remove();
-  }
-});
+// Es gibt keinen eigenen Loesch-Button mehr auf der Personen-Zeile (Befund 2)
+// - Loeschen laeuft ausschliesslich ueber den Button im Kontofeld
+// (benutzerLoeschen), der Person und Konto atomar zusammen entfernt.
 document.getElementById('save-persons-btn').addEventListener('click', async () => {
   const rows = [...document.querySelectorAll('.person-row')].map(r => ({
     ...rowIdentity(r),
@@ -635,19 +619,15 @@ document.getElementById('save-persons-btn').addEventListener('click', async () =
     wallet_start_date: r.querySelector('.person-wallet-date').value || null,
     wallet_start_amount: parseFloat(r.querySelector('.person-wallet-amount').value) || 0
   })).filter(p => p.name);
-  const sentDeletes = _pendingPersonDeletes.slice();
   const res = await fetch('/api/persons/save', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ v: 2, rows, deleted_ids: sentDeletes })
+    body: JSON.stringify({ v: 2, rows })
   });
   const d = await res.json();
   if (d.success) {
     applyIdMap(d.id_map, '.person-row');
-    _pendingPersonDeletes = _pendingPersonDeletes.filter(id => !sentDeletes.includes(id));
     if (typeof activityWatchVersion === 'function') activityWatchVersion(d.activity_version);
-    if (d.blocked && d.blocked.length) {
-      showToast(t('settings.person_blocked', {names: d.blocked.join(', ')}), 'warning');
-    } else if (d.conflicts && d.conflicts.length) {
+    if (d.conflicts && d.conflicts.length) {
       showToast(t('settings.name_conflict', {names: d.conflicts.join(', ')}), 'warning');
     } else {
       showToast(t('settings.toast_persons_saved'), 'success');
@@ -822,40 +802,36 @@ document.getElementById('csv-import-btn').addEventListener('click', async () => 
 initActivityWatch({ scope: 'settings', version: ACTIVITY_VERSION, container: 'settingsActivityBar' });
 
 {% if current_role == 'admin' %}
-const PERSONEN_FUER_USER = {{ persons | tojson }};
-
-function zelle(text) {
-  const td = document.createElement('td');
-  td.textContent = text == null ? '—' : String(text);
-  return td;
+// Personen/Benutzer zusammengefuehrt (Task 5): die Kontofelder haengen jetzt
+// direkt in der Personen-Zeile (.person-account-slot), es gibt keine separate
+// Benutzer-Tabelle mehr. Ein Personen-Auswahlfeld wie im frueheren
+// benutzerZeile() entfaellt bewusst - die 1:1-Kopplung Person<->Konto ist seit
+// Task 4 atomar, ein Umhaengen auf eine andere Person hat in dieser Ansicht
+// keinen natuerlichen Platz mehr.
+/** Setzt die Kontofelder eines Kontos in die Personen-Zeile seiner Person.
+ * false, wenn es keine passende Zeile gibt (Konto ohne Person) - der Aufrufer
+ * zeigt es dann in der separaten Liste "Konten ohne Person" an. */
+function kontoFelderEinfuegen(u) {
+  if (u.person_id == null) return false;
+  const zeile = document.querySelector(`.person-row[data-id="${u.person_id}"]`);
+  const slot = zeile?.querySelector('.person-account-slot');
+  if (!slot) return false;
+  kontoFelderBauen(u, slot, false);
+  return true;
 }
 
-function benutzerZeile(u) {
-  const tr = document.createElement('tr');
-  tr.appendChild(zelle(u.username));
+/** Baut Benutzername, Rolle, Aktiv, letzte Anmeldung, Reset und Loeschen in
+ * `slot` - gemeinsam fuer verknuepfte Konten und Konten ohne Person. */
+function kontoFelderBauen(u, slot, ohnePerson) {
+  slot.innerHTML = '';
 
-  // Personen-Zuordnung ist der Kern von Modell A: ohne Auswahlfeld liesse
-  // sich ein spaeter angelegtes Konto nie mit einer Person verknuepfen.
-  const tdPerson = document.createElement('td');
-  const pSel = document.createElement('select');
-  pSel.className = 'form-select form-select-sm';
-  const keine = document.createElement('option');
-  keine.value = ''; keine.textContent = t('settings.wizard_me_none');
-  pSel.appendChild(keine);
-  PERSONEN_FUER_USER.forEach(p => {
-    const o = document.createElement('option');
-    o.value = p.id; o.textContent = p.name;
-    if (u.person_id === p.id) o.selected = true;
-    pSel.appendChild(o);
-  });
-  pSel.addEventListener('change', () => benutzerAendern(u.id,
-    {person_id: pSel.value ? parseInt(pSel.value, 10) : null}));
-  tdPerson.appendChild(pSel);
-  tr.appendChild(tdPerson);
+  const badge = document.createElement('span');
+  badge.className = 'small text-muted me-1';
+  badge.textContent = u.username;
+  slot.appendChild(badge);
 
-  const tdRolle = document.createElement('td');
   const sel = document.createElement('select');
-  sel.className = 'form-select form-select-sm';
+  sel.className = 'form-select form-select-sm d-inline-block w-auto me-1';
   [['member', t('settings.role_member')], ['admin', t('settings.role_admin')]].forEach(([wert, label]) => {
     const o = document.createElement('option');
     o.value = wert; o.textContent = label;
@@ -863,38 +839,104 @@ function benutzerZeile(u) {
     sel.appendChild(o);
   });
   sel.addEventListener('change', () => benutzerAendern(u.id, {role: sel.value}));
-  tdRolle.appendChild(sel);
-  tr.appendChild(tdRolle);
+  slot.appendChild(sel);
 
-  const tdAktiv = document.createElement('td');
   const cb = document.createElement('input');
-  cb.type = 'checkbox'; cb.className = 'form-check-input'; cb.checked = !!u.is_active;
+  cb.type = 'checkbox'; cb.className = 'form-check-input me-1'; cb.checked = !!u.is_active;
+  cb.title = t('settings.user_active');
   cb.addEventListener('change', () => benutzerAendern(u.id, {is_active: cb.checked ? 1 : 0}));
-  tdAktiv.appendChild(cb);
-  tr.appendChild(tdAktiv);
+  slot.appendChild(cb);
 
-  tr.appendChild(zelle(u.last_login));
+  // Befund 1 (Task-5-Review): letzte Anmeldung ging beim Zusammenfuehren
+  // verloren, obwohl /api/users sie weiterhin liefert. Fallback-Zeichen wie
+  // im fruehereren benutzerZeile()/zelle(): '—' fuer null.
+  const letzterLogin = document.createElement('span');
+  letzterLogin.className = 'small text-muted me-1';
+  letzterLogin.title = t('settings.user_last_login');
+  letzterLogin.textContent = u.last_login == null ? '—' : String(u.last_login);
+  slot.appendChild(letzterLogin);
 
-  const tdAktion = document.createElement('td');
-  tdAktion.className = 'text-end text-nowrap';
   const reset = document.createElement('button');
+  reset.type = 'button';
   reset.className = 'btn btn-sm btn-outline-secondary me-1';
   reset.textContent = t('settings.user_reset_pw');
   reset.addEventListener('click', () => passwortZuruecksetzen(u.id, u.username));
+  slot.appendChild(reset);
+
   const del = document.createElement('button');
+  del.type = 'button';
   del.className = 'btn btn-sm btn-outline-danger';
   del.innerHTML = '<i class="bi bi-trash"></i>';
-  del.addEventListener('click', () => benutzerLoeschen(u.id, u.username));
-  tdAktion.appendChild(reset); tdAktion.appendChild(del);
-  tr.appendChild(tdAktion);
-  return tr;
+  del.title = t('settings.user_delete');
+  del.addEventListener('click', () => benutzerLoeschen(u.id, u.username, ohnePerson));
+  slot.appendChild(del);
 }
 
-async function benutzerLaden() {
-  const d = await (await fetch('/api/users')).json();
-  const tb = document.getElementById('users-tbody');
-  tb.innerHTML = '';
-  (d.users || []).forEach(u => tb.appendChild(benutzerZeile(u)));
+/** Person ohne Konto (Bestand aus der Zeit vor der 1:1-Regel): statt leerer
+ * Kontofelder ein "Konto anlegen"-Button, der ein Konto fuer GENAU diese
+ * Person anlegt (POST /api/users mit ihrer person_id). */
+function kontoAnlegenEinfuegen(zeile, slot) {
+  slot.innerHTML = '';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-sm btn-outline-success js-account-create';
+  btn.innerHTML = '<i class="bi bi-person-plus me-1"></i>';
+  btn.appendChild(document.createTextNode(t('settings.account_create')));
+  btn.addEventListener('click', async () => {
+    const personId = parseInt(zeile.dataset.id, 10);
+    const personName = zeile.querySelector('.person-name').value.trim();
+    // Vorschlag = Personenname (wie bei "+ Person hinzufuegen"), aber
+    // editierbar - z.B. wenn der Name schon als Login vergeben ist.
+    const name = prompt(t('settings.account_create_prompt', {name: personName}), personName);
+    if (!name || !name.trim()) return;
+    const d = await (await fetch('/api/users', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: name.trim(), role: 'member', person_id: personId})
+    })).json();
+    if (!d.success) { showToast(d.error, 'danger'); return; }
+    zeigeInitialpasswort(name.trim(), d.password, personenNeuLaden);
+  });
+  slot.appendChild(btn);
+}
+
+/** Konten ohne Person in der separaten Liste unter der Tabelle - nur
+ * eingeblendet, wenn es mindestens eines gibt. */
+function kontenOhnePersonZeigen(konten) {
+  const wrap = document.getElementById('orphan-accounts');
+  const liste = document.getElementById('orphan-accounts-list');
+  liste.innerHTML = '';
+  konten.forEach(u => {
+    const zeile = document.createElement('div');
+    zeile.className = 'd-flex flex-wrap align-items-center gap-1 border rounded px-2 py-1 mb-2 orphan-account-row';
+    zeile.dataset.userId = u.id;
+    kontoFelderBauen(u, zeile, true);
+    liste.appendChild(zeile);
+  });
+  wrap.hidden = konten.length === 0;
+}
+
+/** Fuellt die Kontofelder aller Personen-Zeilen aus /api/users (einmalig beim
+ * Seitenaufbau - fuer Aenderungen danach siehe personenNeuLaden()). */
+async function kontoFelderLaden() {
+  const benutzer = (await (await fetch('/api/users')).json()).users || [];
+  const ohnePerson = benutzer.filter(u => !kontoFelderEinfuegen(u));
+  const mitKonto = new Set(benutzer.filter(u => u.person_id != null).map(u => String(u.person_id)));
+  document.querySelectorAll('.person-row').forEach(zeile => {
+    const slot = zeile.querySelector('.person-account-slot');
+    if (slot && zeile.dataset.id && !mitKonto.has(String(zeile.dataset.id))) {
+      kontoAnlegenEinfuegen(zeile, slot);
+    }
+  });
+  kontenOhnePersonZeigen(ohnePerson);
+}
+
+/** Nach Anlegen/Aendern/Loeschen neu vom Server holen. Es gibt (bewusst
+ * geprueft) keinen GET /api/persons-Endpunkt - Personen kommen bisher nur aus
+ * dem initialen Jinja-Kontext. Fuer diese seltenen Admin-Aktionen genuegt ein
+ * Neuladen der Seite, das Name-, Wallet- und Kontofelder immer konsistent
+ * haelt, ohne einen Endpunkt nur fuer diesen Zweck einzufuehren. */
+function personenNeuLaden() {
+  window.location.reload();
 }
 
 async function benutzerAendern(id, felder) {
@@ -903,7 +945,7 @@ async function benutzerAendern(id, felder) {
     body: JSON.stringify(felder)
   })).json();
   showToast(d.success ? t('settings.user_saved') : d.error, d.success ? 'success' : 'danger');
-  benutzerLaden();
+  personenNeuLaden();
 }
 
 async function passwortZuruecksetzen(id, name) {
@@ -913,15 +955,25 @@ async function passwortZuruecksetzen(id, name) {
   else showToast(d.error, 'danger');
 }
 
-async function benutzerLoeschen(id, name) {
-  if (!confirm(t('settings.user_delete_confirm', {name}))) return;
+async function benutzerLoeschen(id, name, ohnePerson) {
+  // Mit Person: deutlicher Hinweis auf Person + Buchungshistorie und die
+  // Alternative "deaktivieren". Ohne Person faellt nur das Konto weg.
+  const frage = ohnePerson ? 'settings.user_delete_confirm_unlinked' : 'settings.user_delete_confirm';
+  if (!confirm(t(frage, {name}))) return;
   const d = await (await fetch(`/api/users/${id}`, {method: 'DELETE'})).json();
   showToast(d.success ? t('settings.user_deleted') : d.error, d.success ? 'success' : 'danger');
-  benutzerLaden();
+  personenNeuLaden();
 }
 
-/** Zeigt das Initialpasswort genau einmal an (Entscheidung P1). */
-function zeigeInitialpasswort(name, passwort) {
+/** Zeigt das Initialpasswort genau einmal an (Entscheidung P1).
+ *
+ * Schliessen passiert nur noch per Klick, nicht mehr per Timer
+ * (Task-5-Review, Befund 3): ein `setTimeout` liesse die Seite neu laden,
+ * egal ob das Passwort schon gelesen/kopiert wurde, und liesse sich weder
+ * verlaengern noch bestaetigen. `beiSchliessen` ist optional - beim Anlegen
+ * einer Person (neue Zeile, braucht ein Neuladen) wird `personenNeuLaden`
+ * uebergeben, beim reinen Passwort-Reset (Zeile bleibt unveraendert) nichts. */
+function zeigeInitialpasswort(name, passwort, beiSchliessen) {
   const box = document.createElement('div');
   box.className = 'alert alert-warning mt-3';
   const titel = document.createElement('div');
@@ -930,36 +982,39 @@ function zeigeInitialpasswort(name, passwort) {
   const code = document.createElement('code');
   code.className = 'fs-5 d-block my-2';
   code.textContent = passwort;
-  box.appendChild(titel); box.appendChild(code);
-  document.getElementById('users-tbody').closest('.card-body').appendChild(box);
+  const schliessen = document.createElement('button');
+  schliessen.type = 'button';
+  schliessen.className = 'btn btn-sm btn-outline-secondary';
+  schliessen.textContent = t('settings.password_dismiss');
+  schliessen.addEventListener('click', () => {
+    box.remove();
+    if (beiSchliessen) beiSchliessen();
+  });
+  box.appendChild(titel); box.appendChild(code); box.appendChild(schliessen);
+  document.getElementById('persons-list').closest('.card-body').appendChild(box);
 }
 
-document.getElementById('add-user-btn').addEventListener('click', async () => {
-  const name = prompt(t('settings.user_name_prompt'));
-  if (!name) return;
-  const d = await (await fetch('/api/users', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({username: name.trim(), role: 'member', person_id: null})
-  })).json();
-  if (d.success) { zeigeInitialpasswort(name.trim(), d.password); benutzerLaden(); }
-  else showToast(d.error, 'danger');
-});
-
-benutzerLaden();
+kontoFelderLaden();
 
 // ── Einrichtungsassistent ───────────────────────────────────────────────────
-let _wizardVorschlaege = [];
 let _wizardDaten = null;
 
 async function wizardLaden() {
   const d = await (await fetch('/api/setup/profiles')).json();
-  if (!d.success || d.done) return;
+  if (!d.success) return;
   _wizardDaten = d;
-  _wizardVorschlaege = d.suggestions || [];
-  // Der Assistent lohnt sich, solange noch Personen ohne Login existieren
-  // ODER das eigene Konto noch keiner Person zugeordnet ist.
-  if (!_wizardVorschlaege.length && d.me && d.me.person_id) return;
-  document.getElementById('setup-wizard-wrap').hidden = false;
+  // Der Vorschlagsschritt (weitere Logins fuer unverknuepfte Personen
+  // anlegen) entfaellt (Task 5) - die kombinierte Tabelle deckt das jetzt
+  // direkt ab. Der Assistent lohnt sich nur noch, solange das eigene Konto
+  // keiner Person zugeordnet ist.
+  //
+  // Bewusst UNABHAENGIG von d.done: eine bereits abgeschlossene Ersteinrichtung
+  // (profiles_setup_done=1) mit einem seitdem unverknuepften Konto - z.B. der
+  // haeufigste Bestandsfall, ein Admin, der "Fertig" ohne Zuordnung geklickt
+  // hat - haette sonst KEINEN Weg mehr, sich selbst zu verknuepfen: seit der
+  // 1:1-Pflicht lehnt jede neue Buchung ein unverknuepftes Konto serverseitig
+  // ab, und die alte Vorschlagsliste (die das frueher auffing) ist entfernt.
+  if (!d.me || !d.me.person_id) document.getElementById('setup-wizard-wrap').hidden = false;
 }
 
 /** Schritt 1: eigene Person zuordnen, optional das Bestandskonto umbenennen. */
@@ -995,58 +1050,16 @@ document.getElementById('wizard-me-save').addEventListener('click', async () => 
     return;
   }
   showToast(t('settings.user_saved'), 'success');
-  benutzerLaden();
+  personenNeuLaden();
 });
-
-function wizardZeile(v) {
-  const row = document.createElement('div');
-  row.className = 'd-flex flex-wrap align-items-center gap-2';
-  const cb = document.createElement('input');
-  cb.type = 'checkbox'; cb.className = 'form-check-input wizard-pick';
-  // Bewusst NICHT vorangehakt: Konten entstehen nur durch aktive Auswahl,
-  // sonst legt ein unbedachter Klick Logins fuer alle Personen an.
-  cb.dataset.personId = v.person_id;
-  const label = document.createElement('span');
-  label.className = 'fw-semibold'; label.style.minWidth = '8rem';
-  label.textContent = v.person_name;
-  const feld = document.createElement('input');
-  feld.type = 'text'; feld.className = 'form-control form-control-sm wizard-username';
-  feld.style.maxWidth = '14rem'; feld.value = v.username;
-  row.append(cb, label, feld);
-  return row;
-}
 
 document.getElementById('wizard-open-btn').addEventListener('click', () => {
   wizardSchritt1Aufbauen();
-  const liste = document.getElementById('wizard-list');
-  liste.innerHTML = '';
-  _wizardVorschlaege.forEach(v => liste.appendChild(wizardZeile(v)));
   document.getElementById('wizard-body').hidden = false;
 });
 
 document.getElementById('wizard-later-btn').addEventListener('click', () => {
   document.getElementById('setup-wizard-wrap').hidden = true;
-});
-
-document.getElementById('wizard-create-btn').addEventListener('click', async () => {
-  const zeilen = [...document.querySelectorAll('#wizard-list > div')];
-  let angelegt = 0;
-  for (const z of zeilen) {
-    const cb = z.querySelector('.wizard-pick');
-    if (!cb.checked) continue;
-    const username = z.querySelector('.wizard-username').value.trim();
-    if (!username) continue;
-    const d = await (await fetch('/api/users', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({username, role: 'member', person_id: parseInt(cb.dataset.personId, 10)})
-    })).json();
-    if (d.success) { zeigeInitialpasswort(username, d.password); angelegt++; }
-    else showToast(d.error, 'danger');
-  }
-  if (angelegt) {
-    document.getElementById('wizard-cleanup').hidden = false;
-    benutzerLaden();
-  }
 });
 
 document.getElementById('wizard-done-btn').addEventListener('click', async () => {

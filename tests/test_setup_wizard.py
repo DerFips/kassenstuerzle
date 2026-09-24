@@ -88,3 +88,41 @@ def test_assistent_nur_fuer_admin(auth_client, db):
     assert auth_client.get('/api/setup/profiles').status_code == 403
     db.execute("UPDATE users SET role='admin' WHERE username='admin'")
     db.commit()
+
+
+def test_wizard_zeigt_sich_auch_nach_abgeschlossener_ersteinrichtung(auth_client, db):
+    """Regression (Nachpruefung der finalen Review-Fixes): der haeufigste
+    Bestandsfall ist ein Admin, der die Ersteinrichtung mit "Fertig" ohne
+    eigene Zuordnung abgeschlossen hat (profiles_setup_done=1, aber
+    person_id weiterhin NULL). Seit der 1:1-Pflicht lehnt der Server jede
+    neue Buchung eines unverknuepften Kontos ab (I2) - ohne diesen Fix
+    haette so ein Konto GAR KEINEN Weg mehr, sich selbst zu verknuepfen,
+    weil wizardLaden() vorher schon bei "done" abbrach, bevor es die eigene
+    Verknuepfung ueberhaupt prueft.
+
+    Kann die eigentliche JS-Logik nicht ausfuehren (keine JS-Laufzeit in
+    dieser Suite) - prueft stattdessen, dass die ausgelieferte Seite die
+    Kurzschluss-Bedingung nicht mehr enthaelt, und dass die Server-Antwort,
+    die wizardLaden() auswertet, im genau betroffenen Zustand
+    (done=True, person_id=None) tatsaechlich vorkommen kann.
+    """
+    db.execute("INSERT INTO app_meta (key, value) VALUES ('profiles_setup_done', '1')")
+    db.execute("UPDATE users SET person_id=NULL WHERE username='admin'")
+    db.commit()
+    try:
+        d = auth_client.get('/api/setup/profiles').get_json()
+        assert d['done'] is True
+        assert d['me']['person_id'] is None, (
+            'Genau dieser Zustand - abgeschlossen UND unverknuepft - ist der '
+            'Bestandsfall, den die alte Kurzschluss-Bedingung uebersah.')
+
+        html = auth_client.get('/settings').get_data(as_text=True)
+        assert 'if (!d.success || d.done) return;' not in html, (
+            'wizardLaden() bricht weiterhin bei einer abgeschlossenen '
+            'Ersteinrichtung ab, bevor es die eigene Verknuepfung prueft - '
+            'ein unverknuepftes Bestandskonto haette dann keinen Weg mehr, '
+            'sich selbst zuzuordnen.')
+        assert 'if (!d.success) return;' in html
+    finally:
+        db.execute("DELETE FROM app_meta WHERE key='profiles_setup_done'")
+        db.commit()
