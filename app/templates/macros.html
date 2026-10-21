@@ -1,3 +1,8 @@
 {% macro eur(v) -%}
 {{- "{:,.2f}".format(v)|replace(",", "X")|replace(".", ",")|replace("X", ".") -}}
 {%- endmacro %}
+{# Betrag mit Punkt und zwei Nachkommastellen (fuer Zahlenfelder und Kennzahlen).
+   Werte betragsmaessig unter einem halben Cent, darunter -0.0, erscheinen als 0.00. #}
+{% macro money(v) -%}
+{{- '%.2f'|format(v if v|abs >= 0.005 else 0.0) -}}
+{%- endmacro %}

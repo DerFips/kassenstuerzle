@@ -17,7 +17,7 @@
     <h5 class="mb-1">{{ person_name }}</h5>
   </div>
 
-  <div class="col-12 col-md-4">
+  <div class="col-12 col-sm-6 col-md-3">
     <div class="card shadow-sm text-center h-100">
       <div class="card-body">
         <div class="text-muted small">{{ t('profile.stat_income') }}</div>
@@ -25,7 +25,7 @@
       </div>
     </div>
   </div>
-  <div class="col-12 col-md-4">
+  <div class="col-12 col-sm-6 col-md-3">
     <div class="card shadow-sm text-center h-100">
       <div class="card-body">
         <div class="text-muted small">{{ t('profile.stat_expense') }}</div>
@@ -33,11 +33,23 @@
       </div>
     </div>
   </div>
-  <div class="col-12 col-md-4">
+  <div class="col-12 col-sm-6 col-md-3">
     <div class="card shadow-sm text-center h-100">
       <div class="card-body">
         <div class="text-muted small">{{ t('profile.stat_savings') }}</div>
         <div class="fs-4 fw-bold">{{ '%.2f'|format(person_totals.savings) }} €</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-sm-6 col-md-3">
+    <div class="card shadow-sm text-center h-100">
+      <div class="card-body">
+        <div class="text-muted small">{{ t('profile.stat_net_worth') }}</div>
+        <div class="fs-4 fw-bold {% if wealth.net_worth <= -0.005 %}text-danger{% elif wealth.net_worth >= 0.005 %}text-success{% endif %}" id="statNetWorth">{{ m.money(wealth.net_worth) }} €</div>
+        <div class="small text-muted">
+          {{ t('profile.stat_assets') }} <span id="statAssets">{{ m.money(wealth.total_assets) }} €</span>
+          · {{ t('profile.stat_debts') }} <span id="statDebts">{{ m.money(wealth.total_debts) }} €</span>
+        </div>
       </div>
     </div>
   </div>
@@ -73,6 +85,111 @@
         <button class="btn btn-sm btn-warning" id="profileWalletSave">
           <i class="bi bi-save me-1"></i>{{ t('settings.save_persons') }}
         </button>
+      </div>
+    </div>
+  </div>
+
+  {# Nettovermoegen (streng persoenlich). Alle Namen laufen nur ueber das
+     Jinja-Autoescaping, als Text oder value-Attribut; die Zeilen-IDs sind
+     ganze Zahlen. Das Verhalten (Hinzufuegen, Speichern, Diagramm) haengt
+     das Profil-Skript an die IDs. #}
+  <div class="col-12">
+    <div class="card shadow-sm" id="wealthCard">
+      <div class="card-header py-3">
+        <h5 class="mb-0"><i class="bi bi-bank me-2 text-primary"></i>{{ t('wealth.title') }}</h5>
+      </div>
+      <div class="card-body">
+        <div id="wealthAccountsList">
+          {% for kind, group_key in (('asset', 'wealth.group_assets'), ('debt', 'wealth.group_debts')) %}
+          <div class="wealth-group mb-3" data-kind="{{ kind }}">
+            <h6 class="text-muted text-uppercase small fw-semibold mb-2">{{ t(group_key) }}</h6>
+            {% set ns = namespace(n=0) %}
+            {% for a in wealth.accounts if a.kind == kind %}
+            {% set ns.n = ns.n + 1 %}
+            <div class="row g-2 mb-2 wealth-row" data-id="{{ a.id|int }}">
+              <div class="col-12 col-md-4">
+                <input type="text" class="form-control wealth-name" maxlength="60" value="{{ a.name }}"
+                       placeholder="{{ t('wealth.account_name_placeholder') }}">
+              </div>
+              <div class="col-7 col-md-4">
+                <select class="form-select wealth-type">
+                  {% for grp_kind, grp_key in (('asset', 'wealth.group_assets'), ('debt', 'wealth.group_debts')) %}
+                  <optgroup label="{{ t(grp_key) }}">
+                    {% for key, key_kind in wealth_types.items() if key_kind == grp_kind %}
+                    <option value="{{ key }}" {% if a.type == key %}selected{% endif %}>{{ t('wealth.type.' ~ key) }}</option>
+                    {% endfor %}
+                  </optgroup>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="col-3 col-md-3">
+                <input type="number" step="0.01" class="form-control wealth-balance text-end"
+                       value="{{ m.money(a.balance) }}" placeholder="€">
+              </div>
+              <div class="col-2 col-md-1">
+                <button type="button" class="btn btn-outline-danger btn-sm w-100 wealth-remove-btn"><i class="bi bi-trash"></i></button>
+              </div>
+            </div>
+            {% endfor %}
+            {% if ns.n == 0 %}
+            <div class="text-muted small wealth-empty">{{ t('wealth.no_accounts') }}</div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+        <div class="d-flex flex-wrap gap-2 mb-3">
+          <button type="button" class="btn btn-outline-primary btn-sm" id="wealthAddAccountBtn">
+            <i class="bi bi-plus-circle me-1"></i>{{ t('wealth.add_account') }}
+          </button>
+          <button type="button" class="btn btn-primary btn-sm" id="wealthSaveAccountsBtn">
+            <i class="bi bi-save me-1"></i>{{ t('wealth.save_accounts') }}
+          </button>
+        </div>
+
+        <div class="row g-2 align-items-end mb-3">
+          <div class="col-12 col-sm-6 col-md-4">
+            <label class="form-label small text-muted" for="wealthDate">{{ t('wealth.date_label') }}</label>
+            <input type="date" id="wealthDate" class="form-control form-control-sm"
+                   value="{{ wealth_today }}" max="{{ wealth_today }}">
+          </div>
+          <div class="col-12 col-sm-6 col-md-4">
+            <button type="button" class="btn btn-success btn-sm" id="wealthSaveBalancesBtn">
+              <i class="bi bi-save me-1"></i>{{ t('wealth.save_balances') }}
+            </button>
+          </div>
+        </div>
+
+        <div class="mb-3">
+          <button class="btn btn-link btn-sm p-0" type="button" data-bs-toggle="collapse"
+                  data-bs-target="#wealthHistory" aria-expanded="false" aria-controls="wealthHistory">
+            <i class="bi bi-clock-history me-1"></i>{{ t('wealth.history_title') }}
+          </button>
+          <div class="collapse mt-2" id="wealthHistory">
+            {% if wealth.entries %}
+            <div class="table-responsive">
+              <table class="table table-sm align-middle mb-0">
+                <tbody>
+                  {% for e in wealth.entries %}
+                  <tr class="wealth-entry" data-account-id="{{ e.account_id|int }}" data-date="{{ e.balance_date }}">
+                    <td class="text-nowrap">{{ e.balance_date }}</td>
+                    <td>{{ wealth_names.get(e.account_id, '') }}</td>
+                    <td class="text-end text-nowrap">{{ m.money(e.balance) }} €</td>
+                    <td class="text-end">
+                      <button type="button" class="btn btn-outline-danger btn-sm wealth-entry-delete"><i class="bi bi-trash"></i></button>
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% else %}
+            <div class="text-muted small">{{ t('wealth.history_empty') }}</div>
+            {% endif %}
+          </div>
+        </div>
+
+        <h6 class="text-muted small fw-semibold">{{ t('wealth.chart_title') }}</h6>
+        <canvas id="wealthChart" height="200"></canvas>
       </div>
     </div>
   </div>

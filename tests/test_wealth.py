@@ -1,8 +1,12 @@
 from datetime import datetime, timedelta
 
+import re
+
 import pytest
 
 from app.routes.main import WEALTH_TYPES, _wealth_data
+from app.translations import TRANSLATIONS
+from test_xss_namen import _template_literale
 
 
 @pytest.fixture()
@@ -495,3 +499,124 @@ def test_client_person_id_wird_ignoriert(auth_client, csrf, db, person):
                        entries=[{'account_id': fremdes, 'balance': 1, 'person_id': person}])
     assert res.status_code == 200
     assert _salden(db) == []
+
+
+# ── Profil: Kennzahl und Karte (serverseitig) ─────────────────────────────────
+WEALTH_SCHLUESSEL = [
+    'profile.stat_net_worth', 'profile.stat_assets', 'profile.stat_debts',
+    'wealth.title', 'wealth.group_assets', 'wealth.group_debts',
+    'wealth.add_account', 'wealth.save_accounts', 'wealth.account_name_placeholder',
+    'wealth.date_label', 'wealth.save_balances', 'wealth.history_title',
+    'wealth.history_empty', 'wealth.chart_title', 'wealth.no_accounts',
+    'wealth.toast_accounts_saved', 'wealth.toast_balances_saved',
+    'srv.wealth_invalid_date', 'srv.wealth_invalid_balance',
+]
+
+
+def _profil(client):
+    res = client.get('/profile')
+    assert res.status_code == 200
+    return res.get_data(as_text=True)
+
+
+def _kennzahl(html):
+    """(Klassen, Text) des Elements #statNetWorth."""
+    m = re.search(r'<div([^>]*\bid="statNetWorth"[^>]*)>([^<]*)</div>', html)
+    assert m, 'Element #statNetWorth fehlt'
+    return m.group(1), m.group(2).strip()
+
+
+def test_uebersetzungsschluessel_in_beiden_sprachen():
+    schluessel = WEALTH_SCHLUESSEL + [f'wealth.type.{k}' for k in WEALTH_TYPES]
+    for sprache in ('de', 'en'):
+        fehlend = [k for k in schluessel if not TRANSLATIONS[sprache].get(k)]
+        assert fehlend == [], f'{sprache}: {fehlend}'
+
+
+def test_profil_zeigt_nettovermoegen(auth_client, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    hyp = _konto(db, person, 'Hypothek', 'mortgage')
+    _saldo(db, giro, '2026-01-31', 1000)
+    _saldo(db, hyp, '2026-01-31', 800)
+    klassen, text = _kennzahl(_profil(auth_client))
+    assert text == '200.00 €'
+    assert 'text-success' in klassen and 'text-danger' not in klassen
+
+    _saldo(db, hyp, '2026-02-28', 1500)
+    klassen, text = _kennzahl(_profil(auth_client))
+    assert text == '-500.00 €'
+    assert 'text-danger' in klassen and 'text-success' not in klassen
+
+
+def test_profil_zeigt_vermoegen_und_schulden_klein(auth_client, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    hyp = _konto(db, person, 'Hypothek', 'mortgage')
+    _saldo(db, giro, '2026-01-31', 1000)
+    _saldo(db, hyp, '2026-01-31', 800)
+    html = _profil(auth_client)
+    assert re.search(r'id="statAssets"[^>]*>\s*1000\.00 €', html)
+    assert re.search(r'id="statDebts"[^>]*>\s*800\.00 €', html)
+
+
+def test_profil_ohne_konten_rendert(auth_client, db, person):
+    html = _profil(auth_client)
+    assert _kennzahl(html)[1] == '0.00 €'
+    assert 'id="wealthCard"' in html
+
+
+def test_profil_mit_einem_stichtag_rendert(auth_client, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    _saldo(db, giro, '2026-01-31', 50)
+    html = _profil(auth_client)
+    assert _kennzahl(html)[1] == '50.00 €'
+    assert 'id="wealthChart"' in html and 'id="wealthHistory"' in html
+    assert 'id="wealthDate"' in html
+
+
+def test_negative_null_wird_nie_als_minus_null_angezeigt(auth_client, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    _saldo(db, giro, '2026-01-31', -0.0)
+    html = _profil(auth_client)
+    assert '-0.00' not in html
+    assert _kennzahl(html)[1] == '0.00 €'
+
+
+def test_fremde_konten_nicht_im_profil(auth_client, db, person):
+    bob = _fremde_person(db)
+    fremd = _konto(db, bob, 'GeheimesKontoBob', 'savings')
+    _saldo(db, fremd, '2026-01-31', 123456.78)
+    eigen = _konto(db, person, 'Giro', 'checking')
+    _saldo(db, eigen, '2026-01-31', 10)
+    html = _profil(auth_client)
+    assert 'GeheimesKontoBob' not in html
+    assert '123456.78' not in html
+    assert _kennzahl(html)[1] == '10.00 €'
+
+
+def test_namen_maskiert_und_nicht_im_template_literal(auth_client, db, person):
+    name = '<img src=x onerror=1>${fetch(2)}'
+    giro = _konto(db, person, name, 'checking')
+    _saldo(db, giro, '2026-01-31', 5)
+    html = _profil(auth_client)
+    assert '<img src=x onerror=1>' not in html
+    assert '&lt;img' in html
+    assert not [l for l in _template_literale(html) if '${fetch(2)}' in l]
+
+
+def test_konten_zeilen_mit_ganzzahligen_ids(auth_client, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    hyp = _konto(db, person, 'Hypothek', 'mortgage')
+    html = _profil(auth_client)
+    zeilen = re.findall(r'class="[^"]*\bwealth-row\b[^"]*"[^>]*\bdata-id="([^"]*)"', html)
+    assert sorted(zeilen) == sorted([str(giro), str(hyp)])
+    for knopf in ('wealthAddAccountBtn', 'wealthSaveAccountsBtn',
+                  'wealthSaveBalancesBtn', 'wealthAccountsList', 'statNetWorth'):
+        assert f'id="{knopf}"' in html
+
+
+def test_unverknuepft_keine_karte(auth_client, db):
+    db.execute("UPDATE users SET person_id=NULL WHERE username='admin'")
+    db.commit()
+    html = _profil(auth_client)
+    assert 'id="wealthCard"' not in html
+    assert 'id="statNetWorth"' not in html

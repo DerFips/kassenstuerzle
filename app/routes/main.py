@@ -3311,9 +3311,14 @@ def profile():
     eigene_wiederkehrende = [dict(r) for r in conn.execute(
         'SELECT * FROM recurring_expenses WHERE person_id=? ORDER BY id', (person_id,))]
     alle_kategorien = [dict(r) for r in conn.execute('SELECT * FROM categories ORDER BY name')]
+    # Nettovermoegen: streng persoenlich, nur die Konten der eigenen Person.
+    vermoegen = _wealth_data(conn, person_id)
     conn.close()
 
     return render_template('profile.html', active='profile', unlinked=False,
+        wealth=vermoegen, wealth_types=WEALTH_TYPES,
+        wealth_names={a['id']: a['name'] for a in vermoegen['accounts']},
+        wealth_today=datetime.now().date().isoformat(),
         person=person, person_name=pn, month_names=MONTH_NAMES,
         person_totals=eigene_totale, person_totals_by_year=eigene_jahre,
         profile_chart_json=eigenes_chart_json,
