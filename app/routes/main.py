@@ -6,6 +6,7 @@ import secrets
 from flask import Flask, render_template, request, jsonify, Response, redirect, url_for
 import os
 import re as _re_modul
+import math
 # SQLCipher Drop-in: verschlüsselte SQLite-Datenbank
 # Fallback auf Standard-sqlite3 wenn sqlcipher3 nicht installiert ist
 try:
@@ -190,6 +191,19 @@ def _migrate_to_encrypted(path: str, key: str) -> None:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         raise
+
+
+# Nettovermoegen: Typ -> Art. Die einzige Stelle, die festlegt, ob ein Konto
+# Vermoegen ('asset') oder Schuld ('debt') ist; es gibt dafuer keine Spalte.
+WEALTH_TYPES = {
+    'checking': 'asset', 'savings': 'asset', 'fixed_deposit': 'asset',
+    'securities': 'asset', 'life_insurance': 'asset', 'pension': 'asset',
+    'real_estate': 'asset', 'vehicle': 'asset', 'cash': 'asset',
+    'other_asset': 'asset',
+    'loan': 'debt', 'mortgage': 'debt', 'credit_card': 'debt',
+    'overdraft': 'debt', 'other_debt': 'debt',
+}
+
 MONTH_NAMES = ['Januar','Februar','März','April','Mai','Juni',
                'Juli','August','September','Oktober','November','Dezember']
 MONTH_NAMES_EN = ['January','February','March','April','May','June',
@@ -854,6 +868,16 @@ def init_db():
         scope TEXT NOT NULL,
         last_seen TEXT NOT NULL,
         PRIMARY KEY (user_id, scope))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS wealth_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        person_id INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS wealth_balances (
+        account_id INTEGER NOT NULL REFERENCES wealth_accounts(id) ON DELETE CASCADE,
+        balance_date TEXT NOT NULL,
+        balance REAL NOT NULL,
+        PRIMARY KEY (account_id, balance_date))""")
     # Migrate income table: add category_id if missing
     try:
         conn.execute('ALTER TABLE income ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL')
@@ -2554,6 +2578,162 @@ def save_recurring():
     return jsonify({'success': True, 'recurring': result,
                     'id_map': id_map, 'activity_version': activity_version})
 
+def _wealth_id(raw):
+    """Kontonummer aus Client-Eingabe: nur ein echter int im SQLite-Bereich.
+
+    Alles andere (bool, float samt Infinity/1e300, str, None, zu gross, <= 0)
+    liefert None und der Eintrag wird uebersprungen. Verhindert auch den
+    OverflowError beim Binden riesiger Zahlen.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw if 0 < raw <= 2**63 - 1 else None
+
+
+@main_bp.route('/api/wealth/accounts/save', methods=['POST'])
+@login_required
+def save_wealth_accounts():
+    d = request.get_json(silent=True)
+    stale = _require_v2(d)
+    if stale:
+        return stale
+    rows = d.get('rows') or []
+    deleted_ids = d.get('deleted_ids') or []
+    if not isinstance(rows, list) or not isinstance(deleted_ids, list):
+        return jsonify(success=False, error=t('srv.stale_client')), 409
+    eigene_person_id = g.current_user['person_id']
+    if eigene_person_id is None:
+        return jsonify(success=False, error=t('srv.account_not_linked')), 400
+
+    conn = get_db()
+    id_map = {}
+
+    for raw in deleted_ids:
+        did = _wealth_id(raw)
+        if did is None:
+            continue
+        # AND person_id=?: ein fremdes Konto bleibt still unberuehrt.
+        conn.execute('DELETE FROM wealth_accounts WHERE id=? AND person_id=?',
+                     (did, eigene_person_id))
+
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        name = r.get('name')
+        typ = r.get('type')
+        if not isinstance(name, str) or not isinstance(typ, str):
+            continue
+        name = name.strip()
+        if not name or len(name) > 60 or typ not in WEALTH_TYPES:
+            continue
+        rid = None
+        if r.get('id') not in (None, ''):
+            rid = _wealth_id(r['id'])
+            if rid is None:
+                continue
+        if rid is not None:
+            # person_id steht bewusst nicht in SET: ein Konto laesst sich nicht
+            # umhaengen, AND person_id=? trifft nur die eigenen Zeilen.
+            conn.execute('UPDATE wealth_accounts SET name=?, type=? WHERE id=? AND person_id=?',
+                         (name, typ, rid, eigene_person_id))
+        else:
+            cur = conn.execute(
+                'INSERT INTO wealth_accounts (person_id, name, type) VALUES (?,?,?)',
+                (eigene_person_id, name, typ))
+            ck = r.get('client_key')
+            if ck:
+                id_map[str(ck)] = cur.lastrowid
+
+    conn.commit()
+    accounts = _wealth_data(conn, eigene_person_id)['accounts']
+    conn.close()
+    return jsonify({'success': True, 'id_map': id_map, 'accounts': accounts})
+
+def _wealth_balance_ok(raw):
+    """Saldo aus Client-Eingabe: echte Zahl (kein bool), endlich, Betrag < 1e12.
+
+    int-Vergleiche gehen auch bei riesigen Werten (math.isfinite taete das
+    nicht: OverflowError), daher nur bei float auf endlich pruefen.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return False
+    if isinstance(raw, float) and not math.isfinite(raw):
+        return False
+    return abs(raw) < 1e12
+
+
+def _wealth_date_ok(raw):
+    """Genau JJJJ-MM-TT, existierendes Datum, nicht nach heute (Server-Datum)."""
+    if not isinstance(raw, str) or len(raw) != 10:
+        return False
+    try:
+        parsed = datetime.strptime(raw, '%Y-%m-%d')
+    except ValueError:
+        return False
+    # strptime nimmt auch '2026-1-5' an; der Rundlauf erzwingt die feste Form.
+    if parsed.strftime('%Y-%m-%d') != raw:
+        return False
+    return parsed.date() <= datetime.now().date()
+
+
+@main_bp.route('/api/wealth/balances/save', methods=['POST'])
+@login_required
+def save_wealth_balances():
+    d = request.get_json(silent=True)
+    stale = _require_v2(d)
+    if stale:
+        return stale
+    entries = d.get('entries') or []
+    deleted = d.get('deleted') or []
+    if not isinstance(entries, list) or not isinstance(deleted, list):
+        return jsonify(success=False, error=t('srv.stale_client')), 409
+    eigene_person_id = g.current_user['person_id']
+    if eigene_person_id is None:
+        return jsonify(success=False, error=t('srv.account_not_linked')), 400
+
+    # Die gesamte Nutzlast wird geprueft, bevor irgendetwas geschrieben wird.
+    datum = d.get('date')
+    if entries and not _wealth_date_ok(datum):
+        return jsonify(success=False, error=t('srv.wealth_invalid_date')), 400
+    for e in entries:
+        if isinstance(e, dict) and not _wealth_balance_ok(e.get('balance')):
+            return jsonify(success=False, error=t('srv.wealth_invalid_balance')), 400
+
+    conn = get_db()
+    eigene_konten = {r['id'] for r in conn.execute(
+        'SELECT id FROM wealth_accounts WHERE person_id=?', (eigene_person_id,))}
+    for dl in deleted:
+        if not isinstance(dl, dict):
+            continue
+        aid = _wealth_id(dl.get('account_id'))
+        bdate = dl.get('balance_date')
+        if aid is None or not isinstance(bdate, str):
+            continue
+        # Join auf person_id: ein fremdes Konto bleibt still unberuehrt.
+        conn.execute(
+            'DELETE FROM wealth_balances WHERE account_id=? AND balance_date=? '
+            'AND account_id IN (SELECT id FROM wealth_accounts WHERE person_id=?)',
+            (aid, bdate, eigene_person_id))
+
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        aid = _wealth_id(e.get('account_id'))
+        # Nur Konten der eigenen Person; alles andere wird still uebersprungen.
+        if aid is None or aid not in eigene_konten:
+            continue
+        conn.execute(
+            'INSERT INTO wealth_balances (account_id, balance_date, balance) VALUES (?,?,?) '
+            'ON CONFLICT(account_id, balance_date) DO UPDATE SET balance=excluded.balance',
+            # Auf Cent runden (+ 0.0 macht aus -0.0 ein positives Null), damit
+            # das Gespeicherte der Anzeige entspricht.
+            (aid, datum, round(e['balance'], 2) + 0.0))
+
+    conn.commit()
+    wealth = _wealth_data(conn, eigene_person_id)
+    conn.close()
+    return jsonify({'success': True, 'wealth': wealth})
+
 @main_bp.route('/api/recurring/for-month/<int:year>/<int:month>')
 @login_required
 def recurring_for_month(year, month):
@@ -2767,6 +2947,64 @@ def debug_overview():
         structured.setdefault(pn, {}).setdefault(mk2, {})[cn] = r['total']
     conn.close()
     return jsonify({'status': 'use /overview for full data'})
+
+def _wealth_data(conn, person_id):
+    """Nettovermoegen einer Person: aktueller Stand je Konto, Summen, Verlauf.
+
+    Liest nur Konten und Salden der uebergebenen Person. Pro Konto zaehlt der
+    juengste Eintrag; ein Konto ohne Eintrag zaehlt 0. Der Verlauf hat einen
+    Punkt je Stichtag, an dem mindestens ein Eintrag existiert; jedes Konto
+    geht dort mit seinem letzten Stand bis zu diesem Datum ein (0 davor).
+    """
+    konten = conn.execute(
+        'SELECT id, name, type FROM wealth_accounts WHERE person_id=? ORDER BY id',
+        (person_id,)).fetchall()
+    kind = {k['id']: WEALTH_TYPES.get(k['type'], 'asset') for k in konten}
+    rows = conn.execute(
+        'SELECT b.account_id, b.balance_date, b.balance '
+        'FROM wealth_balances b JOIN wealth_accounts a ON a.id=b.account_id '
+        'WHERE a.person_id=? ORDER BY b.balance_date, b.account_id',
+        (person_id,)).fetchall()
+
+    # Ein Lauf in aufsteigender Datumsfolge; letzter Stand je Konto laeuft mit.
+    stand = {}      # account_id -> (balance_date, balance)
+    series = []
+    i = 0
+    while i < len(rows):
+        datum = rows[i]['balance_date']
+        while i < len(rows) and rows[i]['balance_date'] == datum:
+            stand[rows[i]['account_id']] = (datum, rows[i]['balance'])
+            i += 1
+        assets = sum(b for aid, (_, b) in stand.items() if kind[aid] == 'asset')
+        debts = sum(b for aid, (_, b) in stand.items() if kind[aid] == 'debt')
+        series.append({'date': datum,
+                       'assets': round(assets, 2),
+                       'debts': round(debts, 2),
+                       'net_worth': round(assets - debts, 2)})
+
+    accounts = []
+    total_assets = total_debts = 0.0
+    for k in konten:
+        datum, saldo = stand.get(k['id'], (None, 0.0))
+        if kind[k['id']] == 'asset':
+            total_assets += saldo
+        else:
+            total_debts += saldo
+        accounts.append({'id': k['id'], 'name': k['name'], 'type': k['type'],
+                         'kind': kind[k['id']], 'balance': saldo,
+                         'balance_date': datum})
+
+    entries = [{'account_id': r['account_id'], 'balance_date': r['balance_date'],
+                'balance': r['balance']} for r in reversed(rows)]
+    return {
+        'accounts': accounts,
+        'total_assets': round(total_assets, 2),
+        'total_debts': round(total_debts, 2),
+        'net_worth': round(total_assets - total_debts, 2),
+        'series': series,
+        'entries': entries,
+    }
+
 
 def _overview_daten(conn):
     """Berechnet alle Kennzahlen der Übersichtsseite für ALLE Personen.
@@ -3075,9 +3313,14 @@ def profile():
     eigene_wiederkehrende = [dict(r) for r in conn.execute(
         'SELECT * FROM recurring_expenses WHERE person_id=? ORDER BY id', (person_id,))]
     alle_kategorien = [dict(r) for r in conn.execute('SELECT * FROM categories ORDER BY name')]
+    # Nettovermoegen: streng persoenlich, nur die Konten der eigenen Person.
+    vermoegen = _wealth_data(conn, person_id)
     conn.close()
 
     return render_template('profile.html', active='profile', unlinked=False,
+        wealth=vermoegen, wealth_types=WEALTH_TYPES,
+        wealth_names={a['id']: a['name'] for a in vermoegen['accounts']},
+        wealth_today=datetime.now().date().isoformat(),
         person=person, person_name=pn, month_names=MONTH_NAMES,
         person_totals=eigene_totale, person_totals_by_year=eigene_jahre,
         profile_chart_json=eigenes_chart_json,
@@ -3673,7 +3916,7 @@ class _SicherungAbgelehnt(Exception):
 _EIGENE_TABELLEN = frozenset({
     'users', 'persons', 'categories', 'expenses', 'month_status',
     'recurring_expenses', 'income', 'category_splits', 'push_subscriptions',
-    'activity', 'presence', 'app_meta',
+    'activity', 'presence', 'app_meta', 'wealth_accounts', 'wealth_balances',
 })
 _EIGENE_INDIZES = frozenset({
     'idx_users_person', 'idx_expenses_year_month', 'idx_expenses_person_id',

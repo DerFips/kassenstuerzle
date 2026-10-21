@@ -25,7 +25,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from app import create_app                      # noqa: E402
 from app.routes import main as main_module       # noqa: E402
 
-_CLEANUP_TABLES = ('expenses', 'income', 'persons', 'categories',
+_CLEANUP_TABLES = ('wealth_balances', 'wealth_accounts',
+                   'expenses', 'income', 'persons', 'categories',
                    'recurring_expenses', 'category_splits', 'month_status',
                    'activity', 'presence')
 
