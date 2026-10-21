@@ -2577,6 +2577,67 @@ def save_recurring():
     return jsonify({'success': True, 'recurring': result,
                     'id_map': id_map, 'activity_version': activity_version})
 
+@main_bp.route('/api/wealth/accounts/save', methods=['POST'])
+@login_required
+def save_wealth_accounts():
+    d = request.get_json(silent=True)
+    stale = _require_v2(d)
+    if stale:
+        return stale
+    rows = d.get('rows') or []
+    deleted_ids = d.get('deleted_ids') or []
+    if not isinstance(rows, list) or not isinstance(deleted_ids, list):
+        return jsonify(success=False, error=t('srv.stale_client')), 409
+    eigene_person_id = g.current_user['person_id']
+    if eigene_person_id is None:
+        return jsonify(success=False, error=t('srv.account_not_linked')), 400
+
+    conn = get_db()
+    id_map = {}
+
+    for raw in deleted_ids:
+        try:
+            did = int(raw)
+        except (TypeError, ValueError):
+            continue
+        # AND person_id=?: ein fremdes Konto bleibt still unberuehrt.
+        conn.execute('DELETE FROM wealth_accounts WHERE id=? AND person_id=?',
+                     (did, eigene_person_id))
+
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        name = r.get('name')
+        typ = r.get('type')
+        if not isinstance(name, str) or not isinstance(typ, str):
+            continue
+        name = name.strip()
+        if not name or len(name) > 60 or typ not in WEALTH_TYPES:
+            continue
+        rid = None
+        if r.get('id') not in (None, ''):
+            try:
+                rid = int(r['id'])
+            except (TypeError, ValueError):
+                continue
+        if rid is not None:
+            # person_id steht bewusst nicht in SET: ein Konto laesst sich nicht
+            # umhaengen, AND person_id=? trifft nur die eigenen Zeilen.
+            conn.execute('UPDATE wealth_accounts SET name=?, type=? WHERE id=? AND person_id=?',
+                         (name, typ, rid, eigene_person_id))
+        else:
+            cur = conn.execute(
+                'INSERT INTO wealth_accounts (person_id, name, type) VALUES (?,?,?)',
+                (eigene_person_id, name, typ))
+            ck = r.get('client_key')
+            if ck:
+                id_map[str(ck)] = cur.lastrowid
+
+    conn.commit()
+    accounts = _wealth_data(conn, eigene_person_id)['accounts']
+    conn.close()
+    return jsonify({'success': True, 'id_map': id_map, 'accounts': accounts})
+
 @main_bp.route('/api/recurring/for-month/<int:year>/<int:month>')
 @login_required
 def recurring_for_month(year, month):

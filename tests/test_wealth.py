@@ -144,3 +144,110 @@ def test_eintraege_absteigend_nach_datum(db, person):
     assert [e['balance_date'] for e in eintraege] == [
         '2026-03-31', '2026-02-28', '2026-01-31']
     assert set(eintraege[0]) == {'account_id', 'balance_date', 'balance'}
+
+
+# ── POST /api/wealth/accounts/save ────────────────────────────────────────────
+def _post_konten(client, csrf, **payload):
+    body = {'v': 2, 'rows': [], 'deleted_ids': []}
+    body.update(payload)
+    return client.post('/api/wealth/accounts/save', json=body,
+                       headers={'X-CSRF-Token': csrf})
+
+
+def _fremde_person(db, name='Bob'):
+    pid = db.execute('INSERT INTO persons (name) VALUES (?)', (name,)).lastrowid
+    db.commit()
+    return pid
+
+
+def test_konten_anlegen_person_aus_session(auth_client, csrf, db, person):
+    fremd = _fremde_person(db)
+    res = _post_konten(auth_client, csrf, rows=[
+        {'client_key': 'a', 'name': 'Giro', 'type': 'checking', 'person_id': fremd}])
+    assert res.status_code == 200
+    daten = res.get_json()
+    assert daten['success'] is True
+    kid = daten['id_map']['a']
+    zeile = db.execute('SELECT person_id, name, type FROM wealth_accounts WHERE id=?',
+                       (kid,)).fetchone()
+    assert zeile['person_id'] == person
+    assert (zeile['name'], zeile['type']) == ('Giro', 'checking')
+    assert [a['id'] for a in daten['accounts']] == [kid]
+    assert db.execute('SELECT COUNT(*) FROM wealth_accounts WHERE person_id=?',
+                      (fremd,)).fetchone()[0] == 0
+
+
+def test_konten_aendern_behaelt_person(auth_client, csrf, db, person):
+    fremd = _fremde_person(db)
+    kid = _konto(db, person, 'Giro', 'checking')
+    res = _post_konten(auth_client, csrf, rows=[
+        {'id': kid, 'name': 'Tagesgeld', 'type': 'savings', 'person_id': fremd}])
+    assert res.status_code == 200
+    zeile = db.execute('SELECT person_id, name, type FROM wealth_accounts WHERE id=?',
+                       (kid,)).fetchone()
+    assert (zeile['person_id'], zeile['name'], zeile['type']) == (
+        person, 'Tagesgeld', 'savings')
+
+
+def test_fremdes_konto_unantastbar(auth_client, csrf, db, person):
+    fremd = _fremde_person(db)
+    fremdes = _konto(db, fremd, 'Fremdkonto', 'checking')
+    _saldo(db, fremdes, '2026-01-31', 500.0)
+
+    res = _post_konten(auth_client, csrf, rows=[
+        {'id': fremdes, 'name': 'Gekapert', 'type': 'loan'}])
+    assert res.status_code == 200
+    zeile = db.execute('SELECT person_id, name, type FROM wealth_accounts WHERE id=?',
+                       (fremdes,)).fetchone()
+    assert (zeile['person_id'], zeile['name'], zeile['type']) == (
+        fremd, 'Fremdkonto', 'checking')
+
+    res = _post_konten(auth_client, csrf, deleted_ids=[fremdes])
+    assert res.status_code == 200
+    zeile = db.execute('SELECT person_id, name FROM wealth_accounts WHERE id=?',
+                       (fremdes,)).fetchone()
+    assert zeile is not None
+    assert (zeile['person_id'], zeile['name']) == (fremd, 'Fremdkonto')
+    assert db.execute('SELECT COUNT(*) FROM wealth_balances WHERE account_id=?',
+                      (fremdes,)).fetchone()[0] == 1
+    # Die Antwort verraet nichts ueber das fremde Konto.
+    assert res.get_json()['accounts'] == []
+
+
+def test_ungueltige_zeilen_uebersprungen(auth_client, csrf, db, person):
+    res = _post_konten(auth_client, csrf, rows=[
+        {'client_key': 'ok', 'name': '  Giro  ', 'type': 'checking'},
+        {'client_key': 'typ', 'name': 'X', 'type': 'xyz'},
+        {'client_key': 'leer', 'name': '   ', 'type': 'checking'},
+        {'client_key': 'lang', 'name': 'a' * 61, 'type': 'checking'},
+        {'id': 'abc', 'name': 'Boese', 'type': 'checking'},
+    ])
+    assert res.status_code == 200
+    assert list(res.get_json()['id_map']) == ['ok']
+    namen = [r['name'] for r in db.execute('SELECT name FROM wealth_accounts')]
+    assert namen == ['Giro']
+
+
+def test_konto_ohne_person_400(auth_client, csrf, db):
+    res = _post_konten(auth_client, csrf, rows=[
+        {'client_key': 'a', 'name': 'Giro', 'type': 'checking'}])
+    assert res.status_code == 400
+    assert db.execute('SELECT COUNT(*) FROM wealth_accounts').fetchone()[0] == 0
+
+
+def test_alte_payload_409(auth_client, csrf, db, person):
+    res = auth_client.post('/api/wealth/accounts/save',
+                           json=[{'name': 'Giro', 'type': 'checking'}],
+                           headers={'X-CSRF-Token': csrf})
+    assert res.status_code == 409
+    assert db.execute('SELECT COUNT(*) FROM wealth_accounts').fetchone()[0] == 0
+
+
+def test_name_wird_woertlich_gespeichert(auth_client, csrf, db, person):
+    name = '<img src=x onerror=alert(1)>${fetch(1)}'
+    res = _post_konten(auth_client, csrf, rows=[
+        {'client_key': 'a', 'name': name, 'type': 'checking'}])
+    assert res.status_code == 200
+    kid = res.get_json()['id_map']['a']
+    assert db.execute('SELECT name FROM wealth_accounts WHERE id=?',
+                      (kid,)).fetchone()['name'] == name
