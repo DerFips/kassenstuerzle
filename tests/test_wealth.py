@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 import pytest
 
 from app.routes.main import WEALTH_TYPES, _wealth_data
@@ -288,3 +290,208 @@ def test_infinity_als_id_wird_uebersprungen(auth_client, csrf, db, person):
     assert res.status_code == 200
     assert _konten_namen(db) == ['Eigen']
     assert db.execute('SELECT id FROM wealth_accounts').fetchone()['id'] == eigen
+
+
+# ── POST /api/wealth/balances/save ────────────────────────────────────────────
+def _post_salden(client, csrf, **payload):
+    body = {'v': 2, 'entries': [], 'deleted': []}
+    body.update(payload)
+    return client.post('/api/wealth/balances/save', json=body,
+                       headers={'X-CSRF-Token': csrf})
+
+
+def _post_salden_roh(client, csrf, body):
+    """Rohtext-Body, damit auch NaN/Infinity (kein gueltiges JSON, aber von
+    Pythons Parser akzeptiert) ankommen."""
+    return client.post('/api/wealth/balances/save', data=body,
+                       content_type='application/json',
+                       headers={'X-CSRF-Token': csrf})
+
+
+def _salden(db):
+    return [(r['account_id'], r['balance_date'], r['balance']) for r in db.execute(
+        'SELECT account_id, balance_date, balance FROM wealth_balances '
+        'ORDER BY account_id, balance_date')]
+
+
+def test_saldo_upsert_gleicher_tag_ueberschreibt(auth_client, csrf, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    for betrag in (100, 150):
+        res = _post_salden(auth_client, csrf, date='2026-10-01',
+                           entries=[{'account_id': giro, 'balance': betrag}])
+        assert res.status_code == 200
+    assert _salden(db) == [(giro, '2026-10-01', 150)]
+
+
+def test_saldo_negativ_bei_vermoegen_erlaubt(auth_client, csrf, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    res = _post_salden(auth_client, csrf, date='2026-10-01',
+                       entries=[{'account_id': giro, 'balance': -20.5}])
+    assert res.status_code == 200
+    assert _salden(db) == [(giro, '2026-10-01', -20.5)]
+
+
+def test_saldo_fremdes_konto_still_uebersprungen(auth_client, csrf, db, person):
+    fremd = _fremde_person(db)
+    fremdes = _konto(db, fremd, 'Fremd', 'checking')
+    eigenes = _konto(db, person, 'Eigen', 'checking')
+    _saldo(db, fremdes, '2026-01-31', 500)
+    res = _post_salden(auth_client, csrf, date='2026-10-01', entries=[
+        {'account_id': fremdes, 'balance': 1},
+        {'account_id': eigenes, 'balance': 2}])
+    assert res.status_code == 200
+    # Nur der eigene Eintrag kommt dazu; am fremden Konto aendert sich nichts.
+    assert _salden(db) == [(fremdes, '2026-01-31', 500),
+                           (eigenes, '2026-10-01', 2)]
+
+
+def test_saldo_loeschen_nur_eigene(auth_client, csrf, db, person):
+    fremd = _fremde_person(db)
+    fremdes = _konto(db, fremd, 'Fremd', 'checking')
+    eigenes = _konto(db, person, 'Eigen', 'checking')
+    _saldo(db, fremdes, '2026-01-31', 500)
+    _saldo(db, eigenes, '2026-01-31', 100)
+    res = _post_salden(auth_client, csrf, deleted=[
+        {'account_id': fremdes, 'balance_date': '2026-01-31'},
+        {'account_id': eigenes, 'balance_date': '2026-01-31'}])
+    assert res.status_code == 200
+    assert _salden(db) == [(fremdes, '2026-01-31', 500)]
+
+
+@pytest.mark.parametrize('datum', ['2026-13-40', '21.10.2026', '', '2026-1-5', None, 20261021])
+def test_ungueltiges_datum_400_nichts_geschrieben(auth_client, csrf, db, person, datum):
+    giro = _konto(db, person, 'Giro', 'checking')
+    res = _post_salden(auth_client, csrf, date=datum,
+                       entries=[{'account_id': giro, 'balance': 10}])
+    assert res.status_code == 400
+    assert res.get_json()['success'] is False
+    assert _salden(db) == []
+
+
+def test_heute_erlaubt_morgen_abgewiesen(auth_client, csrf, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    heute = datetime.now().date()
+    entry = [{'account_id': giro, 'balance': 10}]
+    res = _post_salden(auth_client, csrf, date=heute.isoformat(), entries=entry)
+    assert res.status_code == 200
+    res = _post_salden(auth_client, csrf, date=(heute + timedelta(days=1)).isoformat(),
+                       entries=entry)
+    assert res.status_code == 400
+    assert _salden(db) == [(giro, heute.isoformat(), 10)]
+
+
+def test_datum_nur_bei_eintraegen_noetig(auth_client, csrf, db, person):
+    res = _post_salden(auth_client, csrf, date='kaputt')
+    assert res.status_code == 200
+    res = _post_salden(auth_client, csrf)
+    assert res.status_code == 200
+
+
+@pytest.mark.parametrize('wert', ['NaN', 'Infinity', '-Infinity', '1e12', '-1e12',
+                                  '1e300', '10000000000000000000000'])
+def test_nan_infinity_zu_gross_400(auth_client, csrf, db, person, wert):
+    giro = _konto(db, person, 'Giro', 'checking')
+    body = ('{"v": 2, "date": "2026-10-01", "entries": ['
+            '{"account_id": %d, "balance": 5}, {"account_id": %d, "balance": %s}]}'
+            % (giro, giro, wert))
+    res = _post_salden_roh(auth_client, csrf, body)
+    assert res.status_code == 400
+    assert _salden(db) == []
+
+
+@pytest.mark.parametrize('wert', ['abc', None, True, False, [], {}, '12'])
+def test_saldo_nicht_numerisch_400(auth_client, csrf, db, person, wert):
+    giro = _konto(db, person, 'Giro', 'checking')
+    res = _post_salden(auth_client, csrf, date='2026-10-01', entries=[
+        {'account_id': giro, 'balance': 5}, {'account_id': giro, 'balance': wert}])
+    assert res.status_code == 400
+    assert _salden(db) == []
+
+
+def test_saldo_ungueltig_bei_fremdem_konto_ebenfalls_400(auth_client, csrf, db, person):
+    fremdes = _konto(db, _fremde_person(db), 'Fremd', 'checking')
+    res = _post_salden(auth_client, csrf, date='2026-10-01',
+                       entries=[{'account_id': fremdes, 'balance': 'abc'}])
+    assert res.status_code == 400
+
+
+def test_grenzwert_knapp_unter_1e12_erlaubt(auth_client, csrf, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    res = _post_salden(auth_client, csrf, date='2026-10-01',
+                       entries=[{'account_id': giro, 'balance': 999999999999.99}])
+    assert res.status_code == 200
+    assert _salden(db) == [(giro, '2026-10-01', 999999999999.99)]
+
+
+def test_account_id_ungueltig_uebersprungen(auth_client, csrf, db, person):
+    _konto(db, person, 'Giro', 'checking')
+    res = _post_salden(auth_client, csrf, date='2026-10-01', entries=[
+        {'account_id': 'x', 'balance': 1},
+        {'account_id': None, 'balance': 1},
+        {'balance': 1},
+        {'account_id': True, 'balance': 1},
+        {'account_id': 1.0, 'balance': 1},
+        {'account_id': 10**30, 'balance': 1},
+        {'account_id': 0, 'balance': 1},
+        'kein dict', None, 7])
+    assert res.status_code == 200
+    assert _salden(db) == []
+
+
+def test_ungueltige_ids_und_paare_in_deleted_uebersprungen(auth_client, csrf, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    _saldo(db, giro, '2026-01-31', 100)
+    body = ('{"v": 2, "deleted": [{"account_id": Infinity, "balance_date": "2026-01-31"},'
+            ' {"account_id": %d, "balance_date": ["2026-01-31"]},'
+            ' {"account_id": %d, "balance_date": null}, {"account_id": %d},'
+            ' {"account_id": true, "balance_date": "2026-01-31"},'
+            ' {"account_id": 1e30, "balance_date": "2026-01-31"}, 5, null]}'
+            % (giro, giro, giro))
+    res = _post_salden_roh(auth_client, csrf, body)
+    assert res.status_code == 200
+    assert _salden(db) == [(giro, '2026-01-31', 100)]
+
+
+def test_antwort_enthaelt_vermoegensdaten(auth_client, csrf, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    hyp = _konto(db, person, 'Hypothek', 'mortgage')
+    res = _post_salden(auth_client, csrf, date='2026-10-01', entries=[
+        {'account_id': giro, 'balance': 1000.5}, {'account_id': hyp, 'balance': 400}])
+    assert res.status_code == 200
+    daten = res.get_json()
+    assert daten['success'] is True
+    assert daten['wealth']['net_worth'] == 600.5
+    assert daten['wealth']['series'][-1]['date'] == '2026-10-01'
+
+
+def test_salden_ohne_person_400(auth_client, csrf, db):
+    res = _post_salden(auth_client, csrf, date='2026-10-01',
+                       entries=[{'account_id': 1, 'balance': 1}])
+    assert res.status_code == 400
+    assert _salden(db) == []
+
+
+def test_salden_alte_payload_409(auth_client, csrf, db, person):
+    res = auth_client.post('/api/wealth/balances/save',
+                           json=[{'account_id': 1, 'balance': 1}],
+                           headers={'X-CSRF-Token': csrf})
+    assert res.status_code == 409
+    res = auth_client.post('/api/wealth/balances/save',
+                           json={'date': '2026-10-01', 'entries': []},
+                           headers={'X-CSRF-Token': csrf})
+    assert res.status_code == 409
+
+
+def test_salden_falsche_listentypen_409(auth_client, csrf, db, person):
+    res = _post_salden(auth_client, csrf, entries={'a': 1})
+    assert res.status_code == 409
+    res = _post_salden(auth_client, csrf, deleted='x')
+    assert res.status_code == 409
+
+
+def test_client_person_id_wird_ignoriert(auth_client, csrf, db, person):
+    fremdes = _konto(db, _fremde_person(db), 'Fremd', 'checking')
+    res = _post_salden(auth_client, csrf, date='2026-10-01', person_id=person,
+                       entries=[{'account_id': fremdes, 'balance': 1, 'person_id': person}])
+    assert res.status_code == 200
+    assert _salden(db) == []

@@ -6,6 +6,7 @@ import secrets
 from flask import Flask, render_template, request, jsonify, Response, redirect, url_for
 import os
 import re as _re_modul
+import math
 # SQLCipher Drop-in: verschlüsselte SQLite-Datenbank
 # Fallback auf Standard-sqlite3 wenn sqlcipher3 nicht installiert ist
 try:
@@ -2647,6 +2648,89 @@ def save_wealth_accounts():
     accounts = _wealth_data(conn, eigene_person_id)['accounts']
     conn.close()
     return jsonify({'success': True, 'id_map': id_map, 'accounts': accounts})
+
+def _wealth_balance_ok(raw):
+    """Saldo aus Client-Eingabe: echte Zahl (kein bool), endlich, Betrag < 1e12.
+
+    int-Vergleiche gehen auch bei riesigen Werten (math.isfinite taete das
+    nicht: OverflowError), daher nur bei float auf endlich pruefen.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return False
+    if isinstance(raw, float) and not math.isfinite(raw):
+        return False
+    return abs(raw) < 1e12
+
+
+def _wealth_date_ok(raw):
+    """Genau JJJJ-MM-TT, existierendes Datum, nicht nach heute (Server-Datum)."""
+    if not isinstance(raw, str) or len(raw) != 10:
+        return False
+    try:
+        parsed = datetime.strptime(raw, '%Y-%m-%d')
+    except ValueError:
+        return False
+    # strptime nimmt auch '2026-1-5' an; der Rundlauf erzwingt die feste Form.
+    if parsed.strftime('%Y-%m-%d') != raw:
+        return False
+    return parsed.date() <= datetime.now().date()
+
+
+@main_bp.route('/api/wealth/balances/save', methods=['POST'])
+@login_required
+def save_wealth_balances():
+    d = request.get_json(silent=True)
+    stale = _require_v2(d)
+    if stale:
+        return stale
+    entries = d.get('entries') or []
+    deleted = d.get('deleted') or []
+    if not isinstance(entries, list) or not isinstance(deleted, list):
+        return jsonify(success=False, error=t('srv.stale_client')), 409
+    eigene_person_id = g.current_user['person_id']
+    if eigene_person_id is None:
+        return jsonify(success=False, error=t('srv.account_not_linked')), 400
+
+    # Die gesamte Nutzlast wird geprueft, bevor irgendetwas geschrieben wird.
+    datum = d.get('date')
+    if entries and not _wealth_date_ok(datum):
+        return jsonify(success=False, error=t('srv.wealth_invalid_date')), 400
+    for e in entries:
+        if isinstance(e, dict) and not _wealth_balance_ok(e.get('balance')):
+            return jsonify(success=False, error=t('srv.wealth_invalid_balance')), 400
+
+    conn = get_db()
+    eigene_konten = {r['id'] for r in conn.execute(
+        'SELECT id FROM wealth_accounts WHERE person_id=?', (eigene_person_id,))}
+    for dl in deleted:
+        if not isinstance(dl, dict):
+            continue
+        aid = _wealth_id(dl.get('account_id'))
+        bdate = dl.get('balance_date')
+        if aid is None or not isinstance(bdate, str):
+            continue
+        # Join auf person_id: ein fremdes Konto bleibt still unberuehrt.
+        conn.execute(
+            'DELETE FROM wealth_balances WHERE account_id=? AND balance_date=? '
+            'AND account_id IN (SELECT id FROM wealth_accounts WHERE person_id=?)',
+            (aid, bdate, eigene_person_id))
+
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        aid = _wealth_id(e.get('account_id'))
+        # Nur Konten der eigenen Person; alles andere wird still uebersprungen.
+        if aid is None or aid not in eigene_konten:
+            continue
+        conn.execute(
+            'INSERT INTO wealth_balances (account_id, balance_date, balance) VALUES (?,?,?) '
+            'ON CONFLICT(account_id, balance_date) DO UPDATE SET balance=excluded.balance',
+            (aid, datum, e['balance']))
+
+    conn.commit()
+    wealth = _wealth_data(conn, eigene_person_id)
+    conn.close()
+    return jsonify({'success': True, 'wealth': wealth})
 
 @main_bp.route('/api/recurring/for-month/<int:year>/<int:month>')
 @login_required
