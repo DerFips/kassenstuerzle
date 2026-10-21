@@ -883,13 +883,48 @@ const WEALTH_TODAY = {{ wealth_today | tojson }};
     refreshEmptyHints();
   });
 
-  // Konten speichern (Anlegen, Umbenennen, Typ, Loeschen).
+  // Liest die eingetippten Salden. Gibt null zurueck (nach einem Hinweis),
+  // wenn etwas nicht lesbar oder das Datum ungueltig ist, sonst die
+  // geaenderten Zeilen als [{row, balance}]. Leere Felder und unveraenderte
+  // Werte zaehlen nicht. Der Browser liefert bei nicht lesbarer Eingabe (z.B.
+  // 1.234,56) einen leeren Wert; das darf nicht als "leer gelassen" durchgehen.
+  function readBalanceChanges() {
+    const changes = [];
+    for (const row of list.querySelectorAll('.wealth-row')) {
+      const input = row.querySelector('.wealth-balance');
+      if (input.validity.badInput) {
+        showToast(t('srv.wealth_invalid_balance'), 'danger');
+        return null;
+      }
+      const raw = input.value.trim();
+      if (raw === '') continue;
+      const balance = Number(raw);
+      if (!Number.isFinite(balance) || Math.abs(balance) >= 1e12) {
+        showToast(t('srv.wealth_invalid_balance'), 'danger');
+        return null;
+      }
+      if (balance === Number(row.dataset.initial)) continue;
+      changes.push({row: row, balance: balance === 0 ? 0 : balance});
+    }
+    if (changes.length && (!dateInput.value || dateInput.value > today)) {
+      showToast(t('srv.wealth_invalid_date'), 'danger');
+      return null;
+    }
+    return changes;
+  }
+
+  // Konten speichern (Anlegen, Umbenennen, Typ, Loeschen). Eingetippte Salden
+  // werden gleich mitgespeichert, damit ein neues Konto nicht ohne Betrag
+  // wieder auftaucht.
   document.getElementById('wealthSaveAccountsBtn').addEventListener('click', () => guarded(async () => {
     const rowEls = [...list.querySelectorAll('.wealth-row')];
     if (rowEls.some(r => !r.querySelector('.wealth-name').value.trim())) {
       showToast(t('wealth.toast_name_required'), 'danger');
       return;
     }
+    // Vor dem Senden pruefen, damit nichts halb gespeichert wird.
+    const changes = readBalanceChanges();
+    if (changes === null) return;
     const rows = rowEls.map(r => {
       const ident = r.dataset.id ? {id: parseInt(r.dataset.id, 10)} : {client_key: r.dataset.clientKey};
       return Object.assign(ident, {
@@ -900,6 +935,30 @@ const WEALTH_TODAY = {{ wealth_today | tojson }};
     const d = await postJson('/api/wealth/accounts/save',
                              {v: 2, rows: rows, deleted_ids: wealthPendingDeletes.slice()});
     if (!d.success) { reportError(d); return; }
+    wealthPendingDeletes.length = 0;
+    const idMap = d.id_map || {};
+    if (changes.length) {
+      const entries = [];
+      for (const c of changes) {
+        const id = c.row.dataset.id ? Number(c.row.dataset.id) : idMap[c.row.dataset.clientKey];
+        if (Number.isInteger(id)) entries.push({account_id: id, balance: c.balance});
+      }
+      const b = await postJson('/api/wealth/balances/save',
+                               {v: 2, date: dateInput.value, entries: entries, deleted: []});
+      if (!b.success) {
+        // Die Konten sind gespeichert. Neue Zeilen bekommen ihre id, damit
+        // "Salden speichern" es erneut versuchen kann und kein Konto doppelt
+        // angelegt wird; die Seite bleibt, damit die Eingaben nicht verloren gehen.
+        rowEls.forEach(r => {
+          if (!r.dataset.id && Number.isInteger(idMap[r.dataset.clientKey])) {
+            r.dataset.id = String(idMap[r.dataset.clientKey]);
+            delete r.dataset.clientKey;
+          }
+        });
+        reportError(b);
+        return;
+      }
+    }
     showToast(t('wealth.toast_accounts_saved'), 'success');
     location.reload();
     return true;
@@ -907,42 +966,19 @@ const WEALTH_TODAY = {{ wealth_today | tojson }};
 
   // Salden speichern: nur Konten, deren Wert vom Ausgangswert abweicht.
   document.getElementById('wealthSaveBalancesBtn').addEventListener('click', () => guarded(async () => {
-    const date = dateInput.value;
-    if (!date || date > today) {
-      showToast(t('srv.wealth_invalid_date'), 'danger');
-      return;
-    }
-    const entries = [];
-    let unsaved = false;
-    for (const row of list.querySelectorAll('.wealth-row')) {
-      const input = row.querySelector('.wealth-balance');
-      // Der Browser liefert bei nicht lesbarer Eingabe (z.B. 1.234,56) einen
-      // leeren Wert; das darf nicht als "leer gelassen" durchgehen.
-      if (input.validity.badInput) {
-        showToast(t('srv.wealth_invalid_balance'), 'danger');
-        return;
-      }
-      const raw = input.value.trim();
-      if (raw === '') continue;
-      const balance = Number(raw);
-      if (!Number.isFinite(balance) || Math.abs(balance) >= 1e12) {
-        showToast(t('srv.wealth_invalid_balance'), 'danger');
-        return;
-      }
-      if (balance === Number(row.dataset.initial)) continue;
-      if (!row.dataset.id) { unsaved = true; continue; }
-      entries.push({account_id: Number(row.dataset.id), balance: balance === 0 ? 0 : balance});
-    }
-    if (unsaved) {
+    const changes = readBalanceChanges();
+    if (changes === null) return;
+    if (changes.some(c => !c.row.dataset.id)) {
       showToast(t('wealth.toast_save_accounts_first'), 'danger');
       return;
     }
-    if (!entries.length) {
+    if (!changes.length) {
       showToast(t('wealth.toast_no_changes'), 'info');
       return;
     }
+    const entries = changes.map(c => ({account_id: Number(c.row.dataset.id), balance: c.balance}));
     const d = await postJson('/api/wealth/balances/save',
-                             {v: 2, date: date, entries: entries, deleted: []});
+                             {v: 2, date: dateInput.value, entries: entries, deleted: []});
     if (!d.success) { reportError(d); return; }
     showToast(t('wealth.toast_balances_saved'), 'success');
     location.reload();

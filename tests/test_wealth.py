@@ -748,3 +748,17 @@ def test_benutzer_loeschen_entfernt_konten_und_salden_der_person(auth_client, cs
     finally:
         db.execute("DELETE FROM users WHERE username='wegfall'")
         db.commit()
+
+
+def test_konten_speichern_sichert_eingetippte_salden_mit(auth_client, person):
+    """Ein neues Konto mit eingetipptem Saldo darf beim Klick auf "Konten
+    speichern" nicht mit leerem Saldo wieder auftauchen: der Handler muss die
+    Salden lesen und nach dem Anlegen der Konten (id_map) mitschicken."""
+    html = _profil(auth_client)
+    start = html.index("getElementById('wealthSaveAccountsBtn').addEventListener")
+    ende = html.index('addEventListener', start + 60)
+    handler = html[start:ende]
+    assert 'readBalanceChanges()' in handler, 'Konten speichern liest die Saldofelder nicht'
+    assert '/api/wealth/accounts/save' in handler
+    assert '/api/wealth/balances/save' in handler, 'Salden werden nicht mitgespeichert'
+    assert 'id_map' in handler, 'neue Konten bekommen ihre id nicht aus der Antwort'
