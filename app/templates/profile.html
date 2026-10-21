@@ -93,6 +93,18 @@
      Jinja-Autoescaping, als Text oder value-Attribut; die Zeilen-IDs sind
      ganze Zahlen. Das Verhalten (Hinzufuegen, Speichern, Diagramm) haengt
      das Profil-Skript an die IDs. #}
+  {% macro type_select(selected) -%}
+  <select class="form-select wealth-type">
+    {% for grp_kind, grp_key in (('asset', 'wealth.group_assets'), ('debt', 'wealth.group_debts')) %}
+    <optgroup label="{{ t(grp_key) }}">
+      {% for key, key_kind in wealth_types.items() if key_kind == grp_kind %}
+      <option value="{{ key }}" {% if selected == key %}selected{% endif %}>{{ t('wealth.type.' ~ key) }}</option>
+      {% endfor %}
+    </optgroup>
+    {% endfor %}
+  </select>
+  {%- endmacro %}
+
   <div class="col-12">
     <div class="card shadow-sm" id="wealthCard">
       <div class="card-header py-3">
@@ -112,15 +124,7 @@
                        placeholder="{{ t('wealth.account_name_placeholder') }}">
               </div>
               <div class="col-7 col-md-4">
-                <select class="form-select wealth-type">
-                  {% for grp_kind, grp_key in (('asset', 'wealth.group_assets'), ('debt', 'wealth.group_debts')) %}
-                  <optgroup label="{{ t(grp_key) }}">
-                    {% for key, key_kind in wealth_types.items() if key_kind == grp_kind %}
-                    <option value="{{ key }}" {% if a.type == key %}selected{% endif %}>{{ t('wealth.type.' ~ key) }}</option>
-                    {% endfor %}
-                  </optgroup>
-                  {% endfor %}
-                </select>
+                {{ type_select(a.type) }}
               </div>
               <div class="col-3 col-md-3">
                 <input type="number" step="0.01" class="form-control wealth-balance text-end"
@@ -137,6 +141,26 @@
           </div>
           {% endfor %}
         </div>
+        {# Vorlage fuer neue Konten: gleiche Struktur wie eine Serverzeile, aber
+           ohne data-id, ohne Name und ohne Saldo. Das Skript klont sie. #}
+        <template id="wealthRowTemplate">
+          <div class="row g-2 mb-2 wealth-row">
+            <div class="col-12 col-md-4">
+              <input type="text" class="form-control wealth-name" maxlength="60" value=""
+                     placeholder="{{ t('wealth.account_name_placeholder') }}">
+            </div>
+            <div class="col-7 col-md-4">
+              {{ type_select('checking') }}
+            </div>
+            <div class="col-3 col-md-3">
+              <input type="number" step="0.01" class="form-control wealth-balance text-end"
+                     value="" placeholder="€">
+            </div>
+            <div class="col-2 col-md-1">
+              <button type="button" class="btn btn-outline-danger btn-sm w-100 wealth-remove-btn"><i class="bi bi-trash"></i></button>
+            </div>
+          </div>
+        </template>
         <div class="d-flex flex-wrap gap-2 mb-3">
           <button type="button" class="btn btn-outline-primary btn-sm" id="wealthAddAccountBtn">
             <i class="bi bi-plus-circle me-1"></i>{{ t('wealth.add_account') }}
@@ -188,8 +212,10 @@
           </div>
         </div>
 
-        <h6 class="text-muted small fw-semibold">{{ t('wealth.chart_title') }}</h6>
-        <canvas id="wealthChart" height="200"></canvas>
+        <div id="wealthChartWrap">
+          <h6 class="text-muted small fw-semibold">{{ t('wealth.chart_title') }}</h6>
+          <canvas id="wealthChart" height="200"></canvas>
+        </div>
       </div>
     </div>
   </div>
@@ -703,6 +729,219 @@ document.getElementById('profileSaveRecurringBtn').addEventListener('click', asy
   showToast(d.success ? t('settings.toast_recurring_saved') : t('settings.toast_error', {error: d.error||''}),
             d.success ? 'success' : 'danger');
 });
+
+// ── Nettovermoegen (streng persoenlich) ─────────────────────────────────────
+// Kontonamen laufen nur ueber value/textContent. Neue Zeilen werden aus dem
+// serverseitig gerenderten <template> geklont; es gibt hier kein innerHTML und
+// kein Template-Literal mit Nutzertexten. Nach jedem erfolgreichen Speichern
+// laedt die Seite neu, damit Kennzahl, Gruppen, Verlauf und Diagramm wieder
+// exakt dem Serverstand entsprechen.
+const WEALTH_SERIES = {{ wealth.series | tojson }};
+(function() {
+  const list = document.getElementById('wealthAccountsList');
+  const dateInput = document.getElementById('wealthDate');
+  const rowTemplate = document.getElementById('wealthRowTemplate');
+  const WEALTH_KIND = {{ wealth_types | tojson }};
+  let wealthCkSeq = 0;
+  let wealthPendingDeletes = [];
+  let wealthBusy = false;
+
+  function localToday() {
+    const d = new Date();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return d.getFullYear() + '-' + mm + '-' + dd;
+  }
+  const today = localToday();
+  dateInput.max = today;
+  dateInput.value = today;
+
+  // Ausgangswert je Saldofeld festhalten (Vergleichsbasis fuer "geaendert").
+  function rememberInitial(row) {
+    row.dataset.initial = row.querySelector('.wealth-balance').value;
+  }
+  list.querySelectorAll('.wealth-row').forEach(rememberInitial);
+
+  function groupFor(kind) {
+    return list.querySelector('.wealth-group[data-kind="' + kind + '"]');
+  }
+  // Der Hinweis "Noch keine Konten" steht nur in leeren Gruppen.
+  function refreshEmptyHints() {
+    list.querySelectorAll('.wealth-group').forEach(group => {
+      const hint = group.querySelector('.wealth-empty');
+      const hasRows = group.querySelector('.wealth-row') !== null;
+      if (hasRows && hint) {
+        hint.remove();
+      } else if (!hasRows && !hint) {
+        const div = document.createElement('div');
+        div.className = 'text-muted small wealth-empty';
+        div.textContent = t('wealth.no_accounts');
+        group.appendChild(div);
+      }
+    });
+  }
+  // Eine Zeile gehoert in die Gruppe, die zur gewaehlten Kontoart passt.
+  function placeRow(row) {
+    const kind = WEALTH_KIND[row.querySelector('.wealth-type').value] || 'asset';
+    const group = groupFor(kind);
+    if (group && row.parentElement !== group) group.appendChild(row);
+    refreshEmptyHints();
+  }
+
+  async function postJson(url, body) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)
+      });
+      return await res.json();
+    } catch (err) {
+      return {success: false, error: String(err && err.message || err)};
+    }
+  }
+  function reportError(d) {
+    showToast(t('settings.toast_error', {error: d.error || ''}), 'danger');
+  }
+  // Sperrt Doppelklicks, solange eine Anfrage laeuft.
+  async function guarded(fn) {
+    if (wealthBusy) return;
+    wealthBusy = true;
+    try { await fn(); } finally { wealthBusy = false; }
+  }
+
+  // Konto hinzufuegen: neue Zeile ohne data-id (client_key im Dataset).
+  document.getElementById('wealthAddAccountBtn').addEventListener('click', () => {
+    const row = rowTemplate.content.firstElementChild.cloneNode(true);
+    row.dataset.clientKey = 'wk' + (++wealthCkSeq);
+    rememberInitial(row);
+    groupFor('asset').appendChild(row);
+    refreshEmptyHints();
+    row.querySelector('.wealth-name').focus();
+  });
+
+  list.addEventListener('change', e => {
+    if (e.target.closest('.wealth-type')) placeRow(e.target.closest('.wealth-row'));
+  });
+  list.addEventListener('click', e => {
+    const btn = e.target.closest('.wealth-remove-btn');
+    if (!btn) return;
+    if (!confirm(t('wealth.confirm_delete_account'))) return;
+    const row = btn.closest('.wealth-row');
+    if (row.dataset.id) wealthPendingDeletes.push(parseInt(row.dataset.id, 10));
+    row.remove();
+    refreshEmptyHints();
+  });
+
+  // Konten speichern (Anlegen, Umbenennen, Typ, Loeschen).
+  document.getElementById('wealthSaveAccountsBtn').addEventListener('click', () => guarded(async () => {
+    const rowEls = [...list.querySelectorAll('.wealth-row')];
+    if (rowEls.some(r => !r.querySelector('.wealth-name').value.trim())) {
+      showToast(t('wealth.toast_name_required'), 'danger');
+      return;
+    }
+    const rows = rowEls.map(r => {
+      const ident = r.dataset.id ? {id: parseInt(r.dataset.id, 10)} : {client_key: r.dataset.clientKey};
+      return Object.assign(ident, {
+        name: r.querySelector('.wealth-name').value.trim(),
+        type: r.querySelector('.wealth-type').value
+      });
+    });
+    const d = await postJson('/api/wealth/accounts/save',
+                             {v: 2, rows: rows, deleted_ids: wealthPendingDeletes.slice()});
+    if (!d.success) { reportError(d); return; }
+    showToast(t('wealth.toast_accounts_saved'), 'success');
+    location.reload();
+  }));
+
+  // Salden speichern: nur Konten, deren Wert vom Ausgangswert abweicht.
+  document.getElementById('wealthSaveBalancesBtn').addEventListener('click', () => guarded(async () => {
+    const date = dateInput.value;
+    if (!date || date > today) {
+      showToast(t('srv.wealth_invalid_date'), 'danger');
+      return;
+    }
+    const entries = [];
+    let unsaved = false;
+    for (const row of list.querySelectorAll('.wealth-row')) {
+      const raw = row.querySelector('.wealth-balance').value.trim();
+      if (raw === '') continue;
+      const balance = Number(raw);
+      if (!Number.isFinite(balance) || Math.abs(balance) >= 1e12) {
+        showToast(t('srv.wealth_invalid_balance'), 'danger');
+        return;
+      }
+      if (balance === Number(row.dataset.initial)) continue;
+      if (!row.dataset.id) { unsaved = true; continue; }
+      entries.push({account_id: Number(row.dataset.id), balance: balance === 0 ? 0 : balance});
+    }
+    if (unsaved) {
+      showToast(t('wealth.toast_save_accounts_first'), 'danger');
+      return;
+    }
+    if (!entries.length) {
+      showToast(t('wealth.toast_no_changes'), 'info');
+      return;
+    }
+    const d = await postJson('/api/wealth/balances/save',
+                             {v: 2, date: date, entries: entries, deleted: []});
+    if (!d.success) { reportError(d); return; }
+    showToast(t('wealth.toast_balances_saved'), 'success');
+    location.reload();
+  }));
+
+  // Eintrag aus dem Verlauf loeschen (Korrektur: loeschen und neu eintragen).
+  const history = document.getElementById('wealthHistory');
+  history.addEventListener('click', e => {
+    const btn = e.target.closest('.wealth-entry-delete');
+    if (!btn) return;
+    const tr = btn.closest('.wealth-entry');
+    if (!confirm(t('wealth.confirm_delete_entry'))) return;
+    guarded(async () => {
+      const d = await postJson('/api/wealth/balances/save', {
+        v: 2, entries: [],
+        deleted: [{account_id: Number(tr.dataset.accountId), balance_date: tr.dataset.date}]
+      });
+      if (!d.success) { reportError(d); return; }
+      location.reload();
+    });
+  });
+
+  // Diagramm: Nettovermoegen kraeftig, Vermoegen und Schulden duenn. Ohne
+  // Verlauf wird der ganze Bereich ausgeblendet; ein einzelner Stichtag
+  // bleibt ueber die Punktmarker sichtbar.
+  if (!WEALTH_SERIES.length) {
+    document.getElementById('wealthChartWrap').classList.add('d-none');
+    return;
+  }
+  const euro = new Intl.NumberFormat(document.documentElement.lang || 'de',
+                                     {style: 'currency', currency: 'EUR'});
+  function line(key, label, color, width, radius) {
+    return {
+      label: label, data: WEALTH_SERIES.map(p => p[key]),
+      borderColor: color, backgroundColor: color, borderWidth: width,
+      pointRadius: radius, pointHoverRadius: radius + 2, tension: 0.15
+    };
+  }
+  new Chart(document.getElementById('wealthChart'), {
+    type: 'line',
+    data: {
+      labels: WEALTH_SERIES.map(p => p.date),
+      datasets: [
+        line('net_worth', t('profile.stat_net_worth'), '#0d6efd', 3, 4),
+        line('assets', t('profile.stat_assets'), '#198754', 1.5, 3),
+        line('debts', t('profile.stat_debts'), '#dc3545', 1.5, 3)
+      ]
+    },
+    options: {
+      responsive: true,
+      interaction: {mode: 'index', intersect: false},
+      plugins: {tooltip: {callbacks: {
+        label: ctx => ctx.dataset.label + ': ' + euro.format(ctx.parsed.y)
+      }}},
+      scales: {y: {ticks: {callback: v => euro.format(v)}}}
+    }
+  });
+})();
 </script>
 {% endif %}
 {% endblock %}

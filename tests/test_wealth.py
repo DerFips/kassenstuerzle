@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+import json
 import math
 import re
 
@@ -510,6 +511,9 @@ WEALTH_SCHLUESSEL = [
     'wealth.date_label', 'wealth.save_balances', 'wealth.history_title',
     'wealth.history_empty', 'wealth.chart_title', 'wealth.no_accounts',
     'wealth.toast_accounts_saved', 'wealth.toast_balances_saved',
+    'wealth.confirm_delete_account', 'wealth.confirm_delete_entry',
+    'wealth.toast_name_required', 'wealth.toast_save_accounts_first',
+    'wealth.toast_no_changes',
     'srv.wealth_invalid_date', 'srv.wealth_invalid_balance',
 ]
 
@@ -639,3 +643,31 @@ def test_unverknuepft_keine_karte(auth_client, db):
     html = _profil(auth_client)
     assert 'id="wealthCard"' not in html
     assert 'id="statNetWorth"' not in html
+
+
+def test_profil_enthaelt_vermoegens_skript(auth_client, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    hyp = _konto(db, person, 'Hypothek', 'mortgage')
+    _saldo(db, giro, '2026-01-31', 1000)
+    _saldo(db, hyp, '2026-01-31', 800)
+    _saldo(db, giro, '2026-02-28', 1200)
+    html = _profil(auth_client)
+    for stueck in ('wealthAddAccountBtn', '/api/wealth/accounts/save',
+                   '/api/wealth/balances/save',
+                   "new Chart(document.getElementById('wealthChart')"):
+        assert stueck in html, stueck
+    # Die Reihe kommt als JSON-Literal (tojson), nicht als zusammengebauter Text.
+    m = re.search(r'const WEALTH_SERIES = (.*?);\n', html)
+    assert m, 'const WEALTH_SERIES fehlt'
+    reihe = json.loads(m.group(1))
+    assert reihe == _wealth_data(db, person)['series']
+    assert [p['date'] for p in reihe] == ['2026-01-31', '2026-02-28']
+
+
+def test_vermoegens_skript_ids_als_zahlen_und_ohne_innerhtml(auth_client, db, person):
+    html = _profil(auth_client)
+    skript = html[html.index('const WEALTH_SERIES'):]
+    # Der Server ueberspringt String-IDs: sie muessen als Zahl gesendet werden.
+    assert 'account_id: Number(' in skript
+    assert 'innerHTML' not in skript
+    assert '<scr' + 'ipt' not in skript

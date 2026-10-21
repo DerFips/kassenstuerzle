@@ -9,6 +9,7 @@ Haushaltskasse für mehrere Personen: Ausgaben und Einnahmen pro Monat erfassen,
 - **Abrechnung**: Pro Monat wird berechnet, wer wem wie viel schuldet. Eingerechnet werden Ausgaben und Einnahmen in Split-Kategorien sowie "Bezahlt für"-Buchungen. Einnahmen in Nicht-Split-Kategorien zählen nicht zur Abrechnung, nur zur Ersparnis. Abgerechnete Monate lassen sich abschließen und wieder öffnen.
 - **Übersicht und Auswertung**: Diagramme, Summen pro Person und Jahr, Status der Monatsabrechnungen.
 - **Profil**: Jede Person hat eine eigene Seite mit ihren Kategorien, der Geldbörse (Bargeld-Startmonat und -betrag), der Monats-Matrix und ihren **wiederkehrenden Ausgaben**.
+- **Vermögen**: Jede Person führt im Profil private Konten für Vermögen und Schulden mit datierten Salden. Daraus entstehen das Nettovermögen und sein Verlauf als Diagramm. Sichtbar nur für die eigene Person, auch für Admins.
 - **Wiederkehrende Ausgaben**: Monatlich, quartalsweise oder jährlich. Jede Person verwaltet nur ihre eigenen Vorlagen, auch Admins. Im Monat fügt "Wiederkehrende" die eigenen Vorlagen ein.
 - **Import und Export**: Kontoauszug als PDF (DKB, Sparkasse, ING und weitere), CSV-Import und -Export, Beleg-Scan per OCR (Tesseract).
 - **Benutzer**: Rollen Admin und Mitglied. Jede Person hat genau ein Konto und umgekehrt. Das "Wer"-Feld einer Buchung ist immer die eigene Person und serverseitig gesperrt, "Für wen" bleibt frei wählbar.
