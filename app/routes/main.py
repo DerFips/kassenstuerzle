@@ -2791,6 +2791,64 @@ def debug_overview():
     conn.close()
     return jsonify({'status': 'use /overview for full data'})
 
+def _wealth_data(conn, person_id):
+    """Nettovermoegen einer Person: aktueller Stand je Konto, Summen, Verlauf.
+
+    Liest nur Konten und Salden der uebergebenen Person. Pro Konto zaehlt der
+    juengste Eintrag; ein Konto ohne Eintrag zaehlt 0. Der Verlauf hat einen
+    Punkt je Stichtag, an dem mindestens ein Eintrag existiert; jedes Konto
+    geht dort mit seinem letzten Stand bis zu diesem Datum ein (0 davor).
+    """
+    konten = conn.execute(
+        'SELECT id, name, type FROM wealth_accounts WHERE person_id=? ORDER BY id',
+        (person_id,)).fetchall()
+    kind = {k['id']: WEALTH_TYPES.get(k['type'], 'asset') for k in konten}
+    rows = conn.execute(
+        'SELECT b.account_id, b.balance_date, b.balance '
+        'FROM wealth_balances b JOIN wealth_accounts a ON a.id=b.account_id '
+        'WHERE a.person_id=? ORDER BY b.balance_date, b.account_id',
+        (person_id,)).fetchall()
+
+    # Ein Lauf in aufsteigender Datumsfolge; letzter Stand je Konto laeuft mit.
+    stand = {}      # account_id -> (balance_date, balance)
+    series = []
+    i = 0
+    while i < len(rows):
+        datum = rows[i]['balance_date']
+        while i < len(rows) and rows[i]['balance_date'] == datum:
+            stand[rows[i]['account_id']] = (datum, rows[i]['balance'])
+            i += 1
+        assets = sum(b for aid, (_, b) in stand.items() if kind[aid] == 'asset')
+        debts = sum(b for aid, (_, b) in stand.items() if kind[aid] == 'debt')
+        series.append({'date': datum,
+                       'assets': round(assets, 2),
+                       'debts': round(debts, 2),
+                       'net_worth': round(assets - debts, 2)})
+
+    accounts = []
+    total_assets = total_debts = 0.0
+    for k in konten:
+        datum, saldo = stand.get(k['id'], (None, 0.0))
+        if kind[k['id']] == 'asset':
+            total_assets += saldo
+        else:
+            total_debts += saldo
+        accounts.append({'id': k['id'], 'name': k['name'], 'type': k['type'],
+                         'kind': kind[k['id']], 'balance': saldo,
+                         'balance_date': datum})
+
+    entries = [{'account_id': r['account_id'], 'balance_date': r['balance_date'],
+                'balance': r['balance']} for r in reversed(rows)]
+    return {
+        'accounts': accounts,
+        'total_assets': round(total_assets, 2),
+        'total_debts': round(total_debts, 2),
+        'net_worth': round(total_assets - total_debts, 2),
+        'series': series,
+        'entries': entries,
+    }
+
+
 def _overview_daten(conn):
     """Berechnet alle Kennzahlen der Übersichtsseite für ALLE Personen.
 
