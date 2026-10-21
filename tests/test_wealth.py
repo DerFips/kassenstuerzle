@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+import math
 import re
 
 import pytest
@@ -574,11 +575,29 @@ def test_profil_mit_einem_stichtag_rendert(auth_client, db, person):
 
 
 def test_negative_null_wird_nie_als_minus_null_angezeigt(auth_client, db, person):
+    # SQLite normalisiert ein gespeichertes -0.0 zu 0.0; ein negatives Null
+    # entsteht erst in _wealth_data: round(100.00 - 100.004, 2) == -0.0.
     giro = _konto(db, person, 'Giro', 'checking')
-    _saldo(db, giro, '2026-01-31', -0.0)
+    kredit = _konto(db, person, 'Kredit', 'loan')
+    _saldo(db, giro, '2026-01-31', 100.00)
+    _saldo(db, kredit, '2026-01-31', 100.004)
+    # Vorbedingung: das Szenario liefert wirklich ein negatives Null.
+    netto = _wealth_data(db, person)['net_worth']
+    assert netto == 0 and math.copysign(1, netto) < 0
     html = _profil(auth_client)
+    klassen, text = _kennzahl(html)
+    assert text == '0.00 €'
     assert '-0.00' not in html
-    assert _kennzahl(html)[1] == '0.00 €'
+    assert 'text-danger' not in klassen and 'text-success' not in klassen
+
+
+@pytest.mark.parametrize('wert, erwartet', [
+    (-0.0, '0.00'), (-0.004, '0.00'), (0.004, '0.00'),
+    (-500, '-500.00'), (1234.5, '1234.50'),
+])
+def test_makro_money_unterdrueckt_minus_null(app, wert, erwartet):
+    macro = app.jinja_env.get_template('macros.html').module.money
+    assert str(macro(wert)).strip() == erwartet
 
 
 def test_fremde_konten_nicht_im_profil(auth_client, db, person):
