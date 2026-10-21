@@ -737,6 +737,8 @@ document.getElementById('profileSaveRecurringBtn').addEventListener('click', asy
 // laedt die Seite neu, damit Kennzahl, Gruppen, Verlauf und Diagramm wieder
 // exakt dem Serverstand entsprechen.
 const WEALTH_SERIES = {{ wealth.series | tojson }};
+const WEALTH_ENTRIES = {{ wealth.entries | tojson }};
+const WEALTH_TODAY = {{ wealth_today | tojson }};
 (function() {
   const list = document.getElementById('wealthAccountsList');
   const dateInput = document.getElementById('wealthDate');
@@ -752,15 +754,50 @@ const WEALTH_SERIES = {{ wealth.series | tojson }};
     const dd = String(d.getDate()).padStart(2, '0');
     return d.getFullYear() + '-' + mm + '-' + dd;
   }
-  const today = localToday();
+  // Heute: nie spaeter als der Serverstand, sonst weist der Server den Tag ab,
+  // wenn Browser und Server in verschiedenen Zeitzonen laufen (ISO-Strings
+  // lassen sich lexikografisch vergleichen).
+  const today = localToday() < WEALTH_TODAY ? localToday() : WEALTH_TODAY;
   dateInput.max = today;
   dateInput.value = today;
 
+  // Saldo eines Kontos zum Stichtag: juengster Eintrag am oder vor dem Datum,
+  // sonst 0. Gleiche Regel wie auf dem Server (_wealth_data).
+  function balanceAsOf(accountId, date) {
+    let bestDate = null;
+    let best = 0;
+    for (const e of WEALTH_ENTRIES) {
+      if (e.account_id === accountId && e.balance_date <= date &&
+          (bestDate === null || e.balance_date > bestDate)) {
+        bestDate = e.balance_date;
+        best = e.balance;
+      }
+    }
+    return best;
+  }
+  // Zwei Nachkommastellen; ein negatives Null wird zu 0.00 (kein Minus).
+  function formatBalance(v) {
+    return Math.abs(v) < 0.005 ? '0.00' : v.toFixed(2);
+  }
   // Ausgangswert je Saldofeld festhalten (Vergleichsbasis fuer "geaendert").
   function rememberInitial(row) {
     row.dataset.initial = row.querySelector('.wealth-balance').value;
   }
+  // Gespeicherte Konten zeigen den Stand zum gewaehlten Datum; unveraenderte
+  // Konten werden so beim Speichern nicht mit 0 an diesem Tag eingetragen.
+  // Neue, noch ungespeicherte Zeilen (ohne data-id) bleiben unangetastet.
+  function refillBalances() {
+    const date = dateInput.value;
+    if (!date) return;
+    list.querySelectorAll('.wealth-row[data-id]').forEach(row => {
+      const input = row.querySelector('.wealth-balance');
+      input.value = formatBalance(balanceAsOf(Number(row.dataset.id), date));
+      rememberInitial(row);
+    });
+  }
+  ['change', 'input'].forEach(ev => dateInput.addEventListener(ev, refillBalances));
   list.querySelectorAll('.wealth-row').forEach(rememberInitial);
+  refillBalances();
 
   function groupFor(kind) {
     return list.querySelector('.wealth-group[data-kind="' + kind + '"]');
@@ -802,11 +839,25 @@ const WEALTH_SERIES = {{ wealth.series | tojson }};
   function reportError(d) {
     showToast(t('settings.toast_error', {error: d.error || ''}), 'danger');
   }
-  // Sperrt Doppelklicks, solange eine Anfrage laeuft.
+  // Sperrt Doppelklicks, solange eine Anfrage laeuft. Gibt fn true zurueck,
+  // ist ein Reload unterwegs: die Sperre bleibt dann bis zum neuen Seitenstand
+  // bestehen (sonst liesse sich ein zweiter Klick absetzen und neue Konten
+  // doppelt anlegen). Nur bei Fehler oder frueher Rueckkehr wird sie geloest.
+  const wealthButtons = ['wealthAddAccountBtn', 'wealthSaveAccountsBtn', 'wealthSaveBalancesBtn']
+    .map(id => document.getElementById(id));
+  function setWealthButtons(disabled) {
+    wealthButtons.forEach(b => { b.disabled = disabled; });
+  }
   async function guarded(fn) {
     if (wealthBusy) return;
     wealthBusy = true;
-    try { await fn(); } finally { wealthBusy = false; }
+    setWealthButtons(true);
+    let reloading = false;
+    try {
+      reloading = (await fn()) === true;
+    } finally {
+      if (!reloading) { wealthBusy = false; setWealthButtons(false); }
+    }
   }
 
   // Konto hinzufuegen: neue Zeile ohne data-id (client_key im Dataset).
@@ -851,6 +902,7 @@ const WEALTH_SERIES = {{ wealth.series | tojson }};
     if (!d.success) { reportError(d); return; }
     showToast(t('wealth.toast_accounts_saved'), 'success');
     location.reload();
+    return true;
   }));
 
   // Salden speichern: nur Konten, deren Wert vom Ausgangswert abweicht.
@@ -863,7 +915,14 @@ const WEALTH_SERIES = {{ wealth.series | tojson }};
     const entries = [];
     let unsaved = false;
     for (const row of list.querySelectorAll('.wealth-row')) {
-      const raw = row.querySelector('.wealth-balance').value.trim();
+      const input = row.querySelector('.wealth-balance');
+      // Der Browser liefert bei nicht lesbarer Eingabe (z.B. 1.234,56) einen
+      // leeren Wert; das darf nicht als "leer gelassen" durchgehen.
+      if (input.validity.badInput) {
+        showToast(t('srv.wealth_invalid_balance'), 'danger');
+        return;
+      }
+      const raw = input.value.trim();
       if (raw === '') continue;
       const balance = Number(raw);
       if (!Number.isFinite(balance) || Math.abs(balance) >= 1e12) {
@@ -887,6 +946,7 @@ const WEALTH_SERIES = {{ wealth.series | tojson }};
     if (!d.success) { reportError(d); return; }
     showToast(t('wealth.toast_balances_saved'), 'success');
     location.reload();
+    return true;
   }));
 
   // Eintrag aus dem Verlauf loeschen (Korrektur: loeschen und neu eintragen).
@@ -895,6 +955,7 @@ const WEALTH_SERIES = {{ wealth.series | tojson }};
     const btn = e.target.closest('.wealth-entry-delete');
     if (!btn) return;
     const tr = btn.closest('.wealth-entry');
+    if (wealthBusy) return;
     if (!confirm(t('wealth.confirm_delete_entry'))) return;
     guarded(async () => {
       const d = await postJson('/api/wealth/balances/save', {
@@ -903,6 +964,7 @@ const WEALTH_SERIES = {{ wealth.series | tojson }};
       });
       if (!d.success) { reportError(d); return; }
       location.reload();
+      return true;
     });
   });
 
@@ -936,9 +998,9 @@ const WEALTH_SERIES = {{ wealth.series | tojson }};
       responsive: true,
       interaction: {mode: 'index', intersect: false},
       plugins: {tooltip: {callbacks: {
-        label: ctx => ctx.dataset.label + ': ' + euro.format(ctx.parsed.y)
+        label: ctx => ctx.dataset.label + ': ' + euro.format(ctx.parsed.y || 0)
       }}},
-      scales: {y: {ticks: {callback: v => euro.format(v)}}}
+      scales: {y: {ticks: {callback: v => euro.format(v || 0)}}}
     }
   });
 })();

@@ -671,3 +671,80 @@ def test_vermoegens_skript_ids_als_zahlen_und_ohne_innerhtml(auth_client, db, pe
     assert 'account_id: Number(' in skript
     assert 'innerHTML' not in skript
     assert '<scr' + 'ipt' not in skript
+
+
+def test_profil_enthaelt_saldenverlauf_fuer_stichtagsfelder(auth_client, db, person):
+    giro = _konto(db, person, 'Giro', 'checking')
+    haus = _konto(db, person, 'Haus', 'real_estate')
+    _saldo(db, giro, '2026-01-31', 1000)
+    _saldo(db, haus, '2026-01-31', 300000)
+    _saldo(db, giro, '2026-10-01', 1500)
+    html = _profil(auth_client)
+    m = re.search(r'const WEALTH_ENTRIES = (.*?);\n', html)
+    assert m, 'const WEALTH_ENTRIES fehlt'
+    assert json.loads(m.group(1)) == _wealth_data(db, person)['entries']
+    # Die Saldofelder werden je Stichtag aus diesen Eintraegen neu befuellt.
+    assert 'function balanceAsOf(' in html
+    assert html.count('balanceAsOf(') >= 2
+    assert 'dateInput.addEventListener(ev, refillBalances)' in html
+    # Der Standardtag kommt vom Server (WEALTH_TODAY), nicht allein vom Browser.
+    heute = datetime.now().date().isoformat()
+    assert f'const WEALTH_TODAY = "{heute}";' in html
+    # Eine nicht lesbare Zahl (z.B. 1.234,56) wird gemeldet, nicht uebersprungen.
+    assert 'validity.badInput' in html
+
+
+def test_saldo_wird_auf_cent_gerundet_gespeichert(auth_client, csrf, db, person):
+    konto = _konto(db, person, 'Giro', 'checking')
+    res = _post_salden(auth_client, csrf, date='2026-01-31',
+                       entries=[{'account_id': konto, 'balance': 12.345}])
+    assert res.status_code == 200
+    gespeichert = db.execute('SELECT balance FROM wealth_balances').fetchone()[0]
+    assert gespeichert == round(12.345, 2)
+
+
+def test_winziger_negativer_saldo_wird_zu_null(auth_client, csrf, db, person):
+    konto = _konto(db, person, 'Giro', 'checking')
+    res = _post_salden(auth_client, csrf, date='2026-01-31',
+                       entries=[{'account_id': konto, 'balance': -0.004}])
+    assert res.status_code == 200
+    gespeichert = db.execute('SELECT balance FROM wealth_balances').fetchone()[0]
+    assert abs(gespeichert) < 0.005
+    assert math.copysign(1, gespeichert) > 0
+    assert '-0.00' not in _profil(auth_client)
+
+
+def test_profil_skripte_alle_mit_nonce_bei_verknuepfter_person(auth_client, db, person):
+    konto = _konto(db, person, 'Giro', 'checking')
+    _saldo(db, konto, '2026-01-31', 5)
+    html = _profil(auth_client)
+    assert 'id="wealthCard"' in html
+    inline = [tag for tag in re.findall(r'<script[^>]*>', html) if ' src=' not in tag]
+    assert inline, 'Testannahme kaputt: keine Inline-Skripte'
+    for tag in inline:
+        assert 'nonce="' in tag, f'Inline-Skript ohne Nonce: {tag}'
+    # Das Vermoegensskript liegt im selben Block wie PROFILE_CHART.
+    block = html[html.rindex('<script', 0, html.index('const WEALTH_SERIES')):]
+    assert block.startswith('<script nonce="')
+
+
+def test_benutzer_loeschen_entfernt_konten_und_salden_der_person(auth_client, csrf, db):
+    cur = db.execute("INSERT INTO persons (name) VALUES ('Wegfall')")
+    pid = cur.lastrowid
+    db.commit()
+    konto = _konto(db, pid, 'Giro', 'checking')
+    _saldo(db, konto, '2026-01-31', 100.0)
+    res = auth_client.post('/api/users', json={'username': 'wegfall', 'role': 'member',
+                                               'person_id': pid},
+                           headers={'X-CSRF-Token': csrf})
+    assert res.status_code == 200
+    uid = res.get_json()['id']
+    try:
+        res = auth_client.delete(f'/api/users/{uid}', headers={'X-CSRF-Token': csrf})
+        assert res.status_code == 200
+        assert db.execute('SELECT COUNT(*) FROM persons WHERE id=?', (pid,)).fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM wealth_accounts').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM wealth_balances').fetchone()[0] == 0
+    finally:
+        db.execute("DELETE FROM users WHERE username='wegfall'")
+        db.commit()

@@ -2725,7 +2725,9 @@ def save_wealth_balances():
         conn.execute(
             'INSERT INTO wealth_balances (account_id, balance_date, balance) VALUES (?,?,?) '
             'ON CONFLICT(account_id, balance_date) DO UPDATE SET balance=excluded.balance',
-            (aid, datum, e['balance']))
+            # Auf Cent runden (+ 0.0 macht aus -0.0 ein positives Null), damit
+            # das Gespeicherte der Anzeige entspricht.
+            (aid, datum, round(e['balance'], 2) + 0.0))
 
     conn.commit()
     wealth = _wealth_data(conn, eigene_person_id)

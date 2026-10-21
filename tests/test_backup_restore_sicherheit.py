@@ -1252,6 +1252,50 @@ def test_echte_sicherung_wird_weiterhin_eingespielt(app, auth_client, csrf,
             f.unlink()
 
 
+def test_profil_rendert_nach_restore_einer_sicherung_ohne_vermoegenstabellen(
+        app, auth_client, csrf, sicherung_bauen):
+    """Eine Sicherung von vor dem Vermoegens-Feature hat weder wealth_accounts
+    noch wealth_balances. Nach dem Einspielen muss das Profil einer
+    verknuepften Person trotzdem rendern (init_db legt die Tabellen nach)."""
+    alt = sicherung_bauen('ohne_vermoegen.db', zusatz_sql=(
+        "INSERT INTO persons (name) VALUES ('Altperson')",
+        "UPDATE users SET person_id=(SELECT id FROM persons WHERE name='Altperson')"
+        " WHERE username='admin'"))
+    con = _sqlite3.connect(str(alt))
+    try:
+        tabellen = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        con.close()
+    assert 'wealth_accounts' not in tabellen and 'wealth_balances' not in tabellen
+
+    backup_dir = Path(os.path.dirname(m.DB_PATH)) / 'backups'
+    backup_dir.mkdir(exist_ok=True)
+    for f in backup_dir.glob('kassenstuerzle_*.db'):
+        f.unlink()
+    try:
+        res = _hochladen(auth_client, csrf, alt)
+        assert res.status_code == 200, res.get_data(as_text=True)
+
+        client = app.test_client()
+        anmeldung = client.post('/login', data={'username': 'admin',
+                                                'password': 'test-password-123'})
+        assert anmeldung.status_code == 302
+        profil = client.get('/profile')
+        assert profil.status_code == 200
+        assert 'id="wealthCard"' in profil.get_data(as_text=True)
+    finally:
+        conn = m._open_db(m.DB_PATH)
+        conn.execute("UPDATE users SET person_id=NULL WHERE username='admin'")
+        conn.execute("DELETE FROM persons WHERE name='Altperson'")
+        conn.commit()
+        conn.close()
+        with app.app_context():
+            m.init_db()
+        for f in backup_dir.glob('kassenstuerzle_*.db'):
+            f.unlink()
+
+
 # ── Vierte Nachpruefung: die Regel "init_db() darf den Start nicht verhindern"
 #
 # Runde drei hatte genau die EINE Anweisung abgesichert, die sie gefunden hatte
