@@ -251,3 +251,40 @@ def test_name_wird_woertlich_gespeichert(auth_client, csrf, db, person):
     kid = res.get_json()['id_map']['a']
     assert db.execute('SELECT name FROM wealth_accounts WHERE id=?',
                       (kid,)).fetchone()['name'] == name
+
+
+def _konten_namen(db):
+    return [r['name'] for r in db.execute('SELECT name FROM wealth_accounts ORDER BY id')]
+
+
+def test_ungueltige_ids_in_deleted_ids_werden_uebersprungen(auth_client, csrf, db, person):
+    # Eigenes Konto mit id 1: True und 1.9 wuerden per int() darauf zeigen.
+    db.execute("INSERT INTO wealth_accounts (id, person_id, name, type) "
+               "VALUES (1, ?, 'Eigen', 'checking')", (person,))
+    db.commit()
+    res = _post_konten(auth_client, csrf,
+                       deleted_ids=[10**30, True, 1.9, 'x', None],
+                       rows=[{'client_key': 'ok', 'name': 'Neu', 'type': 'cash'}])
+    assert res.status_code == 200
+    assert 'ok' in res.get_json()['id_map']
+    assert _konten_namen(db) == ['Eigen', 'Neu']
+
+
+def test_zeile_mit_riesiger_id_wird_uebersprungen(auth_client, csrf, db, person):
+    res = _post_konten(auth_client, csrf, rows=[
+        {'id': 10**30, 'name': 'Riesig', 'type': 'checking'}])
+    assert res.status_code == 200
+    assert res.get_json()['id_map'] == {}
+    assert _konten_namen(db) == []
+
+
+def test_infinity_als_id_wird_uebersprungen(auth_client, csrf, db, person):
+    eigen = _konto(db, person, 'Eigen', 'checking')
+    body = ('{"v": 2, "rows": [{"id": Infinity, "name": "X", "type": "checking"}],'
+            ' "deleted_ids": [Infinity, -Infinity]}')
+    res = auth_client.post('/api/wealth/accounts/save', data=body,
+                           content_type='application/json',
+                           headers={'X-CSRF-Token': csrf})
+    assert res.status_code == 200
+    assert _konten_namen(db) == ['Eigen']
+    assert db.execute('SELECT id FROM wealth_accounts').fetchone()['id'] == eigen

@@ -2577,6 +2577,18 @@ def save_recurring():
     return jsonify({'success': True, 'recurring': result,
                     'id_map': id_map, 'activity_version': activity_version})
 
+def _wealth_id(raw):
+    """Kontonummer aus Client-Eingabe: nur ein echter int im SQLite-Bereich.
+
+    Alles andere (bool, float samt Infinity/1e300, str, None, zu gross, <= 0)
+    liefert None und der Eintrag wird uebersprungen. Verhindert auch den
+    OverflowError beim Binden riesiger Zahlen.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw if 0 < raw <= 2**63 - 1 else None
+
+
 @main_bp.route('/api/wealth/accounts/save', methods=['POST'])
 @login_required
 def save_wealth_accounts():
@@ -2596,9 +2608,8 @@ def save_wealth_accounts():
     id_map = {}
 
     for raw in deleted_ids:
-        try:
-            did = int(raw)
-        except (TypeError, ValueError):
+        did = _wealth_id(raw)
+        if did is None:
             continue
         # AND person_id=?: ein fremdes Konto bleibt still unberuehrt.
         conn.execute('DELETE FROM wealth_accounts WHERE id=? AND person_id=?',
@@ -2616,9 +2627,8 @@ def save_wealth_accounts():
             continue
         rid = None
         if r.get('id') not in (None, ''):
-            try:
-                rid = int(r['id'])
-            except (TypeError, ValueError):
+            rid = _wealth_id(r['id'])
+            if rid is None:
                 continue
         if rid is not None:
             # person_id steht bewusst nicht in SET: ein Konto laesst sich nicht
