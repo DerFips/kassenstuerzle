@@ -190,6 +190,19 @@ def _migrate_to_encrypted(path: str, key: str) -> None:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         raise
+
+
+# Nettovermoegen: Typ -> Art. Die einzige Stelle, die festlegt, ob ein Konto
+# Vermoegen ('asset') oder Schuld ('debt') ist; es gibt dafuer keine Spalte.
+WEALTH_TYPES = {
+    'checking': 'asset', 'savings': 'asset', 'fixed_deposit': 'asset',
+    'securities': 'asset', 'life_insurance': 'asset', 'pension': 'asset',
+    'real_estate': 'asset', 'vehicle': 'asset', 'cash': 'asset',
+    'other_asset': 'asset',
+    'loan': 'debt', 'mortgage': 'debt', 'credit_card': 'debt',
+    'overdraft': 'debt', 'other_debt': 'debt',
+}
+
 MONTH_NAMES = ['Januar','Februar','März','April','Mai','Juni',
                'Juli','August','September','Oktober','November','Dezember']
 MONTH_NAMES_EN = ['January','February','March','April','May','June',
@@ -854,6 +867,16 @@ def init_db():
         scope TEXT NOT NULL,
         last_seen TEXT NOT NULL,
         PRIMARY KEY (user_id, scope))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS wealth_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        person_id INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS wealth_balances (
+        account_id INTEGER NOT NULL REFERENCES wealth_accounts(id) ON DELETE CASCADE,
+        balance_date TEXT NOT NULL,
+        balance REAL NOT NULL,
+        PRIMARY KEY (account_id, balance_date))""")
     # Migrate income table: add category_id if missing
     try:
         conn.execute('ALTER TABLE income ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL')
@@ -3673,7 +3696,7 @@ class _SicherungAbgelehnt(Exception):
 _EIGENE_TABELLEN = frozenset({
     'users', 'persons', 'categories', 'expenses', 'month_status',
     'recurring_expenses', 'income', 'category_splits', 'push_subscriptions',
-    'activity', 'presence', 'app_meta',
+    'activity', 'presence', 'app_meta', 'wealth_accounts', 'wealth_balances',
 })
 _EIGENE_INDIZES = frozenset({
     'idx_users_person', 'idx_expenses_year_month', 'idx_expenses_person_id',
