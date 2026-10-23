@@ -69,6 +69,10 @@ Benutzerkonten für alle Haushaltsmitglieder, eigene Profilseite und Schutz vor 
 - Sicherungen: eigene Rotation für Schutzkopien, Sicherungen derselben Minute überschreiben sich nicht mehr, automatische Kopie vor jeder Schema-Migration.
 - Das Personen-Widget in den Einstellungen sieht nur noch der Admin.
 
+### Behoben
+
+- **PDF-Import: Einnahmen wurden als Ausgaben eingestuft.** Ob eine Buchung eine Einnahme oder eine Ausgabe ist, entscheidet jetzt das Vorzeichen des gedruckten Betrags und nicht mehr der Buchungstyp. Banken wie die DKB verwenden Typen wie "Überweisung" und "Dauerauftrag" für ein- und ausgehende Buchungen, eingehende Beträge (z. B. Rückerstattungen) landen deshalb als **Einnahme**, nicht mehr als Ausgabe. Der Import schreibt Einnahmen in die Einnahmen-Tabelle.
+
 ### Sicherheit
 
 - Gespeichertes XSS über Personen- und Kategorienamen und im PDF-Import behoben.
