@@ -73,6 +73,25 @@
         </button>
       </div>
     </div>
+
+    <!-- Nicht erkannte Zeilen: Rohtext wird ausschliesslich per textContent ausgegeben. -->
+    <div class="card shadow-sm mt-3" id="pdf-unrecognized-card" style="display:none">
+      <div class="card-header fw-semibold d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <span><i class="bi bi-exclamation-triangle me-1 text-warning"></i>{{ t('pdf.unrecognized_title') }}</span>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="pdf-export-txt-btn">
+          <i class="bi bi-download me-1"></i>{{ t('pdf.export_txt_btn') }}
+        </button>
+      </div>
+      <div class="card-body">
+        <p class="small text-muted">{{ t('pdf.unrecognized_hint') }}</p>
+        <div id="pdf-unrecognized-list"></div>
+        <div id="pdf-unrecognized-more" class="small text-muted"></div>
+        <details id="pdf-unrecognized-noise" class="mt-2" style="display:none">
+          <summary class="small text-muted"></summary>
+          <div class="mt-2"></div>
+        </details>
+      </div>
+    </div>
   </div>
 
   <div class="col-12" id="pdf-result-col" style="display:none">
@@ -84,6 +103,29 @@
 {% block extra_script %}
 <script nonce="{{ csp_nonce() }}">
 let parsedTransactions = [];
+
+function addPreviewRow(txn, i) {
+  const tbody = document.getElementById('pdf-tbody');
+  const row = document.createElement('tr');
+  row.className = txn.is_income ? 'table-success' : '';
+  // Alle Werte aus dem PDF (date/type sind zwar serverseitig auf feste
+  // Muster/Whitelists geprüft, counterpart/description aber roh aus der
+  // Textebene) laufen hier durch escHtml, bevor sie per innerHTML als
+  // Attributwert ODER Elementinhalt eingesetzt werden – siehe
+  // Sicherheitsprüfung K3: sonst genügt eine präparierte Kontoauszugs-PDF
+  // für gespeichertes XSS im Origin des importierenden Nutzers.
+  const counterpartOrDescription = txn.counterpart || txn.description || '';
+  row.innerHTML = `
+    <td><input type="checkbox" class="pdf-row-check" data-idx="${i}" checked></td>
+    <td class="text-nowrap">${escHtml(txn.date)}</td>
+    <td><small class="text-muted">${escHtml(txn.type||'')}</small></td>
+    <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+        title="${escHtml(counterpartOrDescription)}">${escHtml(counterpartOrDescription || '–')}</td>
+    <td class="text-end fw-semibold ${txn.is_income?'text-success':'text-danger'}">
+      ${txn.is_income?'+':'-'}${escHtml(txn.amount.toFixed(2).replace('.',','))} €</td>
+    <td><small>${txn.is_income?`<span class="badge bg-success">${t('pdf.income_badge')}</span>`:`<span class="badge bg-secondary">${t('pdf.expense_badge')}</span>`}</small></td>`;
+  tbody.appendChild(row);
+}
 
 document.getElementById('pdf-check-all').addEventListener('change', function() {
   document.querySelectorAll('.pdf-row-check').forEach(cb => cb.checked = this.checked);
@@ -111,36 +153,152 @@ document.getElementById('pdf-parse-btn').addEventListener('click', async () => {
     statusEl.innerHTML = `<div class="alert alert-success py-2"><i class="bi bi-check me-1"></i>${t('pdf.transactions_found', {count: d.transactions?.length||0, bank: escHtml(d.bank||t('pdf.unknown_bank'))})}</div>`;
     parsedTransactions = d.transactions || [];
     document.getElementById('pdf-holder-info').textContent = d.holder || '';
-    const tbody = document.getElementById('pdf-tbody');
-    tbody.innerHTML = '';
-    parsedTransactions.forEach((txn, i) => {
-      const row = document.createElement('tr');
-      row.className = txn.is_income ? 'table-success' : '';
-      // Alle Werte aus dem PDF (date/type sind zwar serverseitig auf feste
-      // Muster/Whitelists geprüft, counterpart/description aber roh aus der
-      // Textebene) laufen hier durch escHtml, bevor sie per innerHTML als
-      // Attributwert ODER Elementinhalt eingesetzt werden – siehe
-      // Sicherheitsprüfung K3: sonst genügt eine präparierte Kontoauszugs-PDF
-      // für gespeichertes XSS im Origin des importierenden Nutzers.
-      const counterpartOrDescription = txn.counterpart || txn.description || '';
-      row.innerHTML = `
-        <td><input type="checkbox" class="pdf-row-check" data-idx="${i}" checked></td>
-        <td class="text-nowrap">${escHtml(txn.date)}</td>
-        <td><small class="text-muted">${escHtml(txn.type||'')}</small></td>
-        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-            title="${escHtml(counterpartOrDescription)}">${escHtml(counterpartOrDescription || '–')}</td>
-        <td class="text-end fw-semibold ${txn.is_income?'text-success':'text-danger'}">
-          ${txn.is_income?'+':'-'}${escHtml(txn.amount.toFixed(2).replace('.',','))} €</td>
-        <td><small>${txn.is_income?`<span class="badge bg-success">${t('pdf.income_badge')}</span>`:`<span class="badge bg-secondary">${t('pdf.expense_badge')}</span>`}</small></td>`;
-      tbody.appendChild(row);
-    });
-    document.getElementById('pdf-count-info').textContent = t('pdf.count_info', {count: parsedTransactions.length});
+    document.getElementById('pdf-tbody').innerHTML = '';
+    parsedTransactions.forEach((txn, i) => addPreviewRow(txn, i));
+    updatePdfCountInfo();
+    const openCount = renderUnrecognized(d.unrecognized || [], d.unrecognized_total || 0);
+    if (openCount) {
+      const warn = document.createElement('div');
+      warn.className = 'alert alert-warning py-2 mt-2';
+      warn.textContent = t('pdf.unrecognized_warning', {count: openCount});
+      statusEl.appendChild(warn);
+    }
     document.getElementById('pdf-preview-col').style.display = '';
     document.getElementById('pdf-result-col').style.display = 'none';
   } catch(e) {
     statusEl.innerHTML = `<div class="alert alert-danger py-2">${t('pdf.network_error', {error: e.message})}</div>`;
   }
 });
+
+let unrecognizedEntries = [];
+
+function updatePdfCountInfo() {
+  document.getElementById('pdf-count-info').textContent = t('pdf.count_info', {count: parsedTransactions.length});
+}
+
+// Nicht erkannte Zeilen: Rohtext aus dem PDF wird nur ueber textContent/value
+// ausgegeben, nie ueber innerHTML. Gibt die Zahl der Eintraege mit Formular zurueck.
+function renderUnrecognized(entries, total) {
+  unrecognizedEntries = entries;
+  const list = document.getElementById('pdf-unrecognized-list');
+  const noiseBox = document.getElementById('pdf-unrecognized-noise');
+  const noiseList = noiseBox.querySelector('div');
+  list.textContent = '';
+  noiseList.textContent = '';
+  const main = entries.filter(e => !e.likely_noise);
+  const noise = entries.filter(e => e.likely_noise);
+  main.forEach(e => list.appendChild(buildUnrecognizedItem(e, true)));
+  noise.forEach(e => noiseList.appendChild(buildUnrecognizedItem(e, false)));
+  noiseBox.style.display = noise.length ? '' : 'none';
+  noiseBox.querySelector('summary').textContent = t('pdf.no_amount_group', {count: noise.length});
+  const more = total - entries.length;
+  document.getElementById('pdf-unrecognized-more').textContent =
+    more > 0 ? t('pdf.unrecognized_more', {count: more}) : '';
+  document.getElementById('pdf-unrecognized-card').style.display = entries.length ? '' : 'none';
+  return main.length;
+}
+
+function buildUnrecognizedItem(e, withForm) {
+  const box = document.createElement('div');
+  box.className = 'border rounded p-2 mb-2';
+  const reason = document.createElement('div');
+  reason.className = 'small text-muted mb-1';
+  reason.textContent = t('pdf.reason_' + e.reason);
+  box.appendChild(reason);
+  const pre = document.createElement('pre');
+  pre.className = 'small bg-light border rounded p-2 mb-2';
+  pre.style.whiteSpace = 'pre-wrap';
+  pre.style.wordBreak = 'break-word';
+  pre.textContent = e.lines.join('\n');
+  box.appendChild(pre);
+  if (!withForm) return box;
+
+  const guess = (e.amount_guess === null || e.amount_guess === undefined) ? null : e.amount_guess;
+  const row = document.createElement('div');
+  row.className = 'row g-2 align-items-center';
+  const cell = (cls, el) => { const c = document.createElement('div'); c.className = cls; c.appendChild(el); row.appendChild(c); return el; };
+
+  const dateIn = cell('col-6 col-md-3', document.createElement('input'));
+  dateIn.type = 'date';
+  dateIn.className = 'form-control form-control-sm';
+  dateIn.value = e.date_iso || '';
+  const descIn = cell('col-12 col-md-4', document.createElement('input'));
+  descIn.type = 'text';
+  descIn.maxLength = 150;
+  descIn.className = 'form-control form-control-sm';
+  descIn.value = e.lines.join(' ').replace(/^\d{2}\.\d{2}\.\d{4}\s*/, '').trim().slice(0, 150);
+  const amountIn = cell('col-6 col-md-2', document.createElement('input'));
+  amountIn.type = 'number';
+  amountIn.step = '0.01';
+  amountIn.min = '0.01';
+  amountIn.className = 'form-control form-control-sm text-end';
+  amountIn.value = guess === null ? '' : Math.abs(guess).toFixed(2);
+  const kindSel = cell('col-6 col-md-2', document.createElement('select'));
+  kindSel.className = 'form-select form-select-sm';
+  kindSel.appendChild(new Option(t('pdf.expense_badge'), 'expense'));
+  kindSel.appendChild(new Option(t('pdf.income_badge'), 'income'));
+  kindSel.value = (guess !== null && guess > 0) ? 'income' : 'expense';
+  const btn = cell('col-6 col-md-1', document.createElement('button'));
+  btn.type = 'button';
+  btn.className = 'btn btn-sm btn-outline-success w-100';
+  btn.textContent = t('pdf.take_over_btn');
+  box.appendChild(row);
+
+  btn.addEventListener('click', () => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateIn.value);
+    const desc = descIn.value.trim();
+    const amount = Number(amountIn.value);
+    const realDate = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    const dateOk = realDate && realDate.getUTCFullYear() === +m[1]
+      && realDate.getUTCMonth() === +m[2] - 1 && realDate.getUTCDate() === +m[3];
+    if (!dateOk || !desc || !Number.isFinite(amount) || amount <= 0 || amount >= 1e12) {
+      showToast(t('pdf.manual_invalid'), 'warning');
+      return;
+    }
+    const txn = {
+      date: m[3] + '.' + m[2] + '.' + m[1],
+      day: +m[3], month: +m[2], year: +m[1],
+      counterpart: desc.slice(0, 80), description: desc.slice(0, 150),
+      amount: Math.round(amount * 100) / 100,
+      is_income: kindSel.value === 'income',
+      type: t('pdf.manual_type')
+    };
+    addPreviewRow(txn, parsedTransactions.push(txn) - 1);
+    updatePdfCountInfo();
+    [dateIn, descIn, amountIn, kindSel, btn].forEach(el => { el.disabled = true; });
+    btn.textContent = t('pdf.taken_over');
+    box.classList.add('bg-success-subtle');
+  });
+  return box;
+}
+
+// TXT-Export im Browser: nichts wird auf dem Server abgelegt.
+function exportUnrecognizedTxt() {
+  if (!unrecognizedEntries.length) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const out = [t('pdf.txt_title'), today, ''];
+  unrecognizedEntries.forEach((e, i) => {
+    const datum = e.date_iso ? e.date_iso.split('-').reverse().join('.') : '-';
+    const betrag = (e.amount_guess === null || e.amount_guess === undefined)
+      ? '-' : e.amount_guess.toFixed(2).replace('.', ',');
+    out.push('#' + (i + 1));
+    out.push(t('pdf.date') + ': ' + datum);
+    out.push(t('pdf.txt_amount_guess') + ': ' + betrag);
+    out.push(t('pdf.txt_reason') + ': ' + t('pdf.reason_' + e.reason));
+    e.lines.forEach(z => out.push(z));
+    out.push('');
+  });
+  const blob = new Blob([out.join('\n')], {type: 'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'nicht-erkannte-buchungen-' + today + '.txt';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+document.getElementById('pdf-export-txt-btn').addEventListener('click', () => exportUnrecognizedTxt());
 
 document.getElementById('pdf-commit-btn').addEventListener('click', async () => {
   const selected = [...document.querySelectorAll('.pdf-row-check:checked')].map(cb => parseInt(cb.dataset.idx));

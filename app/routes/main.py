@@ -3348,6 +3348,27 @@ def parse_german_amount(s):
         return None
 
 
+# Nicht erkannte Zeilen des Kontoauszugs: Obergrenzen, damit die Antwort klein bleibt.
+_PDF_MAX_NICHT_ERKANNT = 300
+_PDF_MAX_ZEILEN_PRO_BLOCK = 12
+_PDF_MAX_ZEILENLAENGE = 200
+# Letzter Betrag eines Blocks als Vorschlag: auch mit nachgestelltem Vorzeichen
+# ("50,00-") und ohne Tausenderpunkt ("1234,56"). Nur ein Vorschlag fuer die
+# manuelle Uebernahme - die eigentliche Erkennung nutzt weiterhin AMT_RE.
+_PDF_VORSCHLAG_BETRAG_RE = _re_modul.compile(
+    r'(?<![\d.,])([+-]?)(\d{1,3}(?:\.\d{3})+|\d+),(\d{2})(?!\d)([+-]?)')
+
+
+def _pdf_betrag_vorschlag(text):
+    """Letzter Betrag im Text als float mit Vorzeichen (negativ = Ausgabe) oder None."""
+    treffer = _PDF_VORSCHLAG_BETRAG_RE.findall(text or '')
+    if not treffer:
+        return None
+    vorn, ganz, cent, hinten = treffer[-1]
+    wert = float(ganz.replace('.', '') + '.' + cent)
+    return -wert if '-' in (vorn + hinten) else wert
+
+
 def extract_bank_statement(pdf_bytes):
     """
     Parse a German DKB bank statement PDF via plain-text extraction.
@@ -3446,9 +3467,14 @@ def extract_bank_statement(pdf_bytes):
                     break
 
             if not matched_type:
-                # Could be "Kontostand am..." or page header – skip
+                # Unbekannter Buchungstyp (oder Kopf-/Fusszeile mit Datum): nicht
+                # mehr still verwerfen, sondern als eigener Block merken, damit
+                # er in `unrecognized` gemeldet werden kann.
                 if current: blocks.append(current)
-                current = None
+                current = {
+                    'date': date_str, 'type': None, 'amount': None,
+                    'remainder': rest, 'detail_lines': [], 'raw_lines': [line]
+                }
                 continue
 
             # Extract amount from remainder (at end of line)
@@ -3462,13 +3488,17 @@ def extract_bank_statement(pdf_bytes):
             current = {
                 'date': date_str, 'type': matched_type,
                 'amount': amt, 'remainder': remainder,
-                'detail_lines': []
+                'detail_lines': [], 'raw_lines': [line]
             }
         else:
             # Continuation line
             if current is None: continue
             # Skip pure noise lines
             if any(line.startswith(s) for s in SKIP_PREFIXES): continue
+            current['raw_lines'].append(line)
+            if current['type'] is None:
+                # Unbekannter Block: Folgezeilen nur sammeln, nichts interpretieren.
+                continue
             # If no amount yet, try to extract from this line
             if current['amount'] is None:
                 amt_m = AMT_RE.search(line)
@@ -3491,9 +3521,36 @@ def extract_bank_statement(pdf_bytes):
     # einstufen.
     transactions  = []
     skipped_types = {}
+    unrecognized  = []
+    unrecognized_total = 0
+
+    def _melde_nicht_erkannt(blk, grund):
+        nonlocal unrecognized_total
+        unrecognized_total += 1
+        if len(unrecognized) >= _PDF_MAX_NICHT_ERKANNT:
+            return
+        roh = [z[:_PDF_MAX_ZEILENLAENGE] for z in blk['raw_lines'][:_PDF_MAX_ZEILEN_PRO_BLOCK]]
+        try:
+            datum_iso = datetime.strptime(blk['date'], '%d.%m.%Y').strftime('%Y-%m-%d')
+        except ValueError:
+            datum_iso = ''
+        vorschlag = _pdf_betrag_vorschlag(' '.join(blk['raw_lines']))
+        unrecognized.append({
+            'reason': grund,
+            'date_iso': datum_iso,
+            'amount_guess': vorschlag,
+            'lines': roh,
+            # Ohne irgendeinen Betrag und ohne bekannten Typ: vermutlich Kopf-/Fusszeile.
+            'likely_noise': grund == 'unknown_type' and vorschlag is None,
+        })
 
     for blk in blocks:
-        if blk['amount'] is None: continue
+        if blk['type'] is None:
+            _melde_nicht_erkannt(blk, 'unknown_type')
+            continue
+        if blk['amount'] is None:
+            _melde_nicht_erkannt(blk, 'no_amount')
+            continue
 
         tl      = blk['type']
         tl_up   = tl.upper().strip()
@@ -3502,7 +3559,9 @@ def extract_bank_statement(pdf_bytes):
 
         try:
             col1_dt = datetime.strptime(blk['date'], '%d.%m.%Y')
-        except: continue
+        except ValueError:
+            _melde_nicht_erkannt(blk, 'bad_date')
+            continue
 
         day, month, year = col1_dt.day, col1_dt.month, col1_dt.year
         counterpart = ''
@@ -3562,7 +3621,8 @@ def extract_bank_statement(pdf_bytes):
             'type':        tl[:40],
         })
 
-    return {'holder': holder, 'bank': bank, 'transactions': transactions}
+    return {'holder': holder, 'bank': bank, 'transactions': transactions,
+            'unrecognized': unrecognized, 'unrecognized_total': unrecognized_total}
 
 
 
