@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import signal
+import sqlite3
 from datetime import date, datetime
 
 logger = logging.getLogger(__name__)
@@ -405,13 +406,56 @@ def seed_demo(conn, today: date | None = None, password: str | None = None) -> d
             'accounts': n_konten, 'balances': n_salden}
 
 
+_DEMO_BENUTZER = frozenset({'anna', 'ben', 'admin'})
+
+
+def _ist_demo_datenbank(pfad: str) -> bool:
+    """True nur, wenn die Datei positiv als Demo-Datenbank erkennbar ist.
+
+    Schreibgeschuetzt geoeffnet (reines sqlite3, ohne Schluessel): alle
+    Benutzernamen in {anna, ben, admin} und hoechstens zwei Personen. Was sich
+    nicht oeffnen laesst (verschluesselt, keine Datenbank, leer) oder die
+    Tabellen nicht hat, ist nicht erkennbar - und wird nie geloescht.
+    """
+    from pathlib import Path
+    # Auch ein schreibgeschuetzter Zugriff auf eine WAL-Datenbank legt -wal
+    # und -shm an. Was es vorher nicht gab, raeumen wir danach wieder weg
+    # (es kann keinen anderen Prozess geben, der die Datenbank offen hat -
+    # sonst laegen die Dateien schon).
+    neu = [pfad + e for e in ('-wal', '-shm') if not os.path.exists(pfad + e)]
+    try:
+        con = sqlite3.connect(Path(pfad).as_uri() + '?mode=ro', uri=True)
+        try:
+            namen = [r[0] for r in con.execute('SELECT username FROM users')]
+            personen = con.execute('SELECT COUNT(*) FROM persons').fetchone()[0]
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return False
+    finally:
+        for datei in neu:
+            try:
+                os.remove(datei)
+            except FileNotFoundError:
+                pass
+    return all(n in _DEMO_BENUTZER for n in namen) and personen <= 2
+
+
 def main() -> None:
     """`python -m app.demo`: frische Demo-Datenbank anlegen.
 
     Laeuft bei jedem Container-Start vor Gunicorn. Ein Fehler beendet den
     Prozess mit Exit-Code != 0, damit der Container nicht mit leerer oder
     halber Datenbank hochkommt.
+
+    Loescht die Datenbank am DATABASE_PATH - deshalb nur mit DEMO_MODE=1 und
+    nur, wenn dort nichts liegt oder eine erkennbare Demo-Datenbank. Beides
+    wird geprueft, bevor irgendetwas angefasst wird; die Produktions-Datenbank
+    liegt im selben Image unter demselben Standardpfad.
     """
+    if os.environ.get('DEMO_MODE') != '1':
+        raise SystemExit('app.demo laeuft nur mit DEMO_MODE=1 (es loescht die '
+                         'Datenbank am DATABASE_PATH). Abbruch, nichts geloescht.')
     pfad = os.environ.get('DATABASE_PATH', '').strip()
     if not pfad:
         # Ohne ausdruecklichen Pfad waere es die Standard-Datenbank (data/) -
@@ -420,6 +464,11 @@ def main() -> None:
                          'Datenbank an diesem Pfad und startet nie auf der '
                          'Standard-Datenbank.')
     pfad = os.path.abspath(pfad)
+    if os.path.exists(pfad) and not _ist_demo_datenbank(pfad):
+        raise SystemExit('%s ist keine erkennbare Demo-Datenbank (nur die '
+                         'Benutzer anna, ben und admin und hoechstens zwei '
+                         'Personen sind erlaubt, die Datei muss lesbar und '
+                         'unverschluesselt sein). Abbruch, nichts geloescht.' % pfad)
 
     os.environ['DISABLE_SCHEDULER'] = '1'
     # Der Bootstrap-Admin bekommt sonst ein Zufallspasswort, das im Log

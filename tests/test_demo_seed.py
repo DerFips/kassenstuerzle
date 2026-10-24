@@ -372,8 +372,11 @@ def test_seed_verweigert_befuellte_datenbank(tmp_path):
     assert _abfrage(ziel, 'SELECT COUNT(*) n FROM persons')[0]['n'] == 2
 
 
-def _cli(db_path, **extra):
+def _cli(db_path, demo_mode='1', **extra):
+    """`python -m app.demo` im Unterprozess; demo_mode=None laesst DEMO_MODE weg."""
     umgebung = _umgebung(db_path)
+    if demo_mode is not None:
+        umgebung['DEMO_MODE'] = demo_mode
     umgebung.update(extra)
     umgebung.pop('ADMIN_PASSWORD', None)    # main() muss selbst vorsorgen
     return subprocess.run([sys.executable, '-m', 'app.demo'], env=umgebung,
@@ -433,8 +436,90 @@ def test_cli_ohne_database_path_bricht_ab(tmp_path):
     loeschen (data/) - das darf nie passieren."""
     umgebung = _umgebung(tmp_path / 'x.db')
     umgebung.pop('DATABASE_PATH')
+    umgebung['DEMO_MODE'] = '1'
     umgebung['PYTHONPATH'] = str(REPO)
     lauf = subprocess.run([sys.executable, '-m', 'app.demo'], env=umgebung,
                           cwd=str(tmp_path), capture_output=True, text=True)
     assert lauf.returncode != 0
     assert 'DATABASE_PATH' in lauf.stderr + lauf.stdout
+
+
+# ── Schutz vor dem Loeschen einer echten Datenbank ──────────────────────────
+
+def _abdruck(ordner):
+    """Relativer Pfad -> SHA-256 aller Dateien unter dem Ordner (Inhalt und
+    Dateiliste; create_backup() legt Unterordner an)."""
+    import hashlib
+    ordner = Path(ordner)
+    return {str(p.relative_to(ordner)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(ordner.rglob('*')) if p.is_file()}
+
+
+def _demo_db(tmp_path, name):
+    """Eine Demo-Datenbank, erzeugt durch einen ersten CLI-Lauf."""
+    ziel = tmp_path / name / 'k.db'
+    ziel.parent.mkdir(parents=True)
+    lauf = _cli(ziel)
+    assert lauf.returncode == 0, lauf.stderr
+    return ziel
+
+
+def _verweigert(lauf, ziel, vorher):
+    assert lauf.returncode != 0, lauf.stdout
+    assert 'Traceback' not in lauf.stderr, lauf.stderr
+    assert lauf.stderr.strip(), 'eine deutliche Meldung auf stderr erwartet'
+    assert _abdruck(ziel.parent) == vorher, 'es darf nichts veraendert werden'
+
+
+def test_cli_ohne_demo_mode_laesst_vorhandene_datenbank_unberuehrt(tmp_path):
+    ziel = _demo_db(tmp_path, 'ohne-demo')
+    vorher = _abdruck(ziel.parent)
+    lauf = _cli(ziel, demo_mode=None)
+    _verweigert(lauf, ziel, vorher)
+    assert 'DEMO_MODE' in lauf.stderr
+    for wert in ('0', ''):
+        _verweigert(_cli(ziel, demo_mode=wert), ziel, vorher)
+
+
+def test_cli_verweigert_fremden_benutzer(tmp_path):
+    ziel = _demo_db(tmp_path, 'maria')
+    con = sqlite3.connect(str(ziel))
+    con.execute("INSERT INTO users (username, password_hash) VALUES ('maria', 'x')")
+    con.commit()
+    con.close()
+    vorher = _abdruck(ziel.parent)
+    _verweigert(_cli(ziel), ziel, vorher)
+    assert _abfrage(ziel, "SELECT COUNT(*) n FROM users WHERE username='maria'")[0]['n'] == 1
+
+
+def test_cli_verweigert_mehr_als_zwei_personen(tmp_path):
+    ziel = _demo_db(tmp_path, 'drei')
+    con = sqlite3.connect(str(ziel))
+    con.execute("INSERT INTO persons (name) VALUES ('Carla')")
+    con.commit()
+    con.close()
+    vorher = _abdruck(ziel.parent)
+    _verweigert(_cli(ziel), ziel, vorher)
+
+
+@pytest.mark.parametrize('inhalt', [os.urandom(4096), b''], ids=['zufallsbytes', 'leer'])
+def test_cli_verweigert_datei_die_keine_datenbank_ist(tmp_path, inhalt):
+    ziel = tmp_path / 'zufall' / 'k.db'
+    ziel.parent.mkdir(parents=True)
+    ziel.write_bytes(inhalt)
+    vorher = _abdruck(ziel.parent)
+    _verweigert(_cli(ziel), ziel, vorher)
+
+
+def test_cli_ersetzt_demo_datenbank_mit_uebrig_gebliebenem_wal(tmp_path):
+    """Nach hartem Abbruch (SIGTERM, Strom) bleiben -wal/-shm liegen; sie
+    gehen zusammen mit der erkannten Demo-Datenbank weg."""
+    ziel = _demo_db(tmp_path, 'wal')
+    erste = _zaehler(ziel)
+    wal, shm = Path(str(ziel) + '-wal'), Path(str(ziel) + '-shm')
+    wal.write_bytes(os.urandom(2048))
+    shm.write_bytes(os.urandom(512))
+    lauf = _cli(ziel)
+    assert lauf.returncode == 0, lauf.stderr
+    assert _zaehler(ziel) == erste
+    assert _abfrage(ziel, 'SELECT COUNT(*) n FROM users')[0]['n'] == 2

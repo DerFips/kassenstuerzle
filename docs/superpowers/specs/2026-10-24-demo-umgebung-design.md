@@ -70,13 +70,15 @@ Ein `before_request`-Wächter in `app/routes/main.py`, **nach** `csrf_protect`. 
 
 `python -m app.demo` läuft bei jedem Container-Start vor Gunicorn. Ablauf: `DISABLE_SCHEDULER=1` setzen, vorhandene DB-Dateien am `DATABASE_PATH` entfernen, `create_app()` aufrufen (legt Schema und den Bootstrap-Admin an), danach `seed_demo(conn, today=None, password=None)`.
 
+`python -m app.demo` läuft **nur mit `DEMO_MODE=1`** und löscht nur eine **erkennbare Demo-Datenbank**: beides wird vor dem ersten Löschen geprüft (das Produktions-Image setzt denselben `DATABASE_PATH`-Standard). Eine vorhandene Datei muss sich schreibgeschützt mit reinem `sqlite3` öffnen lassen, alle Benutzernamen müssen in {`anna`, `ben`, `admin`} liegen und es darf höchstens zwei Personen geben; sonst bricht der Aufruf mit einer deutschen Meldung und Exit-Code ≠ 0 ab, ohne eine Datei anzufassen (auch bei verschlüsselten, leeren oder keinen Datenbanken). Eine nicht vorhandene Datei ist der Normalfall (frischer `tmpfs`); übrig gebliebene `-wal`/`-shm` werden nur zusammen mit einer erkannten Demo-Datenbank oder ohne Hauptdatei entfernt.
+
 `seed_demo` ist eine eigene Funktion mit Verbindung, Stichtag und Passwort als Parameter, damit sie testbar ist. Der Bootstrap-Admin wird zu **Anna** umgewidmet (Benutzername `anna`, Rolle `admin`, `must_change_password=0`); **Ben** wird als Mitglied ergänzt. Jede Person ist mit ihrem Konto verknüpft (1:1). Das Passwort kommt aus `DEMO_PASSWORD` (Standard `demo1234`). In `app_meta` wird `profiles_setup_done=1` gesetzt, damit der Einrichtungsassistent nicht erscheint.
 
 ### 4.1 Zeitraum und Plausibilität
 
 - Zeitraum: die **fünf vollen Monate vor dem aktuellen Monat plus der aktuelle Monat bis einschließlich heute**, also sechs Kalendermonate. **Kein Datum liegt nach `today`.**
 - Die Daten entstehen mit einem **festen Zufallsstart** (`random.Random(42)`): nach jedem Reset sehen sie gleich plausibel aus.
-- Beträge bleiben im Alltagsrahmen: keine einzelne Ausgabe über 1.200 € (die Miete mit 1.180 € ist die größte), kein einzelner Betrag einer Einnahme über 3.100 €. Mindestens vier Ausgaben pro Person und Monat. Das Haushaltsbudget bleibt im Rahmen von ca. 3.300 bis 3.900 € Ausgaben bei ca. 5.700 € Einnahmen pro Monat (inklusive der einmaligen Posten aus 4.2).
+- Beträge bleiben im Alltagsrahmen: keine einzelne Ausgabe über 1.200 € (die Miete mit 1.180 € ist die größte), kein einzelner Betrag einer Einnahme über 3.100 €. Mindestens vier Ausgaben pro Person in jedem vollen Monat (der laufende Monat ist an den ersten Tagen naturgemäß dünner). Das Haushaltsbudget bleibt im Rahmen von ca. 3.300 bis 3.900 € Ausgaben bei ca. 5.700 € Einnahmen pro Monat (inklusive der einmaligen Posten aus 4.2).
 
 ### 4.2 Inhalt
 
