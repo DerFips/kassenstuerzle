@@ -317,6 +317,11 @@ def seed_demo(conn, today: date | None = None, password: str | None = None) -> d
              person_ids['Ben']))
         conn.execute("INSERT INTO app_meta (key, value) VALUES ('profiles_setup_done','1')"
                      " ON CONFLICT(key) DO UPDATE SET value='1'")
+        # Marker: nur eine Datenbank mit diesem Eintrag ersetzt `python -m
+        # app.demo` spaeter wieder.
+        conn.execute("INSERT INTO app_meta (key, value) VALUES (?, '1')"
+                     " ON CONFLICT(key) DO UPDATE SET value='1'",
+                     (DEMO_MARKER_SCHLUESSEL,))
 
         # Kategorien und Aufteilung
         kat = {}
@@ -406,28 +411,42 @@ def seed_demo(conn, today: date | None = None, password: str | None = None) -> d
             'accounts': n_konten, 'balances': n_salden}
 
 
-_DEMO_BENUTZER = frozenset({'anna', 'ben', 'admin'})
+DEMO_MARKER_SCHLUESSEL = 'demo_db'
 
 
 def _ist_demo_datenbank(pfad: str) -> bool:
-    """True nur, wenn die Datei positiv als Demo-Datenbank erkennbar ist.
+    """True nur, wenn die Datei positiv als ersetzbar erkennbar ist.
 
-    Schreibgeschuetzt geoeffnet (reines sqlite3, ohne Schluessel): alle
-    Benutzernamen in {anna, ben, admin} und hoechstens zwei Personen. Was sich
-    nicht oeffnen laesst (verschluesselt, keine Datenbank, leer) oder die
-    Tabellen nicht hat, ist nicht erkennbar - und wird nie geloescht.
+    Schreibgeschuetzt geoeffnet (reines sqlite3, ohne Schluessel). Erkannt wird
+    entweder (a) der Marker, den seed_demo schreibt (app_meta demo_db = 1),
+    oder (b) eine wirklich frische Bootstrap-Datenbank: genau ein Benutzer
+    'admin' und keine Personen, Ausgaben und Einnahmen (ein beim Befuellen
+    zurueckgerollter Lauf endet genau so). Alles andere - auch eine Datenbank
+    mit 'admin' und zwei Personen, der haeufigste echte Haushalt - ist nicht
+    erkennbar und wird nie geloescht, ebenso Unoeffnbares (verschluesselt,
+    keine Datenbank, leer) oder eine Datei ohne die Tabellen.
     """
     from pathlib import Path
     # Auch ein schreibgeschuetzter Zugriff auf eine WAL-Datenbank legt -wal
     # und -shm an. Was es vorher nicht gab, raeumen wir danach wieder weg
     # (es kann keinen anderen Prozess geben, der die Datenbank offen hat -
-    # sonst laegen die Dateien schon).
+    # sonst laegen die Dateien schon). Die Hauptdatei und ein vorhandenes
+    # -wal bleiben unberuehrt; ein vorhandenes -shm ist ein abgeleiteter
+    # Index und kann vom lesenden Oeffnen neu geschrieben werden.
     neu = [pfad + e for e in ('-wal', '-shm') if not os.path.exists(pfad + e)]
     try:
         con = sqlite3.connect(Path(pfad).as_uri() + '?mode=ro', uri=True)
         try:
+            try:
+                marker = con.execute('SELECT value FROM app_meta WHERE key=?',
+                                     (DEMO_MARKER_SCHLUESSEL,)).fetchone()
+            except sqlite3.OperationalError:
+                marker = None
+            if marker is not None and str(marker[0]) == '1':
+                return True
             namen = [r[0] for r in con.execute('SELECT username FROM users')]
-            personen = con.execute('SELECT COUNT(*) FROM persons').fetchone()[0]
+            daten = sum(con.execute('SELECT COUNT(*) FROM %s' % t).fetchone()[0]
+                        for t in ('persons', 'expenses', 'income'))
         finally:
             con.close()
     except sqlite3.Error:
@@ -438,7 +457,7 @@ def _ist_demo_datenbank(pfad: str) -> bool:
                 os.remove(datei)
             except FileNotFoundError:
                 pass
-    return all(n in _DEMO_BENUTZER for n in namen) and personen <= 2
+    return namen == ['admin'] and daten == 0
 
 
 def main() -> None:
@@ -449,7 +468,8 @@ def main() -> None:
     halber Datenbank hochkommt.
 
     Loescht die Datenbank am DATABASE_PATH - deshalb nur mit DEMO_MODE=1 und
-    nur, wenn dort nichts liegt oder eine erkennbare Demo-Datenbank. Beides
+    nur, wenn dort nichts liegt, eine Datenbank mit Demo-Marker oder eine frische,
+    leere Bootstrap-Datenbank. Beides
     wird geprueft, bevor irgendetwas angefasst wird; die Produktions-Datenbank
     liegt im selben Image unter demselben Standardpfad.
     """
@@ -465,9 +485,9 @@ def main() -> None:
                          'Standard-Datenbank.')
     pfad = os.path.abspath(pfad)
     if os.path.exists(pfad) and not _ist_demo_datenbank(pfad):
-        raise SystemExit('%s ist keine erkennbare Demo-Datenbank (nur die '
-                         'Benutzer anna, ben und admin und hoechstens zwei '
-                         'Personen sind erlaubt, die Datei muss lesbar und '
+        raise SystemExit('%s ist keine erkennbare Demo-Datenbank (es fehlt der '
+                         'Demo-Marker app_meta.demo_db, und es ist auch keine '
+                         'frische, leere Datenbank; die Datei muss lesbar und '
                          'unverschluesselt sein). Abbruch, nichts geloescht.' % pfad)
 
     os.environ['DISABLE_SCHEDULER'] = '1'

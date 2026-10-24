@@ -448,7 +448,9 @@ def test_cli_ohne_database_path_bricht_ab(tmp_path):
 
 def _abdruck(ordner):
     """Relativer Pfad -> SHA-256 aller Dateien unter dem Ordner (Inhalt und
-    Dateiliste; create_backup() legt Unterordner an)."""
+    Dateiliste; create_backup() legt Unterordner an). Die Tests, die damit
+    vergleichen, haben kein -shm vorher: ein vorhandenes -shm ist ein
+    abgeleiteter Index und darf vom lesenden Oeffnen neu geschrieben werden."""
     import hashlib
     ordner = Path(ordner)
     return {str(p.relative_to(ordner)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -462,6 +464,17 @@ def _demo_db(tmp_path, name):
     lauf = _cli(ziel)
     assert lauf.returncode == 0, lauf.stderr
     return ziel
+
+
+def _ohne_marker(ziel, *sql):
+    """Macht aus der Demo-Datenbank eine, die wie eine echte aussieht: der
+    Demo-Marker fehlt, `sql` formt den Rest."""
+    con = sqlite3.connect(str(ziel))
+    con.execute("DELETE FROM app_meta WHERE key='demo_db'")
+    for anweisung in sql:
+        con.execute(anweisung)
+    con.commit()
+    con.close()
 
 
 def _verweigert(lauf, ziel, vorher):
@@ -483,10 +496,7 @@ def test_cli_ohne_demo_mode_laesst_vorhandene_datenbank_unberuehrt(tmp_path):
 
 def test_cli_verweigert_fremden_benutzer(tmp_path):
     ziel = _demo_db(tmp_path, 'maria')
-    con = sqlite3.connect(str(ziel))
-    con.execute("INSERT INTO users (username, password_hash) VALUES ('maria', 'x')")
-    con.commit()
-    con.close()
+    _ohne_marker(ziel, "INSERT INTO users (username, password_hash) VALUES ('maria', 'x')")
     vorher = _abdruck(ziel.parent)
     _verweigert(_cli(ziel), ziel, vorher)
     assert _abfrage(ziel, "SELECT COUNT(*) n FROM users WHERE username='maria'")[0]['n'] == 1
@@ -494,12 +504,46 @@ def test_cli_verweigert_fremden_benutzer(tmp_path):
 
 def test_cli_verweigert_mehr_als_zwei_personen(tmp_path):
     ziel = _demo_db(tmp_path, 'drei')
-    con = sqlite3.connect(str(ziel))
-    con.execute("INSERT INTO persons (name) VALUES ('Carla')")
-    con.commit()
-    con.close()
+    _ohne_marker(ziel, "INSERT INTO persons (name) VALUES ('Carla')")
     vorher = _abdruck(ziel.parent)
     _verweigert(_cli(ziel), ziel, vorher)
+
+
+def test_cli_verweigert_echt_aussehende_datenbank_ohne_marker(tmp_path):
+    """Nur 'admin', zwei Personen, Buchungen - der haeufigste echte Haushalt.
+    Ohne Demo-Marker wird sie nie ersetzt."""
+    ziel = _demo_db(tmp_path, 'echt')
+    _ohne_marker(ziel, "DELETE FROM users WHERE username='ben'",
+                 "UPDATE users SET username='admin' WHERE username='anna'")
+    assert _abfrage(ziel, 'SELECT COUNT(*) n FROM persons')[0]['n'] == 2
+    assert _abfrage(ziel, 'SELECT COUNT(*) n FROM expenses')[0]['n'] > 100
+    vorher = _abdruck(ziel.parent)
+    _verweigert(_cli(ziel), ziel, vorher)
+    assert _abfrage(ziel, 'SELECT COUNT(*) n FROM expenses')[0]['n'] > 100
+
+
+def test_cli_ersetzt_frische_bootstrap_datenbank(tmp_path):
+    """Nur 'admin', keine Daten, kein Marker (z. B. Abbruch vor dem Befuellen):
+    harmlos zu ersetzen."""
+    ziel = tmp_path / 'frisch' / 'k.db'
+    ziel.parent.mkdir(parents=True)
+    umgebung = _umgebung(ziel)
+    quelle = 'from app import create_app\ncreate_app()\n'
+    lauf = subprocess.run([sys.executable, '-c', quelle], env=umgebung,
+                          cwd=str(REPO), capture_output=True, text=True)
+    assert lauf.returncode == 0, lauf.stderr
+    assert [r['username'] for r in _abfrage(ziel, 'SELECT username FROM users')] == ['admin']
+    assert _abfrage(ziel, "SELECT COUNT(*) n FROM app_meta WHERE key='demo_db'")[0]['n'] == 0
+    lauf = _cli(ziel)
+    assert lauf.returncode == 0, lauf.stderr
+    assert sorted(r['username'] for r in _abfrage(ziel, 'SELECT username FROM users')
+                  ) == ['anna', 'ben']
+    assert _abfrage(ziel, 'SELECT COUNT(*) n FROM expenses')[0]['n'] > 100
+
+
+def test_seed_setzt_den_demo_marker(demo):
+    meta = _abfrage(demo['db'], "SELECT value FROM app_meta WHERE key='demo_db'")
+    assert [r['value'] for r in meta] == ['1']
 
 
 @pytest.mark.parametrize('inhalt', [os.urandom(4096), b''], ids=['zufallsbytes', 'leer'])
