@@ -170,7 +170,6 @@ def test_betraege_im_plausiblen_rahmen(demo):
     assert -50 <= negativ[0]['amount'] < 0
     assert all(0 < e['amount'] <= 3100 for e in einnahmen)
 
-    aktuell = (HEUTE.year, HEUTE.month)
     for delta in range(1, 6):          # die fuenf vollen Monate vor dem aktuellen
         jahr, monat = _monat_vor(HEUTE, delta)
         a = sum(z['amount'] for z in ausgaben if (z['year'], z['month']) == (jahr, monat))
@@ -178,7 +177,10 @@ def test_betraege_im_plausiblen_rahmen(demo):
         assert 3000 <= a <= 4200, (jahr, monat, a)
         assert 5000 <= e <= 6500, (jahr, monat, e)
 
-    # mindestens vier Ausgaben je Person und Monat (auch im aktuellen Monat)
+    # mindestens vier Ausgaben je Person und Monat. Geprueft wird fuer das feste
+    # HEUTE (24. Oktober): Der laufende Monat ist dann schon weit genug
+    # gefuellt. In den ersten Tagen eines Monats ist er dagegen duenn (Beträge
+    # sind anteilig gekuerzt) - das deckt dieser Test nicht ab.
     personen = [r['id'] for r in _abfrage(db, 'SELECT id FROM persons')]
     for delta in range(0, 6):
         jahr, monat = _monat_vor(HEUTE, delta)
@@ -186,7 +188,6 @@ def test_betraege_im_plausiblen_rahmen(demo):
             n = sum(1 for z in ausgaben if (z['year'], z['month'], z['person_id'])
                     == (jahr, monat, pid))
             assert n >= 4, (jahr, monat, pid, n)
-    assert aktuell == _monat_vor(HEUTE, 0)
 
 
 def test_kategorien_splits_und_abrechnung(demo):
@@ -539,6 +540,33 @@ def test_cli_ersetzt_frische_bootstrap_datenbank(tmp_path):
     assert sorted(r['username'] for r in _abfrage(ziel, 'SELECT username FROM users')
                   ) == ['anna', 'ben']
     assert _abfrage(ziel, 'SELECT COUNT(*) n FROM expenses')[0]['n'] > 100
+
+
+@pytest.mark.parametrize('einfuegen', [
+    "INSERT INTO categories (name) VALUES ('Eigene Kategorie')",
+    "INSERT INTO recurring_expenses (description) VALUES ('Eigene Vorlage')",
+    # Ohne Fremdschluessel-Pruefung (sqlite3-Voreinstellung) braucht das Konto
+    # keine Person; so wirkt allein die Regel fuer wealth_accounts.
+    "INSERT INTO wealth_accounts (person_id, name, type) VALUES (1, 'Konto', 'checking')",
+    "INSERT INTO month_status (year, month, settled) VALUES (2026, 1, 1)",
+], ids=['categories', 'recurring_expenses', 'wealth_accounts', 'month_status'])
+def test_cli_verweigert_bootstrap_datenbank_mit_eigenen_daten(tmp_path, einfuegen):
+    """Nur 'admin' und ohne Marker, aber mit Inhalt in einer Tabelle, die
+    seed_demo selbst als belegt abweist: das ist keine frische Datenbank und
+    wird nie ersetzt (frueher zaehlte die Erkennung nur persons, expenses,
+    income)."""
+    ziel = tmp_path / 'bootstrap' / 'k.db'
+    ziel.parent.mkdir(parents=True)
+    lauf = subprocess.run([sys.executable, '-c', 'from app import create_app\ncreate_app()\n'],
+                          env=_umgebung(ziel), cwd=str(REPO), capture_output=True, text=True)
+    assert lauf.returncode == 0, lauf.stderr
+    con = sqlite3.connect(str(ziel))
+    con.execute(einfuegen)
+    con.commit()
+    con.close()
+    assert [r['username'] for r in _abfrage(ziel, 'SELECT username FROM users')] == ['admin']
+    vorher = _abdruck(ziel.parent)
+    _verweigert(_cli(ziel), ziel, vorher)
 
 
 def test_seed_setzt_den_demo_marker(demo):

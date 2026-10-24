@@ -4,6 +4,9 @@
 .env.*
 !.env.example
 
+# Einstellungen der Demo-Umgebung (siehe README, Abschnitt Demo-Umgebung)
+demo.env
+
 # Datenverzeichnisse: echte Datenbank, Backups, Belege, Secret-Key, VAPID-Key
 data/
 data_/

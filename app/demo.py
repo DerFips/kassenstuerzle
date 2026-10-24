@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 DEMO_PASSWORT_STANDARD = 'demo1234'
 
+# app_meta-Schluessel, den seed_demo setzt: nur eine Datenbank mit diesem
+# Eintrag ersetzt `python -m app.demo` spaeter wieder.
+DEMO_MARKER_SCHLUESSEL = 'demo_db'
+
 
 def demo_reset() -> None:
     """Beendet den Gunicorn-Master, damit Docker den Container neu startet.
@@ -40,6 +44,10 @@ def schedule_demo_reset(scheduler, hour: int, minute: int) -> None:
     scheduler.add_job(
         demo_reset, 'cron', hour=hour, minute=minute,
         id='demo_reset', replace_existing=True,
+        # Standard waere eine Gnadenfrist von 1 s: wacht der Thread spaeter auf,
+        # entfiele der Reset an diesem Tag. Eine Stunde Nachsicht, und ein
+        # mehrfach verpasster Lauf zaehlt nur einmal.
+        misfire_grace_time=3600, coalesce=True,
     )
 
 
@@ -133,8 +141,10 @@ def _buchungen_fuer_monat(rng, jahr: int, monat: int, bis_tag: int,
     `nr` ist die Nummer des Monats im Zeitraum (0 = aeltester, 5 = aktueller).
     Zaehlt ein Posten pro Monat, wird er im angebrochenen aktuellen Monat
     anteilig gekuerzt, damit dort nicht ein ganzer Monat auf wenige Tage
-    faellt. Der Zufall wird immer gezogen, ob der Posten stattfindet oder
-    nicht - so bleibt die Folge der Zufallszahlen vom Datum unabhaengig.
+    faellt. Die Folge der Zufallszahlen haengt vom Datum ab (die Anzahl der
+    Wuerfe in `anzahl()` und der Bereich von `randint(1, bis_tag)` richten sich
+    nach `bis_tag`); fuer ein festes `today` sind die Daten dennoch
+    deterministisch.
     """
     letzter = _letzter_tag(jahr, monat)
     anteil = bis_tag / letzter
@@ -411,7 +421,11 @@ def seed_demo(conn, today: date | None = None, password: str | None = None) -> d
             'accounts': n_konten, 'balances': n_salden}
 
 
-DEMO_MARKER_SCHLUESSEL = 'demo_db'
+# Tabellen, die in einer frischen Bootstrap-Datenbank leer sind. seed_demo
+# prueft persons, categories, expenses und income selbst; die Erkennung zaehlt
+# zusaetzlich, was ein Haushalt sonst noch anlegt.
+_FRISCH_TABELLEN = ('persons', 'categories', 'expenses', 'income',
+                    'recurring_expenses', 'wealth_accounts', 'month_status')
 
 
 def _ist_demo_datenbank(pfad: str) -> bool:
@@ -420,7 +434,8 @@ def _ist_demo_datenbank(pfad: str) -> bool:
     Schreibgeschuetzt geoeffnet (reines sqlite3, ohne Schluessel). Erkannt wird
     entweder (a) der Marker, den seed_demo schreibt (app_meta demo_db = 1),
     oder (b) eine wirklich frische Bootstrap-Datenbank: genau ein Benutzer
-    'admin' und keine Personen, Ausgaben und Einnahmen (ein beim Befuellen
+    'admin' und keine Personen, Kategorien, Ausgaben, Einnahmen, wiederkehrenden
+    Ausgaben, Vermoegenskonten und Monatsabrechnungen (ein beim Befuellen
     zurueckgerollter Lauf endet genau so). Alles andere - auch eine Datenbank
     mit 'admin' und zwei Personen, der haeufigste echte Haushalt - ist nicht
     erkennbar und wird nie geloescht, ebenso Unoeffnbares (verschluesselt,
@@ -446,7 +461,7 @@ def _ist_demo_datenbank(pfad: str) -> bool:
                 return True
             namen = [r[0] for r in con.execute('SELECT username FROM users')]
             daten = sum(con.execute('SELECT COUNT(*) FROM %s' % t).fetchone()[0]
-                        for t in ('persons', 'expenses', 'income'))
+                        for t in _FRISCH_TABELLEN)
         finally:
             con.close()
     except sqlite3.Error:
@@ -468,10 +483,10 @@ def main() -> None:
     halber Datenbank hochkommt.
 
     Loescht die Datenbank am DATABASE_PATH - deshalb nur mit DEMO_MODE=1 und
-    nur, wenn dort nichts liegt, eine Datenbank mit Demo-Marker oder eine frische,
-    leere Bootstrap-Datenbank. Beides
-    wird geprueft, bevor irgendetwas angefasst wird; die Produktions-Datenbank
-    liegt im selben Image unter demselben Standardpfad.
+    nur, wenn dort nichts liegt, eine Datenbank mit Demo-Marker oder eine
+    frische, leere Bootstrap-Datenbank. Beides wird geprueft, bevor irgendetwas
+    angefasst wird; die Produktions-Datenbank liegt im selben Image unter
+    demselben Standardpfad.
     """
     if os.environ.get('DEMO_MODE') != '1':
         raise SystemExit('app.demo laeuft nur mit DEMO_MODE=1 (es loescht die '

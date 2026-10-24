@@ -139,6 +139,14 @@ RATE_LIMITS = {
     'main.export_csv':         '20 per minute',
 }
 
+# Demo-Modus: Limit fuer das Anmelden (nur POST) - siehe create_app(). Bewusst
+# nicht in RATE_LIMITS: die Tabelle beschreibt den Normalbetrieb.
+DEMO_LOGIN_LIMIT = '60 per minute'
+
+# Demo-Modus: Obergrenze fuer eine Anfrage. Uploads sind dort gesperrt; ohne
+# Grenze fuellt eine einzelne 30-MB-Beschreibung das tmpfs der Demo.
+DEMO_MAX_CONTENT_LENGTH = 256 * 1024
+
 
 def _laeuft_im_container() -> bool:
     """Erkennt, ob dieser Prozess in einem Container laeuft (Befund I7).
@@ -296,6 +304,8 @@ def create_app():
     # (Sperr-Waechter, Banner, Anmelde-Kasten) lesen den Wert zur Laufzeit aus
     # app.config - so laesst er sich im Test umschalten.
     app.config['DEMO_MODE'] = os.environ.get('DEMO_MODE') == '1'
+    if app.config['DEMO_MODE']:
+        app.config['MAX_CONTENT_LENGTH'] = DEMO_MAX_CONTENT_LENGTH
     app.config['DEMO_PASSWORD'] = os.environ.get('DEMO_PASSWORD') or 'demo1234'
     app.config['DEMO_RESET_HOUR'] = int(os.environ.get('DEMO_RESET_HOUR', '4'))
     app.config['DEMO_RESET_MINUTE'] = int(os.environ.get('DEMO_RESET_MINUTE', '0'))
@@ -317,6 +327,7 @@ def create_app():
     app.extensions['limiter'] = limiter  # Für Zugriff in Blueprints
 
     from .routes.main import main_bp, init_db
+    from flask import request
     app.register_blueprint(main_bp)
 
     # Rate-Limits auf sensible Endpunkte anwenden (Tabelle: RATE_LIMITS oben)
@@ -328,6 +339,22 @@ def create_app():
             # app.view_functions weiter auf die ungebremste Originalfunktion und
             # die gesamte Rate-Limit-Schicht ist wirkungslos - nachgewiesen mit
             # 15 Login-Versuchen ohne einen einzigen 429.
+            if endpoint == 'main.login':
+                # Demo-Abweichung, zur Laufzeit aus app.config['DEMO_MODE']
+                # gelesen (RATE_LIMITS bleibt unveraendert). Jeder anonyme
+                # Besuch landet auf GET /login, hinter dem Reverse-Proxy
+                # teilen sich alle Besucher einen Zaehler (Befund M1) - mit
+                # dem Standardlimit bekaemen normale Besucher in der Demo nach
+                # zehn Seitenaufrufen ein 429. Dort zaehlt deshalb nur das
+                # Anmelden (POST), mit dem grosszuegigeren Demo-Limit.
+                app.view_functions[endpoint] = limiter.limit(
+                    lambda limit_str=limit_str: (
+                        DEMO_LOGIN_LIMIT if app.config.get('DEMO_MODE') else limit_str),
+                    exempt_when=lambda: (
+                        bool(app.config.get('DEMO_MODE'))
+                        and request.method != 'POST'),
+                )(view_fn)
+                continue
             app.view_functions[endpoint] = limiter.limit(limit_str)(view_fn)
 
     # ── Antwort auf ein erreichtes Limit (Befund I4) ──────────────────────

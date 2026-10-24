@@ -155,3 +155,48 @@ def test_kein_eintrag_in_rate_limits_laeuft_ins_leere(eigene_app):
             get_qualified_name(eigene_app.view_functions[e]))
     ]
     assert not ohne_limit, f'Kein Limit vermerkt fuer: {ohne_limit}'
+
+
+# ── Demo-Modus: nur das Anmelden (POST) zaehlt, 60 statt 10 pro Minute ─────────
+#
+# Befund aus dem Gesamt-Review: `limiter.limit('10 per minute')` gilt fuer jede
+# HTTP-Methode. Jeder anonyme Besuch landet auf GET /login (login_required
+# leitet dorthin um), ebenso jedes Abmelden - in einer oeffentlichen Demo
+# bekaemen normale Besucher nach zehn Seitenaufrufen pro Minute ein 429.
+
+def test_ohne_demo_modus_zaehlen_auch_seitenaufrufe_der_anmeldung(eigene_app):
+    """Bestehendes Verhalten ausserhalb der Demo bleibt: 10 erlaubt, dann 429."""
+    assert not eigene_app.config.get('DEMO_MODE')
+    client = eigene_app.test_client()
+    codes = [client.get('/login').status_code for _ in range(12)]
+    assert codes == [200] * 10 + [429] * 2, codes
+
+
+def test_demo_modus_seitenaufrufe_der_anmeldung_sind_nicht_begrenzt(eigene_app):
+    eigene_app.config['DEMO_MODE'] = True
+    client = eigene_app.test_client()
+    codes = [client.get('/login').status_code for _ in range(15)]
+    assert codes == [200] * 15, codes
+
+
+def test_demo_modus_anmelden_ist_auf_60_pro_minute_begrenzt(eigene_app):
+    eigene_app.config['DEMO_MODE'] = True
+    client = eigene_app.test_client()
+    codes = [client.post('/login',
+                         data={'username': 'unbekannt', 'password': 'falsch'}).status_code
+             for _ in range(62)]
+    assert codes[:60] == [200] * 60, f'Zu frueh gebremst: {codes}'
+    assert codes[60:] == [429] * 2, f'Nicht ab dem 61. gebremst: {codes}'
+
+
+def test_demo_modus_seitenaufrufe_verbrauchen_das_anmelde_limit_nicht(eigene_app):
+    """GET zaehlt nicht mit: nach 30 Seitenaufrufen bleiben alle 60 Versuche."""
+    eigene_app.config['DEMO_MODE'] = True
+    client = eigene_app.test_client()
+    for _ in range(30):
+        assert client.get('/login').status_code == 200
+    codes = [client.post('/login',
+                         data={'username': 'unbekannt', 'password': 'falsch'}).status_code
+             for _ in range(61)]
+    assert codes[:60] == [200] * 60, codes
+    assert codes[60] == 429, codes

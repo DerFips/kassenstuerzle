@@ -91,7 +91,7 @@ git pull && docker compose up -d --build
 
 ## Demo-Umgebung
 
-Die Demo ist eine vorbefüllte Kopie der App zum Vorführen und Ausprobieren. Sie läuft als eigenes Compose-Projekt (`kassenstuerzle-demo`) und kommt weder an die `.env` noch an das Verzeichnis `./data` der echten Installation. Beide lassen sich nebeneinander betreiben (echte App auf Port 5000, Demo auf Port 5001).
+Die Demo ist eine vorbefüllte Kopie der App zum Vorführen und Ausprobieren. Sie läuft als eigenes Compose-Projekt (`kassenstuerzle-demo`) und kommt nicht an das Verzeichnis `./data` der echten Installation. Compose liest `${DEMO_*}`-Werte aus einer `.env` im Projektverzeichnis zur Interpolation, aber nichts davon gelangt in den Container (es gibt kein `env_file`). Wer eine `demo.env` nutzt (siehe unten), vermeidet auch das. Beide Installationen lassen sich nebeneinander betreiben (echte App auf Port 5000, Demo auf Port 5001).
 
 Es gibt zwei Zugänge mit je sechs Monaten Beispieldaten:
 
@@ -108,7 +108,33 @@ docker compose -f docker-compose.demo.yml up -d --build
 
 Danach ist die Demo unter `http://127.0.0.1:5001` erreichbar (anderer Port über `DEMO_PORT`).
 
-Besucher können in der Demo nicht: Passwörter ändern, Benutzer und Personen anlegen oder löschen, Backups erstellen, herunterladen oder wiederherstellen, Dateien hochladen (PDF-Import, Belege, CSV-Import) und Push-Benachrichtigungen einrichten. Ausgaben, Einnahmen, Umbuchen, Vermögen, Abrechnung und Übersicht funktionieren normal. Die Sperre bei fehlgeschlagenen Anmeldungen ist im Demo-Modus abgeschaltet, weil die Zugangsdaten öffentlich sind.
+Achtung: Mit dem Standard `HTTPS=1` trägt das Sitzungscookie das Secure-Flag. Über reines `http://127.0.0.1:5001` nehmen nicht alle Browser es an (Safari lehnt es ab), die Anmeldung scheitert dann scheinbar grundlos. Zum lokalen Ausprobieren deshalb `DEMO_HTTPS=0` setzen:
+
+```bash
+DEMO_HTTPS=0 docker compose -f docker-compose.demo.yml up -d --build
+```
+
+#### Einstellungen in `demo.env`
+
+`DEMO_PORT`, `DEMO_PASSWORD`, `DEMO_HTTPS`, `DEMO_RESET_HOUR` und `DEMO_RESET_MINUTE` aus der Shell gelten nur für den einen Aufruf. Beim Aktualisieren wird der Container neu erstellt, dann fehlen sie. Dauerhaft lassen sie sich in einer optionalen Datei `demo.env` im Projektverzeichnis ablegen (steht in `.gitignore`, wird nicht eingecheckt):
+
+```
+DEMO_PORT=5001
+DEMO_PASSWORD=demo1234
+DEMO_HTTPS=1
+DEMO_RESET_HOUR=4
+DEMO_RESET_MINUTE=0
+```
+
+Das Update-Skript nutzt die Datei, wenn sie existiert. Von Hand wird sie mit `--env-file` übergeben:
+
+```bash
+docker compose --env-file demo.env -f docker-compose.demo.yml up -d --build
+```
+
+Mit `--env-file` liest Compose die `.env` der echten Installation nicht mehr zur Interpolation.
+
+Besucher können in der Demo nicht: Passwörter ändern oder zurücksetzen, Benutzer anlegen, ändern oder löschen, Personen anlegen oder löschen, den Einrichtungsassistenten abschließen, Backups erstellen, auflisten, herunterladen, wiederherstellen oder löschen, Dateien hochladen (PDF-Import, Belege, CSV-Import) und sich für Push-Benachrichtigungen anmelden. Ausgaben, Einnahmen, Umbuchen, Vermögen, Abrechnung und Übersicht funktionieren normal. Die Sperre bei fehlgeschlagenen Anmeldungen ist im Demo-Modus abgeschaltet, weil die Zugangsdaten öffentlich sind.
 
 Alle Besucher teilen sich dieselben zwei Konten und sehen bis zum Reset die Eingaben der anderen.
 
@@ -122,6 +148,18 @@ Zum Testen lässt sich die Uhrzeit ändern, z. B. auf wenige Minuten später:
 DEMO_RESET_HOUR=14 DEMO_RESET_MINUTE=35 docker compose -f docker-compose.demo.yml up -d
 ```
 
+Danach die Uhrzeit wieder zurücksetzen: den Container ohne die Variablen neu erstellen. Sonst bleibt die Testzeit bestehen. (Mit `demo.env`: die Werte dort zurückändern und mit `--env-file demo.env` neu erstellen.)
+
+```bash
+docker compose -f docker-compose.demo.yml up -d --force-recreate
+```
+
+Ein Reset von Hand (frische Demo-Daten sofort, ohne die Uhrzeit zu ändern) geht mit einem Neustart des Containers:
+
+```bash
+docker compose -f docker-compose.demo.yml restart
+```
+
 ### Aktualisieren
 
 Neue Version holen, Image bauen und die Demo neu starten:
@@ -130,7 +168,7 @@ Neue Version holen, Image bauen und die Demo neu starten:
 ./scripts/demo-update.sh
 ```
 
-Von Hand sind es zwei Befehle:
+Gibt es eine `demo.env`, nutzt das Skript sie. Von Hand sind es zwei Befehle (mit `--env-file demo.env` vor `-f`, falls es die Datei gibt):
 
 ```bash
 git pull --ff-only
@@ -140,7 +178,7 @@ git pull --ff-only
 docker compose -f docker-compose.demo.yml up -d --build
 ```
 
-Der Container wird dabei neu erstellt und startet mit frischen Demo-Daten.
+Der Container wird dabei neu erstellt und startet mit frischen Demo-Daten. Werte, die nur in der Shell standen, gelten danach nicht mehr, deshalb gehören dauerhafte Einstellungen in die `demo.env`.
 
 ### Öffentlich betreiben
 
@@ -150,7 +188,7 @@ Die Demo bindet nur an `127.0.0.1:${DEMO_PORT:-5001}`. Für den Zugriff von auß
 DEMO_HTTPS=0 docker compose -f docker-compose.demo.yml up -d --build
 ```
 
-Hinweis zum Rate-Limit: Die Anmeldung ist auf 10 Versuche pro Minute begrenzt. Der Zähler gilt pro Adresse, und hinter einem Reverse-Proxy erscheinen alle Besucher mit der Adresse des Proxys, teilen sich also ein Limit (bekannter offener Befund M1). Bei einer öffentlichen Demo sollte der Proxy deshalb zusätzlich selbst Anfragen begrenzen.
+Hinweis zum Rate-Limit: Im Demo-Modus zählt nur das Anmelden (POST auf `/login`), und zwar 60 pro Minute; das Aufrufen der Anmeldeseite zählt nicht. (Ohne Demo-Modus gilt unverändert 10 pro Minute für jeden Aufruf von `/login`.) Der Zähler gilt pro Adresse, und hinter einem Reverse-Proxy erscheinen alle Besucher mit der Adresse des Proxys, teilen sich also einen Zähler (bekannter offener Befund M1). Ein Limit im Proxy ändert daran nichts. Die eigentliche Lösung ist, dass die App die echte Besucheradresse erkennt (ProxyFix, Befund M1); das ist eine Folgeaufgabe und noch nicht umgesetzt. Bis dahin können viele gleichzeitige Besucher einer öffentlichen Demo einander die 60 Anmeldungen pro Minute aufbrauchen.
 
 `python -m app.demo` erzeugt die Demo-Datenbank und wird nur vom Demo-Container ausgeführt. Ohne `DEMO_MODE=1` verweigert es den Start und ersetzt nie eine echte Datenbank.
 
@@ -187,18 +225,19 @@ Die vollständig gepinnte `requirements.lock` (mit Hashes) wird mit `make lock` 
 
 ```
 app/
-  __init__.py        App-Factory, Sicherheits-Header, Rate-Limits, Scheduler
-  routes/main.py     Routen, Berechnungen (Abrechnung, Übersicht), Migrationen
-  translations.py    Texte Deutsch/Englisch (jeder Schlüssel in beiden Sprachen)
-  templates/         Jinja2-Templates
-  static/            PWA-Manifest, Service Worker, Icons
-gunicorn.conf.py     Server-Konfiguration
-tests/               Regressionstests (pytest)
-docs/                Sicherheitsprüfung, Specs und Pläne
-Dockerfile           Image (Python 3.11, Tesseract, Non-Root-Nutzer uid 1000)
-docker-compose.yml   Dienst, Port-Bindung, Daten-Mount
-docker-compose.demo.yml  Demo-Umgebung (eigenes Projekt, Daten nur im Speicher)
-scripts/             demo-update.sh (Demo aktualisieren)
+  __init__.py              App-Factory, Sicherheits-Header, Rate-Limits, Scheduler
+  demo.py                  Demo-Umgebung: Startdaten und täglicher Reset
+  routes/main.py           Routen, Berechnungen (Abrechnung, Übersicht), Migrationen
+  translations.py          Texte Deutsch/Englisch (jeder Schlüssel in beiden Sprachen)
+  templates/               Jinja2-Templates
+  static/                  PWA-Manifest, Service Worker, Icons
+gunicorn.conf.py           Server-Konfiguration
+tests/                     Regressionstests (pytest)
+docs/                      Sicherheitsprüfung, Specs und Pläne
+Dockerfile                 Image (Python 3.11, Tesseract, Non-Root-Nutzer uid 1000)
+docker-compose.yml         Dienst, Port-Bindung, Daten-Mount
+docker-compose.demo.yml    Demo-Umgebung (eigenes Projekt, Daten nur im Speicher)
+scripts/                   demo-update.sh (Demo aktualisieren)
 ```
 
 ## Sicherheit

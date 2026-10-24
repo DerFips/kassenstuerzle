@@ -20,7 +20,7 @@ services:
       # ist das Verzeichnis leer, der Reset hinterlaesst also nichts. Es gibt
       # bewusst keinen Bind-Mount des Host-Verzeichnisses: Die Demo kommt weder
       # an die Daten der echten Installation noch dauerhaft auf die Platte.
-      - /app/data:uid=1000,gid=1000,mode=0700,size=64m
+      - /app/data:uid=1000,gid=1000,mode=0700,size=128m
     restart: unless-stopped
     # Bewusst keine Umgebungsdatei: Schluessel und Passwoerter der echten
     # Installation sind fuer die Demo unerreichbar. Alles Noetige steht hier.
@@ -44,3 +44,10 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 512m
     pids_limit: 200
+    # Log-Rotation: ohne Grenze waechst das Log des Containers auf der Platte
+    # des Hosts unbegrenzt (die Demo laeuft dauerhaft und oeffentlich).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

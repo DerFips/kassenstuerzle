@@ -11,6 +11,7 @@ Alle nennenswerten Änderungen an Kassenstürzle. Die Versionsnummern entspreche
   - **Zwei Benutzer mit sechs Monaten Beispieldaten:** `anna` (Administrator) und `ben` (Mitglied), Passwort aus `DEMO_PASSWORD` (Standard `demo1234`).
   - **Täglicher Reset um 4:00 Uhr** durch Neustart des Containers (`DEMO_RESET_HOUR` und `DEMO_RESET_MINUTE` ändern die Uhrzeit). Die Daten liegen nur im Arbeitsspeicher (`tmpfs`).
   - **Update-Skript** `scripts/demo-update.sh` und neuer README-Abschnitt "Demo-Umgebung".
+  - **Betrieb:** optionale, nicht eingecheckte Datei `demo.env` für `DEMO_*`-Einstellungen, Log-Rotation und 128 MB `tmpfs`; im Demo-Modus ist eine Anfrage auf 256 KB begrenzt, und beim Anmelden zählt nur der POST (60 pro Minute) statt jedes Seitenaufrufs.
 
 ### Hinweise
 

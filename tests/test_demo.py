@@ -163,14 +163,29 @@ def test_banner_nur_im_demo_modus(app, auth_client):
         app.config['DEMO_MODE'] = False
     assert 'id="demo-banner"' in html
     assert '04:00' in html
+    # Ein dauerhaft sichtbarer Hinweis ist eine Statusanzeige, kein Alarm:
+    # role="alert" liest Screenreader bei jedem Seitenaufruf als Warnung vor.
+    banner = re.search(r'<div id="demo-banner"[^>]*>', html).group(0)
+    assert 'role="status"' in banner
+    assert 'role="alert"' not in banner
+
+
+def _anmelde_kasten(html):
+    """Der gerenderte Kasten `demo-login-box` samt seinem Inhalt. Die Rohtexte
+    stehen auch in window.I18N auf jeder Seite ("ben" steckt in "haben") und
+    taugen deshalb nicht als Nachweis."""
+    start = html.index('<div id="demo-login-box"')
+    ende = html.index('</ul>', start)
+    return html[start:ende]
 
 
 def test_anmelde_kasten_nur_im_demo_modus(client, app, demo_modus):
     html = client.get('/login').get_data(as_text=True)
     assert 'id="demo-login-box"' in html
-    assert 'anna' in html and 'ben' in html
+    kasten = _anmelde_kasten(html)
+    assert '<li>anna – Administrator' in kasten
+    assert '<li>ben – Mitglied' in kasten
     assert 'als Passwort demo1234, und' in html
-    assert 'Administrator' in html and 'Mitglied' in html
 
     app.config['DEMO_MODE'] = False
     html = client.get('/login').get_data(as_text=True)
@@ -191,7 +206,7 @@ def test_demo_passwort_wird_maskiert(app, client, demo_modus):
 def test_demo_texte_in_beiden_sprachen():
     for key in ('srv.demo_disabled', 'demo.banner', 'demo.login_title',
                 'demo.login_steps', 'demo.login_anna', 'demo.login_ben',
-                'demo.login_tip'):
+                'demo.login_tip', 'login.invalid_simple'):
         for lang in ('de', 'en'):
             assert TRANSLATIONS[lang].get(key), (lang, key)
 
@@ -229,6 +244,35 @@ def test_demo_anmeldung_wird_nicht_gesperrt(client, demo_modus):
         _zaehler_leeren()
 
 
+def _fehlermeldung(html):
+    """Text des gerenderten Hinweiskastens (nicht der Rohtexte in window.I18N)."""
+    treffer = re.search(r'<div class="alert alert-danger[^"]*"[^>]*>(.*?)<button',
+                        html, re.S)
+    assert treffer, 'kein Hinweiskasten gerendert'
+    return treffer.group(1).strip()
+
+
+def test_demo_falsche_anmeldung_nennt_keine_restversuche(client, demo_modus):
+    """Es gibt in der Demo keine Sperre, also auch keine "verbleibenden Versuche"."""
+    _zaehler_leeren()
+    for name in ('admin', ''):
+        html = client.post('/login', data={'username': name,
+                                           'password': 'falsch'}).get_data(as_text=True)
+        assert _fehlermeldung(html) == 'Ungültiger Benutzername oder Passwort.'
+
+
+def test_ohne_demo_modus_nennt_falsche_anmeldung_die_restversuche(app, client):
+    assert not app.config.get('DEMO_MODE')
+    _zaehler_leeren()
+    try:
+        html = client.post('/login', data={'username': 'admin',
+                                           'password': 'falsch'}).get_data(as_text=True)
+        assert 'Versuche verbleibend' in _fehlermeldung(html)
+        assert '4 Versuche verbleibend' in _fehlermeldung(html)
+    finally:
+        _zaehler_leeren()
+
+
 def test_ohne_demo_modus_bleibt_die_sperre_aktiv(app, client):
     from app.routes import main as m
     assert not app.config.get('DEMO_MODE')
@@ -259,6 +303,18 @@ def test_reset_job_steht_standardmaessig_auf_vier_uhr(stunde, minute):
     assert job is not None
     assert _feld(job, 'hour') == str(stunde)
     assert _feld(job, 'minute') == str(minute)
+
+
+def test_reset_job_holt_einen_verpassten_lauf_nach():
+    """APScheduler-Standard ist eine Gnadenfrist von 1 s: wacht der Thread
+    spaeter auf, entfiele der Reset an diesem Tag."""
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.demo import schedule_demo_reset
+    s = BackgroundScheduler()
+    schedule_demo_reset(s, 4, 0)
+    job = s.get_job('demo_reset')
+    assert job.misfire_grace_time == 3600
+    assert job.coalesce is True
 
 
 def test_reset_beendet_im_container_den_gunicorn_master(monkeypatch):
@@ -414,6 +470,16 @@ def test_compose_demo_struktur_und_isolation():
     _pruefe_compose_struktur(_compose_json(COMPOSE_DEMO))
 
 
+def test_compose_demo_tmpfs_128m_und_log_rotation():
+    web = _compose_json(COMPOSE_DEMO)['services']['web']
+    # Eine einzelne grosse Anfrage ist auf 256 KB begrenzt; 128m tmpfs bleiben
+    # weit unter mem_limit (512m).
+    assert web['tmpfs'] == ['/app/data:uid=1000,gid=1000,mode=0700,size=128m']
+    # Ohne Rotation waechst das json-file-Log des Containers unbegrenzt.
+    assert web['logging']['driver'] == 'json-file'
+    assert web['logging']['options'] == {'max-size': '10m', 'max-file': '3'}
+
+
 def test_compose_demo_port_folgt_demo_port():
     config = _compose_json(COMPOSE_DEMO, {'DEMO_PORT': '5099'})
     _pruefe_compose_struktur(config, port='5099')
@@ -479,4 +545,100 @@ def test_update_skript_ist_ausfuehrbar_und_strikt():
     assert text.startswith('#!/usr/bin/env bash')
     assert 'set -euo pipefail' in text
     assert 'git pull --ff-only' in text
-    assert 'docker compose -f docker-compose.demo.yml up -d --build' in text
+    assert 'docker compose' in text
+    assert '-f docker-compose.demo.yml up -d --build' in text
+    # Das Skript arbeitet immer im Projektverzeichnis, egal wo es aufgerufen wird.
+    assert 'cd "$(dirname "$0")/.."' in text
+    # Optionale, nicht eingecheckte Einstellungsdatei: sonst gingen DEMO_*-Werte
+    # aus der Shell beim Neuerstellen des Containers verloren.
+    assert 'demo.env' in text
+    assert '--env-file' in text
+
+
+# --- Grosse Anfragen (Demo-Modus) ------------------------------------------------
+
+def _app_mit_demo_modus(monkeypatch, tmp_path, demo):
+    from app import create_app
+    monkeypatch.setenv('DATABASE_PATH', str(tmp_path / 'wegwerf.db'))
+    monkeypatch.setenv('DISABLE_SCHEDULER', '1')
+    if demo:
+        monkeypatch.setenv('DEMO_MODE', '1')
+    else:
+        monkeypatch.delenv('DEMO_MODE', raising=False)
+    neue_app = create_app()
+    neue_app.config.update(TESTING=True)
+    return neue_app
+
+
+@pytest.mark.parametrize('demo,grenze', [(True, 256 * 1024), (False, 32 * 1024 * 1024)])
+def test_anfragegroesse_nur_im_demo_modus_begrenzt(monkeypatch, tmp_path, demo, grenze):
+    neue_app = _app_mit_demo_modus(monkeypatch, tmp_path, demo)
+    assert neue_app.config['MAX_CONTENT_LENGTH'] == grenze
+
+
+def _grosse_anfrage(neue_app):
+    """Meldet 'admin' an und sendet eine Beschreibung von rund 300 KB."""
+    from app.routes import main as m
+    conn = m._open_db(m.DB_PATH)
+    try:
+        conn.execute("UPDATE users SET must_change_password=0 WHERE username='admin'")
+        conn.commit()
+    finally:
+        conn.close()
+    c = neue_app.test_client()
+    res = c.post('/login', data={'username': 'admin', 'password': 'test-password-123'})
+    assert res.status_code == 302, 'Login fehlgeschlagen'
+    token = c.get('/api/csrf-token').get_json()['csrf_token']
+    return c.post('/api/expenses/save', headers={'X-CSRF-Token': token},
+                  json=_body(year=2026, month=9, rows=[
+                      {'client_key': 'c1', 'day': 3, 'description': 'x' * (300 * 1024),
+                       'amount': 1}]))
+
+
+def test_demo_modus_lehnt_anfrage_ueber_256_kb_mit_413_ab(monkeypatch, tmp_path):
+    res = _grosse_anfrage(_app_mit_demo_modus(monkeypatch, tmp_path, True))
+    assert res.status_code == 413
+
+
+def test_ohne_demo_modus_wird_grosse_anfrage_nicht_mit_413_abgelehnt(monkeypatch, tmp_path):
+    res = _grosse_anfrage(_app_mit_demo_modus(monkeypatch, tmp_path, False))
+    assert res.status_code != 413
+
+
+def test_demo_env_ist_nicht_eingecheckt():
+    zeilen = [z.strip() for z in
+              (REPO / '.gitignore').read_text(encoding='utf-8').splitlines()]
+    assert 'demo.env' in zeilen
+
+
+def _fuehre_update_skript_aus(tmp_path, mit_demo_env):
+    """Fuehrt eine Kopie des Skripts mit Attrappen fuer git und docker aus und
+    liefert die Argumente des `docker compose`-Aufrufs."""
+    projekt = tmp_path / 'projekt'
+    (projekt / 'scripts').mkdir(parents=True)
+    (tmp_path / 'bin').mkdir()
+    kopie = projekt / 'scripts' / 'demo-update.sh'
+    shutil.copy(UPDATE_SKRIPT, kopie)
+    if mit_demo_env:
+        (projekt / 'demo.env').write_text('DEMO_PORT=5099\n', encoding='utf-8')
+    attrappen = tmp_path / 'bin'
+    protokoll = tmp_path / 'aufrufe.txt'
+    for name in ('git', 'docker'):
+        skript = attrappen / name
+        skript.write_text('#!/bin/sh\necho "%s $*" >> "%s"\n' % (name, protokoll),
+                          encoding='utf-8')
+        skript.chmod(0o755)
+    env = dict(os.environ, PATH='%s:%s' % (attrappen, os.environ['PATH']))
+    # Aus einem fremden Verzeichnis starten: das Skript muss selbst wechseln.
+    ergebnis = subprocess.run(['bash', str(kopie)], cwd=tmp_path, env=env,
+                              capture_output=True, text=True)
+    assert ergebnis.returncode == 0, ergebnis.stderr
+    return protokoll.read_text(encoding='utf-8').splitlines()
+
+
+def test_update_skript_nutzt_demo_env_nur_wenn_vorhanden(tmp_path):
+    ohne = _fuehre_update_skript_aus(tmp_path / 'a', mit_demo_env=False)
+    assert ohne[-1] == 'docker compose -f docker-compose.demo.yml up -d --build'
+    mit = _fuehre_update_skript_aus(tmp_path / 'b', mit_demo_env=True)
+    assert mit[-1] == ('docker compose --env-file demo.env '
+                       '-f docker-compose.demo.yml up -d --build')

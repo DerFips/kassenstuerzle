@@ -1626,7 +1626,10 @@ def login():
                 if ip_state['count'] >= _MAX_IP_ATTEMPTS:
                     ip_state['locked_until'] = _time.time() + _LOGIN_LOCKOUT_SECONDS
                     ip_state['count'] = 0
-            if state is not None:
+            if demo:
+                # Keine Sperre in der Demo, also auch keine Restversuche.
+                flash(t('login.invalid_simple'), 'danger')
+            elif state is not None:
                 state['count'] += 1
                 if state['count'] >= _MAX_LOGIN_ATTEMPTS:
                     state['locked_until'] = _time.time() + _LOGIN_LOCKOUT_SECONDS

@@ -104,7 +104,7 @@ services:
     command: ["sh", "-c", "python -m app.demo && exec gunicorn --config gunicorn.conf.py run:app"]
     ports: ["127.0.0.1:${DEMO_PORT:-5001}:5000"]
     user: "1000:1000"
-    tmpfs: ["/app/data:uid=1000,gid=1000,mode=0700,size=64m"]
+    tmpfs: ["/app/data:uid=1000,gid=1000,mode=0700,size=128m"]
     restart: unless-stopped
     environment:   # keine env_file, keine Bind-Mounts
       DEMO_MODE: "1"
@@ -118,8 +118,13 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 512m
     pids_limit: 200
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
 ```
 
+- `logging` rotiert das Container-Log (3 Dateien à 10 MB), damit es auf dem Host nicht unbegrenzt wächst.
+- Im Demo-Modus ist eine Anfrage auf 256 KB begrenzt (`MAX_CONTENT_LENGTH`, HTTP 413): Uploads sind ohnehin gesperrt, und eine einzelne große Anfrage füllt sonst das tmpfs (128m, weit unter `mem_limit`).
 - `exec gunicorn` macht Gunicorn zum Hauptprozess (PID 1), damit `SIGTERM` an den Master den Container sauber beendet.
 - `ADMIN_PASSWORD` verhindert, dass beim Anlegen des Bootstrap-Admins ein Zufallspasswort ins Log geschrieben wird.
 - `ALLOW_UNENCRYPTED=1`, weil die Demo keine echten Daten enthält.
@@ -162,5 +167,5 @@ Neue Testdatei `tests/test_demo.py`:
 - Reverse-Proxy, Domain und TLS-Zertifikat.
 - Getrennte Datensätze pro Besucher: alle Besucher teilen sich dieselben zwei Zugänge und sehen die Eingaben der anderen bis zum Reset.
 - Ein "Jetzt zurücksetzen"-Knopf. Der Reset läuft nur zeitgesteuert (oder von Hand per `docker compose restart`).
-- Ein vollständiger Schutz vor Missbrauch (Ratenbegrenzung gegen Massenzugriffe, Überwachung). Es gelten die vorhandenen Rate-Limits und die Container-Grenzen.
+- Ein vollständiger Schutz vor Missbrauch (Ratenbegrenzung gegen Massenzugriffe, Überwachung). Es gelten die vorhandenen Rate-Limits (im Demo-Modus zählt auf der Anmeldung nur das Anmelden per POST, 60 pro Minute) und die Container-Grenzen.
 - Lokalisierte Demo-Texte jenseits von Deutsch und Englisch.

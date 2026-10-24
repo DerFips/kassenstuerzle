@@ -83,6 +83,7 @@ TRANSLATIONS = {
         'login.locked': 'Zu viele Fehlversuche. Bitte {seconds}s warten.',
         'login.locked_now': 'Konto für {seconds}s gesperrt nach zu vielen Fehlversuchen.',
         'login.invalid': 'Ungültiger Benutzername oder Passwort ({remaining} Versuche verbleibend).',
+        'login.invalid_simple': 'Ungültiger Benutzername oder Passwort.',
 
         # ── Monat (month.html) ───────────────────────────────────────────
         'month.settled_badge': 'Beglichen',
@@ -632,6 +633,7 @@ TRANSLATIONS = {
         'login.locked': 'Too many failed attempts. Please wait {seconds}s.',
         'login.locked_now': 'Account locked for {seconds}s after too many failed attempts.',
         'login.invalid': 'Invalid username or password ({remaining} attempts remaining).',
+        'login.invalid_simple': 'Invalid username or password.',
 
         # ── Month (month.html) ───────────────────────────────────────────
         'month.settled_badge': 'Settled',
