@@ -429,12 +429,18 @@ def create_app():
         from apscheduler.schedulers.background import BackgroundScheduler
         from .routes.main import check_and_send_reminders
         scheduler = BackgroundScheduler(daemon=True)
-        reminder_hour = int(os.environ.get('PUSH_REMINDER_HOUR', '9'))
-        scheduler.add_job(
-            lambda: check_and_send_reminders(app),
-            'cron', hour=reminder_hour, minute=0,
-            id='push_reminders', replace_existing=True,
-        )
+        if app.config['DEMO_MODE']:
+            # Demo: statt der Erinnerungen der taegliche Reset (Neustart).
+            from .demo import schedule_demo_reset
+            schedule_demo_reset(scheduler, app.config['DEMO_RESET_HOUR'],
+                                app.config['DEMO_RESET_MINUTE'])
+        else:
+            reminder_hour = int(os.environ.get('PUSH_REMINDER_HOUR', '9'))
+            scheduler.add_job(
+                lambda: check_and_send_reminders(app),
+                'cron', hour=reminder_hour, minute=0,
+                id='push_reminders', replace_existing=True,
+            )
         scheduler.start()
         app.extensions['scheduler'] = scheduler
 

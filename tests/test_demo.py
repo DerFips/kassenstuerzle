@@ -3,6 +3,10 @@
 Der Demo-Modus liegt in app.config['DEMO_MODE'] und wird bei jeder Anfrage neu
 gelesen, deshalb schaltet die Fixture ihn nur um und stellt ihn danach zurueck.
 """
+import logging
+import os
+import signal
+
 import pytest
 
 from app.translations import TRANSLATIONS
@@ -232,3 +236,65 @@ def test_ohne_demo_modus_bleibt_die_sperre_aktiv(app, client):
         assert res.status_code == 200, 'Sperre muss ausserhalb der Demo greifen'
     finally:
         _zaehler_leeren()
+
+
+# ── Taeglicher Reset (Task 2) ────────────────────────────────────────────────
+
+def _feld(job, name):
+    return next(str(f) for f in job.trigger.fields if f.name == name)
+
+
+@pytest.mark.parametrize('stunde,minute', [(4, 0), (6, 30)])
+def test_reset_job_steht_standardmaessig_auf_vier_uhr(stunde, minute):
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from app.demo import schedule_demo_reset
+    s = BackgroundScheduler()  # bewusst nicht gestartet
+    schedule_demo_reset(s, stunde, minute)
+    job = s.get_job('demo_reset')
+    assert job is not None
+    assert _feld(job, 'hour') == str(stunde)
+    assert _feld(job, 'minute') == str(minute)
+
+
+def test_reset_beendet_im_container_den_gunicorn_master(monkeypatch):
+    from app.demo import demo_reset
+    aufrufe = []
+    monkeypatch.setenv('KASSENSTUERZLE_IM_CONTAINER', '1')
+    monkeypatch.setattr(os, 'getppid', lambda: 4242)
+    monkeypatch.setattr(os, 'kill', lambda pid, sig: aufrufe.append((pid, sig)))
+    demo_reset()
+    assert aufrufe == [(4242, signal.SIGTERM)]
+
+
+def test_reset_tut_ausserhalb_des_containers_nichts(monkeypatch, caplog):
+    from app.demo import demo_reset
+    aufrufe = []
+    monkeypatch.delenv('KASSENSTUERZLE_IM_CONTAINER', raising=False)
+    monkeypatch.setattr(os, 'getppid', lambda: 4242)
+    monkeypatch.setattr(os, 'kill', lambda pid, sig: aufrufe.append((pid, sig)))
+    with caplog.at_level(logging.WARNING):
+        demo_reset()
+    assert aufrufe == []
+    assert [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+@pytest.mark.parametrize('demo,vorhanden,fehlt', [
+    ('1', 'demo_reset', 'push_reminders'),
+    (None, 'push_reminders', 'demo_reset'),
+])
+def test_create_app_im_demo_modus_traegt_reset_statt_erinnerung_ein(
+        monkeypatch, tmp_path, demo, vorhanden, fehlt):
+    from app import create_app
+    monkeypatch.setenv('DATABASE_PATH', str(tmp_path / 'wegwerf.db'))
+    monkeypatch.delenv('DISABLE_SCHEDULER', raising=False)
+    if demo is None:
+        monkeypatch.delenv('DEMO_MODE', raising=False)
+    else:
+        monkeypatch.setenv('DEMO_MODE', demo)
+    neue_app = create_app()
+    try:
+        scheduler = neue_app.extensions['scheduler']
+        assert scheduler.get_job(vorhanden) is not None
+        assert scheduler.get_job(fehlt) is None
+    finally:
+        neue_app.extensions['scheduler'].shutdown(wait=False)
