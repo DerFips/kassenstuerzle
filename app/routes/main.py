@@ -262,6 +262,68 @@ def csrf_protect():
     if result is not None:
         return result
 
+
+# ── Demo-Umgebung: Sperr-Waechter ─────────────────────────────────────────────
+# Ist app.config['DEMO_MODE'] gesetzt, werden genau diese Endpunkte vor der
+# eigentlichen Funktion abgewiesen (Spec 3.1). Ohne Demo-Modus aendert sich
+# nichts. Gelesen wird der Konfigurationswert bei JEDEM Aufruf.
+DEMO_GESPERRT = frozenset({
+    'main.change_password', 'main.force_password_change',
+    'main.api_users_create', 'main.api_users_update', 'main.api_users_delete',
+    'main.api_users_reset_password',
+    'main.api_setup_profiles_self', 'main.api_setup_profiles_complete',
+    'main.api_backup_create', 'main.api_backup_list', 'main.api_backup_download',
+    'main.api_backup_restore', 'main.api_backup_delete',
+    'main.import_csv', 'main.api_parse_pdf', 'main.api_commit_pdf',
+    'main.api_receipt_parse', 'main.api_receipt_upload', 'main.api_receipt_delete',
+    'main.register_notification', 'main.unregister_notification',
+})
+
+
+def _demo_sperre():
+    """Die Sperr-Antwort: JSON fuer /api/..., sonst eine kleine Seite (403).
+    Ein Flash mit Weiterleitung taugt nicht: ausser der Anmeldung zeigt keine
+    Seite Flash-Meldungen an."""
+    if request.path.startswith('/api/'):
+        return jsonify(success=False, error=t('srv.demo_disabled')), 403
+    return render_template('demo_gesperrt.html'), 403
+
+
+def _demo_persons_veraendern_bestand():
+    """True, wenn die Nutzlast von save_persons Personen anlegt (Zeile ohne
+    `id`) oder loescht (`deleted_ids` nicht leer). Im Zweifel (kein JSON,
+    unlesbare Form) wird gesperrt: lieber eine Sperre zu viel."""
+    d = request.get_json(silent=True)
+    if not isinstance(d, dict):
+        return True
+    deleted = d.get('deleted_ids')
+    if deleted:
+        return True
+    rows = d.get('rows') or []
+    if not isinstance(rows, list):
+        return True
+    for p in rows:
+        if not isinstance(p, dict) or not p.get('id'):
+            return True
+        try:
+            if int(p['id']) <= 0:
+                return True
+        except (TypeError, ValueError):
+            return True
+    return False
+
+
+@main_bp.before_request
+def demo_guard():
+    if not current_app.config.get('DEMO_MODE'):
+        return None
+    endpoint = request.endpoint
+    if endpoint in DEMO_GESPERRT:
+        return _demo_sperre()
+    if endpoint == 'main.save_persons' and _demo_persons_veraendern_bestand():
+        return _demo_sperre()
+    return None
+
 # Befund I4 (Aufraeumen): hier standen `_get_limiter()` und `_rate_limit()`.
 # Beide wurden von nichts aufgerufen - und sie waren obendrein falsch: der
 # Limit-String ging an `callable_name` von flask-limiter, nicht an die

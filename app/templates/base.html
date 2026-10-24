@@ -43,6 +43,11 @@
   </style>
 </head>
 <body>
+{% if demo_mode %}
+<div id="demo-banner" class="alert alert-warning text-center rounded-0 mb-0 py-2" role="alert">
+  <i class="bi bi-info-circle me-1"></i>{{ t('demo.banner', time=demo_reset_time) }}
+</div>
+{% endif %}
 
 <script nonce="{{ csp_nonce() }}">
 // ── CSRF-Fetch-Interceptor ────────────────────────────────────────────────────

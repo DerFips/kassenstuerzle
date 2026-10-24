@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row justify-content-center mt-5">
+    <div class="col-md-8 col-lg-6">
+        <div class="alert alert-warning" role="alert">
+            <i class="bi bi-lock-fill me-2"></i>{{ t('srv.demo_disabled') }}
+        </div>
+        <a class="btn btn-outline-secondary" href="{{ url_for('main.settings') }}">
+            <i class="bi bi-arrow-left me-1"></i>{{ t('nav.settings') }}
+        </a>
+    </div>
+</div>
+{% endblock %}

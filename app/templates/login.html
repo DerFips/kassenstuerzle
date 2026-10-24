@@ -43,6 +43,20 @@
             </div>
         </div>
 
+        {% if demo_mode %}
+        <div id="demo-login-box" class="card shadow-sm mt-3 border-warning">
+            <div class="card-body p-4">
+                <h3 class="h6 fw-bold mb-2"><i class="bi bi-info-circle me-1"></i>{{ t('demo.login_title') }}</h3>
+                <p class="mb-2">{{ t('demo.login_steps', password=demo_password) }}</p>
+                <ul class="mb-2">
+                    <li>{{ t('demo.login_anna') }}</li>
+                    <li>{{ t('demo.login_ben') }}</li>
+                </ul>
+                <p class="small text-muted mb-0">{{ t('demo.login_tip') }}</p>
+            </div>
+        </div>
+        {% endif %}
+
     </div>
 </div>
 {% endblock %}

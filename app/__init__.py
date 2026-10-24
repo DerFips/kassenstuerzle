@@ -292,6 +292,14 @@ def create_app():
     _session_hours = int(os.environ.get('SESSION_LIFETIME_HOURS', '12'))
     app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=_session_hours)
 
+    # Demo-Umgebung: wird einmal aus der Umgebung gelesen, alle Pruefungen
+    # (Sperr-Waechter, Banner, Anmelde-Kasten) lesen den Wert zur Laufzeit aus
+    # app.config - so laesst er sich im Test umschalten.
+    app.config['DEMO_MODE'] = os.environ.get('DEMO_MODE') == '1'
+    app.config['DEMO_PASSWORD'] = os.environ.get('DEMO_PASSWORD') or 'demo1234'
+    app.config['DEMO_RESET_HOUR'] = int(os.environ.get('DEMO_RESET_HOUR', '4'))
+    app.config['DEMO_RESET_MINUTE'] = int(os.environ.get('DEMO_RESET_MINUTE', '0'))
+
     # Rate-Limiter initialisieren (In-Memory; für Multi-Worker: Redis-Backend)
     from flask_limiter import Limiter
     from flask_limiter.util import get_remote_address
@@ -399,6 +407,10 @@ def create_app():
         return {
             't': t,
             'current_lang': lang,
+            'demo_mode': bool(app.config.get('DEMO_MODE')),
+            'demo_password': app.config.get('DEMO_PASSWORD', ''),
+            'demo_reset_time': '%02d:%02d' % (app.config['DEMO_RESET_HOUR'],
+                                              app.config['DEMO_RESET_MINUTE']),
             # Für JS: window.I18N wird in base.html daraus befüllt (siehe t() dort)
             'i18n_dict': TRANSLATIONS.get(lang, TRANSLATIONS[DEFAULT_LANGUAGE]),
         }
