@@ -52,8 +52,12 @@ Ein `before_request`-Wächter in `app/routes/main.py`, **nach** `csrf_protect`. 
 ### 3.2 Banner und Zugangsdaten
 
 - Ein Kontextwert `demo_mode` steht allen Templates zur Verfügung. `base.html` zeigt oben auf jeder Seite einen Hinweis: "Demo-Umgebung – die Daten werden täglich um 4:00 Uhr zurückgesetzt." (Uhrzeit aus der Konfiguration).
-- Die Anmeldeseite zeigt zusätzlich die beiden Zugänge (Benutzername und Passwort aus `DEMO_PASSWORD`), nur im Demo-Modus.
-- Neue Übersetzungsschlüssel (alle in `de` und `en`): `srv.demo_disabled`, `demo.banner`, `demo.login_hint`, `demo.login_users`.
+- Die Anmeldeseite (erbt von `base.html`) zeigt im Demo-Modus unter dem Formular einen Kasten **"So meldest du dich an"** mit einer kurzen Anleitung:
+  - Schritte: als Benutzername `anna` oder `ben` eingeben, als Passwort das Demo-Passwort (aus `DEMO_PASSWORD`, steht im Text), auf "Anmelden" klicken.
+  - Beide Zugänge mit ihrer Rolle: **anna** (Administrator, sieht in den Einstellungen zusätzlich die Personen- und Benutzerübersicht) und **ben** (Mitglied).
+  - Ein Tipp: sich nacheinander mit beiden anzumelden, denn Profil, wiederkehrende Vorlagen und Nettovermögen sind für jede Person getrennt.
+  - Ohne Demo-Modus erscheint der Kasten nicht.
+- Neue Übersetzungsschlüssel (alle in `de` und `en`): `srv.demo_disabled`, `demo.banner`, `demo.login_title`, `demo.login_steps` (mit den Platzhaltern für Passwort), `demo.login_anna`, `demo.login_ben`, `demo.login_tip`.
 
 ### 3.3 Täglicher Reset
 
@@ -146,7 +150,7 @@ Neue Testdatei `tests/test_demo.py`:
 - **Startdaten** (ohne die gemeinsame Test-Datenbank zu verschmutzen, als Unterprozess mit eigenem `DATABASE_PATH`): zwei Konten (`anna` Admin, `ben` Mitglied, je verknüpft), `profiles_setup_done=1`, Passwort stimmt; alle Daten im Zeitraum, **keines nach heute**; Beträge im Plausibilitätsrahmen aus 4.1; mindestens vier Ausgaben je Person und Monat; Splits und Kategorien vorhanden; genau die richtigen Monate abgerechnet; Vermögensstände nie in der Zukunft, Schulden positiv; mit einem festen `today` ist das Ergebnis reproduzierbar; zweimaliges Anlegen führt zum gleichen Ergebnis; `calculate_settlement`, `_wealth_data` und `_overview_daten` laufen über den Demo-Daten ohne Fehler.
 - **Sperr-Wächter** (über `app.config['DEMO_MODE']` umgeschaltet): jeder gesperrte Endpunkt liefert 403 mit der Demo-Meldung (API) bzw. Weiterleitung mit Hinweis (Formular); `save_persons` verweigert Anlegen und Löschen, erlaubt aber das Ändern der Geldbörse; erlaubte Funktionen (Ausgaben speichern, Vermögen, Umbuchen) funktionieren; **ohne Demo-Modus ist nichts gesperrt**.
 - **Reset-Job:** im Demo-Modus mit Scheduler ist `demo_reset` bei 4:00 eingetragen (und per `DEMO_RESET_HOUR`/`DEMO_RESET_MINUTE` änderbar), ohne Demo-Modus nicht; `_demo_reset()` sendet im Container `SIGTERM` an den Elternprozess (`os.kill` ersetzt) und tut außerhalb des Containers nichts.
-- **Oberfläche:** Banner und Zugangsdaten erscheinen nur im Demo-Modus; alle neuen Texte in `de` und `en`.
+- **Oberfläche:** Banner und der Anmelde-Kasten (Benutzernamen `anna` und `ben`, das Passwort, die Rollen und die Schritte) erscheinen nur im Demo-Modus; alle neuen Texte in `de` und `en`.
 - **Compose-Datei:** `docker compose -f docker-compose.demo.yml config` läuft ohne Fehler, enthält weder `env_file` noch einen Bind-Mount.
 
 **Manuelle Prüfung** (lokal mit Docker): Image bauen, Demo starten, anmelden als Anna und Ben, Daten und Abrechnung ansehen, eine gesperrte Aktion auslösen (Meldung kommt), eine Buchung eintragen. Reset testen: Uhrzeit auf zwei Minuten später stellen, warten, prüfen, dass der Container neu gestartet ist, die Eingabe verschwunden ist und die Demo-Daten wieder da sind. Die echte `data/` wird nie angefasst.
