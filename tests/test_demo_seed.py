@@ -318,6 +318,24 @@ def test_grenzdaten(tmp_path, heute):
     assert ausgabe['summary']['months_settled'] == 4
 
 
+@pytest.mark.parametrize('heute', [date(2026, 10, 2), date(2026, 10, 24)])
+def test_gehalt_steht_schon_im_aktuellen_monat(tmp_path, heute):
+    """Das Gehalt wird am 1. gebucht: ein an beliebigem Tag gestartetes Demo
+    zeigt im aktuellen Monat Einnahmen beider Personen (kein Minus durch ein
+    noch fehlendes Gehalt) - und nie ein Datum in der Zukunft."""
+    db, _ = _seed(tmp_path, heute, name=heute.isoformat())
+    gehaelter = _abfrage(
+        db, "SELECT i.*, p.name person FROM income i JOIN persons p ON p.id=i.person_id"
+            " WHERE i.description LIKE 'Gehalt%'")
+    assert len(gehaelter) == 12, 'ein Gehalt je Person und Monat'
+    assert all(g['day'] == 1 for g in gehaelter)
+    assert all(_datum(g) <= heute for g in gehaelter)
+    aktuell = [g for g in gehaelter if (g['year'], g['month']) == (heute.year, heute.month)]
+    assert {g['person']: g['amount'] for g in aktuell} == {'Anna': 3050.0, 'Ben': 2680.0}
+    erster = _monat_vor(heute, 5)
+    assert {g['person'] for g in gehaelter if (g['year'], g['month']) == erster} == {'Anna', 'Ben'}
+
+
 def test_reproduzierbar(tmp_path):
     erste, _ = _seed(tmp_path, HEUTE, name='eins')
     zweite, _ = _seed(tmp_path, HEUTE, name='zwei')

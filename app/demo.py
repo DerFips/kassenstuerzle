@@ -209,9 +209,10 @@ def _buchungen_fuer_monat(rng, jahr: int, monat: int, bis_tag: int,
     if nr == 4:
         ausgaben.append((8, 'Retoure Zalando', 'Anna', 'Kleidung', -24.95))
 
-    if 28 <= bis_tag:
-        einnahmen.append((28, 'Gehalt Anna', 'Anna', 'Gehalt', 3050.00))
-        einnahmen.append((28, 'Gehalt Ben', 'Ben', 'Gehalt', 2680.00))
+    # Gehalt am Monatsanfang: Der aktuelle Monat zeigt so an jedem Tag seine
+    # Einnahmen (der 1. liegt nie nach `today`), statt bis zum 28. ein Minus.
+    einnahmen.append((1, 'Gehalt Anna', 'Anna', 'Gehalt', 3050.00))
+    einnahmen.append((1, 'Gehalt Ben', 'Ben', 'Gehalt', 2680.00))
     if wuerfel(0.4):
         einnahmen.append((rng.randint(min(5, bis_tag), bis_tag), 'Nachhilfe', 'Ben',
                           'Nebenverdienst', _betrag(rng, 120, 280)))

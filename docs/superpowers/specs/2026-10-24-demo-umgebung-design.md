@@ -82,7 +82,7 @@ Ein `before_request`-Wächter in `app/routes/main.py`, **nach** `csrf_protect`. 
 
 - **Kategorien** (mit Farbe). Geteilt (Split): Miete (55/45), Lebensmittel (50/50), Strom und Internet (50/50). Privat: Restaurant, Mobilität, Freizeit, Versicherungen, Gesundheit, Kleidung. Einnahmen-Kategorien: Gehalt, Nebenverdienst, Erstattung.
 - **Ausgaben:** Miete 1.180 € am 1. (Anna zahlt), Strom 78 bis 92 €, Internet 39,99 €, Handy (Anna 24,99 €, Ben 19,99 €), Streaming 12,99 €, Lebensmittel mit acht bis zehn Einkäufen pro Monat zwischen 25 und 115 €, Drogerie, Restaurant zwei- bis dreimal 22 bis 68 €, Deutschlandticket (Ben 49 €), Tanken und Kfz-Versicherung, Fitnessstudio (Anna 29,90 €), Versicherungen, Apotheke 8 bis 25 €, gelegentlich Kleidung 35 bis 120 €. Zwei einmalige Posten in verschiedenen Monaten: eine Reise (ca. 640 €) und ein Möbelstück (ca. 420 €).
-- **Einnahmen:** Gehalt Anna ca. 3.050 € und Ben ca. 2.680 € am 28., gelegentlich Nebenverdienst von Ben (120 bis 280 €), einmalig eine Erstattung (ca. 310 €).
+- **Einnahmen:** Gehalt Anna ca. 3.050 € und Ben ca. 2.680 € am 1. (das Gehalt steht am Monatsanfang, damit der aktuelle Monat nie ein Minus durch ein noch fehlendes Gehalt zeigt), gelegentlich Nebenverdienst von Ben (120 bis 280 €), einmalig eine Erstattung (ca. 310 €).
 - **Rückbuchung:** eine negative Ausgabe ("Retoure", ca. -25 €), damit sich das Umbuchen vorführen lässt.
 - **Abrechnung:** Alle Monate **außer den letzten beiden** stehen in `month_status` als abgerechnet (`settled=1`, mit `settled_at`), der aktuelle und der vorherige sind offen.
 - **Wiederkehrende Vorlagen:** drei bis fünf pro Person (z. B. Miete bei Anna, Deutschlandticket bei Ben, Streaming).
