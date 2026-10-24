@@ -185,3 +185,50 @@ def test_demo_texte_in_beiden_sprachen():
                 'demo.login_tip'):
         for lang in ('de', 'en'):
             assert TRANSLATIONS[lang].get(key), (lang, key)
+
+
+def _zaehler_leeren():
+    from app.routes import main as m
+    m._login_attempts.clear()
+    m._ip_attempts.clear()
+
+
+def test_demo_anmeldung_wird_nicht_gesperrt(client, demo_modus):
+    """Die Zugangsdaten sind oeffentlich: weder die Sperre je Benutzername noch
+    die je IP darf in der Demo greifen (sonst kann jeder alle aussperren)."""
+    from app.routes import main as m
+    _zaehler_leeren()
+    try:
+        for _ in range(m._MAX_LOGIN_ATTEMPTS + 1):
+            client.post('/login', data={'username': 'admin', 'password': 'falsch'})
+        res = client.post('/login', data={'username': 'admin',
+                                          'password': 'test-password-123'})
+        assert res.status_code == 302
+        assert 'Demo' not in res.get_data(as_text=True)
+
+        # Wechselnde Benutzernamen: so greift nur die IP-Sperre, nicht die je Konto
+        for i in range(m._MAX_IP_ATTEMPTS + 1):
+            client.post('/login', data={'username': f'x{i}', 'password': 'falsch'})
+        res = client.post('/login', data={'username': 'admin',
+                                          'password': 'test-password-123'})
+        assert res.status_code == 302
+        # Nichts davon wurde gezaehlt
+        assert not m._login_attempts or m._login_attempts['admin']['count'] == 0
+        assert all(v['count'] == 0 and v['locked_until'] == 0
+                   for v in m._ip_attempts.values())
+    finally:
+        _zaehler_leeren()
+
+
+def test_ohne_demo_modus_bleibt_die_sperre_aktiv(app, client):
+    from app.routes import main as m
+    assert not app.config.get('DEMO_MODE')
+    _zaehler_leeren()
+    try:
+        for _ in range(m._MAX_LOGIN_ATTEMPTS):
+            client.post('/login', data={'username': 'admin', 'password': 'falsch'})
+        res = client.post('/login', data={'username': 'admin',
+                                          'password': 'test-password-123'})
+        assert res.status_code == 200, 'Sperre muss ausserhalb der Demo greifen'
+    finally:
+        _zaehler_leeren()
