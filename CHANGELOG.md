@@ -2,6 +2,20 @@
 
 Alle nennenswerten Änderungen an Kassenstürzle. Die Versionsnummern entsprechen den Git-Tags.
 
+## [Unreleased]
+
+### Hinzugefügt
+
+- **Demo-Umgebung.** Eine vorbefüllte Kopie der App zum Vorführen, als eigenes Compose-Projekt (`docker-compose.demo.yml`), das die echte Installation nie berührt (keine `.env`, kein Daten-Mount, eigener Port 5001):
+  - **Demo-Modus** (`DEMO_MODE=1`): Banner auf jeder Seite, Anleitung zur Anmeldung auf der Anmeldeseite, gesperrte Aktionen (Passwörter, Benutzer und Personen anlegen oder löschen, Backups, Uploads und Importe, Push) antworten mit einer Meldung, Anmelde-Sperren sind abgeschaltet.
+  - **Zwei Benutzer mit sechs Monaten Beispieldaten:** `anna` (Administrator) und `ben` (Mitglied), Passwort aus `DEMO_PASSWORD` (Standard `demo1234`).
+  - **Täglicher Reset um 4:00 Uhr** durch Neustart des Containers (`DEMO_RESET_HOUR` und `DEMO_RESET_MINUTE` ändern die Uhrzeit). Die Daten liegen nur im Arbeitsspeicher (`tmpfs`).
+  - **Update-Skript** `scripts/demo-update.sh` und neuer README-Abschnitt "Demo-Umgebung".
+
+### Hinweise
+
+- Ohne `DEMO_MODE` ändert sich am Verhalten der App nichts. Die Demo wird nur vom Demo-Container aktiviert.
+
 ## [2.1] – 2026-10-23
 
 Nettovermögen im Profil, Umbuchen zwischen Ausgaben und Einnahmen und ein deutlich transparenterer PDF-Import.

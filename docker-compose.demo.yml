@@ -1,0 +1,46 @@
+# Demo-Umgebung: eigenes Compose-Projekt, das die echte Installation nie beruehrt.
+# Start:  docker compose -f docker-compose.demo.yml up -d --build
+# Beide Projekte (echte Installation und Demo) laufen nebeneinander.
+name: kassenstuerzle-demo
+services:
+  web:
+    build: .
+    # `exec` ersetzt die Shell durch Gunicorn. Gunicorn wird so zum Hauptprozess
+    # (PID 1): Der taegliche Reset sendet SIGTERM an den Gunicorn-Master, und nur
+    # dann endet der Container sauber und `restart: unless-stopped` startet ihn
+    # mit frischen Demo-Daten neu. `python -m app.demo` legt die Demo-Datenbank an.
+    command: ["sh", "-c", "python -m app.demo && exec gunicorn --config gunicorn.conf.py run:app"]
+    ports:
+      # Nur an 127.0.0.1 (wie in der echten docker-compose.yml): Die Demo gehoert
+      # hinter einen Reverse-Proxy mit TLS. Anderer Port als die echte Installation.
+      - "127.0.0.1:${DEMO_PORT:-5001}:5000"
+    user: "1000:1000"
+    tmpfs:
+      # Die Demo-Daten liegen nur im Arbeitsspeicher. Beim Neustart des Containers
+      # ist das Verzeichnis leer, der Reset hinterlaesst also nichts. Es gibt
+      # bewusst keinen Bind-Mount des Host-Verzeichnisses: Die Demo kommt weder
+      # an die Daten der echten Installation noch dauerhaft auf die Platte.
+      - /app/data:uid=1000,gid=1000,mode=0700,size=64m
+    restart: unless-stopped
+    # Bewusst keine Umgebungsdatei: Schluessel und Passwoerter der echten
+    # Installation sind fuer die Demo unerreichbar. Alles Noetige steht hier.
+    environment:
+      DEMO_MODE: "1"
+      # Die Demo enthaelt keine echten Daten, daher keine Verschluesselung noetig.
+      ALLOW_UNENCRYPTED: "1"
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-demo1234}
+      # Verhindert, dass beim Anlegen des Start-Admins ein Zufallspasswort ins Log geht.
+      ADMIN_PASSWORD: ${DEMO_PASSWORD:-demo1234}
+      # 1 = Sitzungscookie mit Secure-Flag (Betrieb hinter TLS-Proxy). 0 nur zum
+      # Ausprobieren im lokalen Netz ueber reines http.
+      HTTPS: ${DEMO_HTTPS:-1}
+      # Uhrzeit des taeglichen Resets (zum Testen auf wenige Minuten spaeter stellen).
+      DEMO_RESET_HOUR: ${DEMO_RESET_HOUR:-4}
+      DEMO_RESET_MINUTE: ${DEMO_RESET_MINUTE:-0}
+      TZ: Europe/Berlin
+      # Ein Worker: Rate-Limit und Reset-Job laufen genau einmal.
+      GUNICORN_WORKERS: "1"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    pids_limit: 200

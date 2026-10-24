@@ -89,6 +89,71 @@ Beim Update einer bestehenden Installation die neue Version holen und den Contai
 git pull && docker compose up -d --build
 ```
 
+## Demo-Umgebung
+
+Die Demo ist eine vorbefüllte Kopie der App zum Vorführen und Ausprobieren. Sie läuft als eigenes Compose-Projekt (`kassenstuerzle-demo`) und kommt weder an die `.env` noch an das Verzeichnis `./data` der echten Installation. Beide lassen sich nebeneinander betreiben (echte App auf Port 5000, Demo auf Port 5001).
+
+Es gibt zwei Zugänge mit je sechs Monaten Beispieldaten:
+
+- `anna`: Administrator, sieht in den Einstellungen zusätzlich die Personen- und Benutzerübersicht.
+- `ben`: Mitglied.
+
+Das Passwort steht in `DEMO_PASSWORD` (Standard `demo1234`) und wird mit einer kurzen Anleitung auf der Anmeldeseite angezeigt.
+
+Starten:
+
+```bash
+docker compose -f docker-compose.demo.yml up -d --build
+```
+
+Danach ist die Demo unter `http://127.0.0.1:5001` erreichbar (anderer Port über `DEMO_PORT`).
+
+Besucher können in der Demo nicht: Passwörter ändern, Benutzer und Personen anlegen oder löschen, Backups erstellen, herunterladen oder wiederherstellen, Dateien hochladen (PDF-Import, Belege, CSV-Import) und Push-Benachrichtigungen einrichten. Ausgaben, Einnahmen, Umbuchen, Vermögen, Abrechnung und Übersicht funktionieren normal. Die Sperre bei fehlgeschlagenen Anmeldungen ist im Demo-Modus abgeschaltet, weil die Zugangsdaten öffentlich sind.
+
+Alle Besucher teilen sich dieselben zwei Konten und sehen bis zum Reset die Eingaben der anderen.
+
+### Täglicher Reset
+
+Jeden Tag um 4:00 Uhr (Europe/Berlin) beendet sich der Container selbst und wird von Docker neu gestartet. Das dauert etwa 10 Sekunden, in denen die Demo nicht erreichbar ist. Danach sind alle Besucher abgemeldet, alle Eingaben verschwunden und die Beispieldaten wieder da. Die Daten liegen nur im Arbeitsspeicher (`tmpfs`) und bleiben nirgends zurück.
+
+Zum Testen lässt sich die Uhrzeit ändern, z. B. auf wenige Minuten später:
+
+```bash
+DEMO_RESET_HOUR=14 DEMO_RESET_MINUTE=35 docker compose -f docker-compose.demo.yml up -d
+```
+
+### Aktualisieren
+
+Neue Version holen, Image bauen und die Demo neu starten:
+
+```bash
+./scripts/demo-update.sh
+```
+
+Von Hand sind es zwei Befehle:
+
+```bash
+git pull --ff-only
+```
+
+```bash
+docker compose -f docker-compose.demo.yml up -d --build
+```
+
+Der Container wird dabei neu erstellt und startet mit frischen Demo-Daten.
+
+### Öffentlich betreiben
+
+Die Demo bindet nur an `127.0.0.1:${DEMO_PORT:-5001}`. Für den Zugriff von außen braucht sie einen Reverse-Proxy mit TLS (Caddy, nginx) auf demselben Host. Das Sitzungscookie trägt standardmäßig das Secure-Flag und funktioniert nur über https. Nur zum Ausprobieren im lokalen Netz über reines http lässt sich `DEMO_HTTPS=0` setzen:
+
+```bash
+DEMO_HTTPS=0 docker compose -f docker-compose.demo.yml up -d --build
+```
+
+Hinweis zum Rate-Limit: Die Anmeldung ist auf 10 Versuche pro Minute begrenzt. Der Zähler gilt pro Adresse, und hinter einem Reverse-Proxy erscheinen alle Besucher mit der Adresse des Proxys, teilen sich also ein Limit (bekannter offener Befund M1). Bei einer öffentlichen Demo sollte der Proxy deshalb zusätzlich selbst Anfragen begrenzen.
+
+`python -m app.demo` erzeugt die Demo-Datenbank und wird nur vom Demo-Container ausgeführt. Ohne `DEMO_MODE=1` verweigert es den Start und ersetzt nie eine echte Datenbank.
+
 ## Entwicklung
 
 Voraussetzungen: Python 3.11, für OCR und PDF-Import zusätzlich `tesseract-ocr` mit deutschem Sprachpaket (`tesseract-ocr-deu`).
@@ -132,6 +197,8 @@ tests/               Regressionstests (pytest)
 docs/                Sicherheitsprüfung, Specs und Pläne
 Dockerfile           Image (Python 3.11, Tesseract, Non-Root-Nutzer uid 1000)
 docker-compose.yml   Dienst, Port-Bindung, Daten-Mount
+docker-compose.demo.yml  Demo-Umgebung (eigenes Projekt, Daten nur im Speicher)
+scripts/             demo-update.sh (Demo aktualisieren)
 ```
 
 ## Sicherheit

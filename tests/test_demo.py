@@ -5,7 +5,10 @@ gelesen, deshalb schaltet die Fixture ihn nur um und stellt ihn danach zurueck.
 """
 import logging
 import os
+import pathlib
+import shutil
 import signal
+import subprocess
 
 import pytest
 
@@ -298,3 +301,45 @@ def test_create_app_im_demo_modus_traegt_reset_statt_erinnerung_ein(
         assert scheduler.get_job(fehlt) is None
     finally:
         neue_app.extensions['scheduler'].shutdown(wait=False)
+
+
+# --- Betrieb: Compose-Datei und Update-Skript ---------------------------------
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
+COMPOSE_DEMO = REPO / 'docker-compose.demo.yml'
+UPDATE_SKRIPT = REPO / 'scripts' / 'demo-update.sh'
+
+
+def test_compose_demo_ohne_env_file_und_bind_mount():
+    text = COMPOSE_DEMO.read_text(encoding='utf-8')
+    for erwartet in ('name: kassenstuerzle-demo', 'DEMO_MODE', 'tmpfs',
+                     '/app/data', 'cap_drop', 'no-new-privileges',
+                     'exec gunicorn', 'python -m app.demo',
+                     'restart: unless-stopped'):
+        assert erwartet in text, erwartet
+    # Die echte Installation und ihre Geheimnisse muessen unerreichbar bleiben.
+    for verboten in ('env_file', './data', '.env'):
+        assert verboten not in text, verboten
+
+
+def test_compose_demo_ist_gueltig():
+    if shutil.which('docker') is None:
+        pytest.skip('docker nicht installiert')
+    probe = subprocess.run(['docker', 'compose', 'version'],
+                           capture_output=True, text=True)
+    if probe.returncode != 0:
+        pytest.skip('docker compose-Plugin fehlt')
+    ergebnis = subprocess.run(
+        ['docker', 'compose', '-f', 'docker-compose.demo.yml', 'config'],
+        cwd=REPO, capture_output=True, text=True)
+    assert ergebnis.returncode == 0, ergebnis.stderr
+
+
+def test_update_skript_ist_ausfuehrbar_und_strikt():
+    assert UPDATE_SKRIPT.is_file()
+    assert os.access(UPDATE_SKRIPT, os.X_OK)
+    text = UPDATE_SKRIPT.read_text(encoding='utf-8')
+    assert text.startswith('#!/usr/bin/env bash')
+    assert 'set -euo pipefail' in text
+    assert 'git pull --ff-only' in text
+    assert 'docker compose -f docker-compose.demo.yml up -d --build' in text
