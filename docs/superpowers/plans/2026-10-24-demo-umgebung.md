@@ -20,7 +20,7 @@
 - Nie lesen oder schreiben: `data/`, `data_/`. Manuelle Läufe nur mit eigenem `DATABASE_PATH` im Scratchpad bzw. im Container-`tmpfs`.
 - Kein `git stash`, kein `git checkout --`.
 - Demo-Modus nur über `app.config['DEMO_MODE']` (aus `DEMO_MODE=1`), zur Laufzeit gelesen: `create_app()` setzt ihn aus der Umgebung, Tests schalten ihn um. Ohne Demo-Modus ändert sich am Verhalten der App **nichts**.
-- Sperr-Antwort: Pfad beginnt mit `/api/` → HTTP 403 `{success: false, error: t('srv.demo_disabled')}`; sonst `flash(t('srv.demo_disabled'), 'warning')` und Weiterleitung zu `main.settings`.
+- Sperr-Antwort: Pfad beginnt mit `/api/` → HTTP 403 `{success: false, error: t('srv.demo_disabled')}`; sonst HTTP 403 mit der Seite `demo_gesperrt.html` (Meldung als Hinweiskasten, Link zurück zu `main.settings`).
 - Jeder neue Übersetzungsschlüssel steht in `de` **und** `en` von `app/translations.py`. Kein `innerHTML` mit Nutzer- oder Konfigurationstexten; Jinja-Autoescaping genügt.
 - Reset-Standard: `DEMO_RESET_HOUR=4`, `DEMO_RESET_MINUTE=0`; `DISABLE_SCHEDULER=1` schaltet auch den Reset-Job ab.
 - Startdaten: sechs Kalendermonate (fünf volle Monate vor dem aktuellen plus der aktuelle bis einschließlich `today`), **kein Datum nach `today`**, `random.Random(42)`, keine Ausgabe über 1.200 € (größte: Miete 1.180 €), keine einzelne Einnahme über 3.100 €, mindestens vier Ausgaben je Person und Monat, ca. 3.300 bis 3.900 € Ausgaben bei ca. 5.700 € Einnahmen pro Monat.
@@ -42,6 +42,7 @@
 - Modify: `app/__init__.py` (in `create_app()`: `app.config['DEMO_MODE']`, `DEMO_PASSWORD`, `DEMO_RESET_HOUR`, `DEMO_RESET_MINUTE`; Kontextwerte im `inject_i18n`-Bereich ~Zeile 387)
 - Modify: `app/routes/main.py` (Konstante `DEMO_GESPERRT`, Wächter nach `csrf_protect` ~Zeile 259)
 - Modify: `app/templates/base.html` (Banner direkt nach `<body>`), `app/templates/login.html` (Kasten unter dem Formular), `app/translations.py`
+- Create: `app/templates/demo_gesperrt.html`
 - Create: `tests/test_demo.py`
 
 **Interfaces:**
@@ -51,10 +52,10 @@
 
 - [ ] **Step 1: Failing tests in `tests/test_demo.py`.** Fixtures: `demo_modus(app)` (setzt `app.config['DEMO_MODE']=True`, `DEMO_PASSWORD='demo1234'` und stellt beides zurück), `person` (Alice, mit `admin` verknüpft, wie in `tests/test_save_expenses.py`). Tests:
   - `test_gesperrte_endpunkte_antworten_mit_demo_meldung` (parametrisiert über alle 21 Endpunkte mit Methode und Beispiel-URL, z. B. `('post','/api/users')`, `('delete','/api/users/1')`, `('get','/api/backup/download/x.db')`, `('delete','/api/receipt/x.jpg')`; mutierende Aufrufe mit `X-CSRF-Token`): `/api/*` ⇒ 403 und `error == 'Im Demo-Modus nicht verfügbar.'`.
-  - `test_formular_und_seite_leiten_mit_hinweis_um`: `POST /change_password` und `GET /password/aendern` ⇒ 302 nach `/settings`, der Hinweis steht im Flash der Folgeseite.
+  - `test_formular_und_seite_zeigen_die_sperrseite`: `POST /change_password` und `GET /password/aendern` ⇒ Status 403, die Seite enthält `Im Demo-Modus nicht verfügbar.` und einen Link auf `/settings`.
   - `test_persons_anlegen_und_loeschen_gesperrt_aendern_erlaubt`: Zeile ohne `id` ⇒ 403; `deleted_ids=[1]` ⇒ 403; Zeile mit `id` der eigenen Person und `wallet_start_amount` ⇒ 200.
   - `test_kernfunktionen_bleiben_nutzbar`: `/api/expenses/save` (v2, eine Zeile), `/api/wealth/accounts/save`, `GET /api/users` ⇒ jeweils 200.
-  - `test_ohne_demo_modus_ist_nichts_gesperrt` (Review Focus 2): bei `DEMO_MODE=False` liefert `GET /api/backup/list` als Admin 200, und `POST /change_password` mit falschem aktuellem Passwort leitet mit der **üblichen** Fehlermeldung um: die Folgeseite `/settings` enthält `Demo-Modus` nicht.
+  - `test_ohne_demo_modus_ist_nichts_gesperrt` (Review Focus 2): bei `DEMO_MODE=False` liefert `GET /api/backup/list` als Admin 200, und `POST /change_password` mit falschem aktuellem Passwort wird **nicht** mit Status 403 abgewiesen und die Antwort enthält `Demo-Modus` nicht.
   - `test_banner_nur_im_demo_modus`: `/overview` enthält `id="demo-banner"` und `04:00` nur mit Demo-Modus.
   - `test_anmelde_kasten_nur_im_demo_modus`: `GET /login` (ohne Anmeldung) enthält mit Demo-Modus `id="demo-login-box"`, `anna`, `ben`, das Passwort `demo1234`, die Rollenhinweise; ohne Demo-Modus nichts davon.
   - `test_demo_passwort_wird_maskiert` (Review Focus 4): `DEMO_PASSWORD='<b>x</b>'` ⇒ die Seite enthält `&lt;b&gt;x&lt;/b&gt;` und nicht `<b>x</b>`.
@@ -63,7 +64,7 @@
 - [ ] **Step 2:** `pytest tests/test_demo.py -q` ⇒ FAIL.
 - [ ] **Step 3: Implementieren.** `create_app()` liest die vier Werte aus der Umgebung (`DEMO_MODE=='1'`, `DEMO_PASSWORD` mit Standard, Stunde und Minute als int) in `app.config` und liefert sie über eine `context_processor` als `demo_mode`, `demo_password`, `demo_reset_time` (`HH:MM`). `demo_guard()` als `@main_bp.before_request`, registriert **nach** `csrf_protect`; sie prüft `current_app.config.get('DEMO_MODE')` bei jedem Aufruf. Banner und Kasten mit `{% if demo_mode %}`; Texte über `t('demo.…')` (`demo.login_steps` bekommt das Passwort als Platzhalter, die Ausgabe bleibt autoescaped, nicht `|safe`). Texte (de): Banner "Demo-Umgebung – die Daten werden täglich um {time} Uhr zurückgesetzt.", Titel "So meldest du dich an", Schritte "Gib als Benutzername anna oder ben ein, als Passwort {password}, und klicke auf „Anmelden“.", `demo.login_anna` "anna – Administrator (sieht in den Einstellungen zusätzlich die Personen- und Benutzerübersicht)", `demo.login_ben` "ben – Mitglied", `demo.login_tip` "Tipp: Melde dich nacheinander mit beiden an, denn Profil, wiederkehrende Vorlagen und Nettovermögen sind für jede Person getrennt." Englische Entsprechungen sinngemäß.
 - [ ] **Step 4:** `pytest -q` ⇒ alles PASS (`tests/test_csp_nonce.py` bleibt grün, im Banner kein Inline-Skript).
-- [ ] **Step 5: Commit** `git add app/__init__.py app/routes/main.py app/templates/base.html app/templates/login.html app/translations.py tests/test_demo.py` — "Demo-Modus: Sperr-Wächter, Banner und Anmelde-Anleitung".
+- [ ] **Step 5: Commit** `git add app/__init__.py app/routes/main.py app/templates/base.html app/templates/login.html app/templates/demo_gesperrt.html app/translations.py tests/test_demo.py` — "Demo-Modus: Sperr-Wächter, Banner und Anmelde-Anleitung".
 
 ### Task 2: Täglicher Reset-Job
 

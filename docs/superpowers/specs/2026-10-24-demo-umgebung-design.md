@@ -44,7 +44,7 @@ Ein `before_request`-Wächter in `app/routes/main.py`, **nach** `csrf_protect`. 
 
 **Antwort bei gesperrtem Zugriff:**
 - Pfad beginnt mit `/api/` → HTTP 403 mit `{success: false, error: t('srv.demo_disabled')}`.
-- Sonst (Formular-Beitrag oder Seitenaufruf) → `flash(t('srv.demo_disabled'), 'warning')` und Weiterleitung zu den Einstellungen.
+- Sonst (Formular-Beitrag oder Seitenaufruf) → HTTP 403 mit einer kleinen Seite `demo_gesperrt.html` (erbt von `base.html`): die Meldung als Hinweiskasten und ein Link zurück zu den Einstellungen. (Ein Flash mit Weiterleitung taugt hier nicht, weil keine Seite außer der Anmeldung Flash-Meldungen anzeigt.)
 - Text `srv.demo_disabled`: "Im Demo-Modus nicht verfügbar." / "Not available in demo mode." (de und en).
 
 **Nicht gesperrt** (bleibt voll nutzbar): Ausgaben, Einnahmen, Umbuchen, Kategorien, wiederkehrende Vorlagen, Vermögen, Monatsabrechnung, Profil, Übersicht, CSV-Export, Kalender-Export, Sprachwechsel, die Seite `/import/pdf` selbst (der Upload daraus ist gesperrt und zeigt die Meldung).
@@ -148,7 +148,7 @@ Der Container wird dabei neu erstellt und startet mit frischen Demo-Daten. Dasse
 Neue Testdatei `tests/test_demo.py`:
 
 - **Startdaten** (ohne die gemeinsame Test-Datenbank zu verschmutzen, als Unterprozess mit eigenem `DATABASE_PATH`): zwei Konten (`anna` Admin, `ben` Mitglied, je verknüpft), `profiles_setup_done=1`, Passwort stimmt; alle Daten im Zeitraum, **keines nach heute**; Beträge im Plausibilitätsrahmen aus 4.1; mindestens vier Ausgaben je Person und Monat; Splits und Kategorien vorhanden; genau die richtigen Monate abgerechnet; Vermögensstände nie in der Zukunft, Schulden positiv; mit einem festen `today` ist das Ergebnis reproduzierbar; zweimaliges Anlegen führt zum gleichen Ergebnis; `calculate_settlement`, `_wealth_data` und `_overview_daten` laufen über den Demo-Daten ohne Fehler.
-- **Sperr-Wächter** (über `app.config['DEMO_MODE']` umgeschaltet): jeder gesperrte Endpunkt liefert 403 mit der Demo-Meldung (API) bzw. Weiterleitung mit Hinweis (Formular); `save_persons` verweigert Anlegen und Löschen, erlaubt aber das Ändern der Geldbörse; erlaubte Funktionen (Ausgaben speichern, Vermögen, Umbuchen) funktionieren; **ohne Demo-Modus ist nichts gesperrt**.
+- **Sperr-Wächter** (über `app.config['DEMO_MODE']` umgeschaltet): jeder gesperrte Endpunkt liefert 403 mit der Demo-Meldung (API) bzw. die Sperrseite mit Status 403 (Formular und Seitenaufruf); `save_persons` verweigert Anlegen und Löschen, erlaubt aber das Ändern der Geldbörse; erlaubte Funktionen (Ausgaben speichern, Vermögen, Umbuchen) funktionieren; **ohne Demo-Modus ist nichts gesperrt**.
 - **Reset-Job:** im Demo-Modus mit Scheduler ist `demo_reset` bei 4:00 eingetragen (und per `DEMO_RESET_HOUR`/`DEMO_RESET_MINUTE` änderbar), ohne Demo-Modus nicht; `_demo_reset()` sendet im Container `SIGTERM` an den Elternprozess (`os.kill` ersetzt) und tut außerhalb des Containers nichts.
 - **Oberfläche:** Banner und der Anmelde-Kasten (Benutzernamen `anna` und `ben`, das Passwort, die Rollen und die Schritte) erscheinen nur im Demo-Modus; alle neuen Texte in `de` und `en`.
 - **Compose-Datei:** `docker compose -f docker-compose.demo.yml config` läuft ohne Fehler, enthält weder `env_file` noch einen Bind-Mount.
