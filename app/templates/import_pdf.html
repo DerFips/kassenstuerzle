@@ -166,7 +166,7 @@ document.getElementById('pdf-parse-btn').addEventListener('click', async () => {
     document.getElementById('pdf-preview-col').style.display = '';
     document.getElementById('pdf-result-col').style.display = 'none';
   } catch(e) {
-    statusEl.innerHTML = `<div class="alert alert-danger py-2">${t('pdf.network_error', {error: e.message})}</div>`;
+    statusEl.innerHTML = `<div class="alert alert-danger py-2">${t('pdf.network_error', {error: escHtml(e.message)})}</div>`;
   }
 });
 

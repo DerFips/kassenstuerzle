@@ -13,6 +13,23 @@ Alle nennenswerten Änderungen an Kassenstürzle. Die Versionsnummern entspreche
   - **Update-Skript** `scripts/demo-update.sh` und neuer README-Abschnitt "Demo-Umgebung".
   - **Betrieb:** optionale, nicht eingecheckte Datei `demo.env` für `DEMO_*`-Einstellungen, Log-Rotation und 128 MB `tmpfs`; im Demo-Modus ist eine Anfrage auf 256 KB begrenzt, und beim Anmelden zählt nur der POST (60 pro Minute) statt jedes Seitenaufrufs.
 
+### Behoben
+
+- **Geleerter Betrag ging verloren.** Wer bei einer gespeicherten Buchung den Betrag leerte und danach wieder eintrug, sah "gespeichert", nach dem Neuladen fehlte die Buchung. Die Zeile wird jetzt neu angelegt.
+- **Push aktivieren hing endlos, Offline-Seite kam nie.** Der Service Worker war unter `/static/sw.js` registriert und galt damit für keine Seite. Er läuft jetzt unter `/sw.js` für die ganze Anwendung, speichert keine Seiten mit Finanzdaten mehr im Browser-Cache und lässt fremde Hosts (CDN) unangetastet.
+- **PDF-Import:** Ein unlesbares PDF endete in einem Serverfehler statt in der Fehlermeldung.
+- **CSV-Import mit "Überschreiben"** leerte einen Monat auch dann, wenn alle Zeilen dafür fehlerhaft waren. Zeilen werden jetzt zuerst geprüft.
+- **Gelöschte Kategorie im offenen Tab:** Speichern scheiterte mit einem Serverfehler, die Buchung wird jetzt ohne Kategorie gespeichert.
+- Schlägt "Abgerechnet" fehl, bleibt der Haken nicht mehr gesetzt. Ein Klick auf eine Push-Benachrichtigung nutzt ein offenes Fenster, statt immer ein neues zu öffnen.
+
+### Sicherheit und Robustheit
+
+- **Eingabeprüfung beim Speichern** (Ausgaben, Einnahmen, Vorlagen, Abrechnen, Geldbörse, CSV- und PDF-Import): Monat, Jahr, Tag und Betrag werden vor dem ersten Schreibzugriff geprüft. Vorher legte eine einzige Buchung mit Monat 13 Übersicht und Profil für alle lahm, und ein Betrag von `1e999` machte die Monatsansicht unbrauchbar. Bereits vorhandene Zeilen mit ungültigem Monat bringen die Auswertung nicht mehr zum Absturz.
+- **Push-Adressen** werden geprüft (nur `https` auf öffentliche Hostnamen), der Versand hat ein Zeitlimit. Vorher konnte ein angemeldetes Mitglied den Server interne Adressen aufrufen lassen.
+- **Sprachwechsel** leitet nur noch auf Seiten der eigenen Anwendung zurück (kein offener Redirect).
+- **Kalender-Export** maskiert Namen, ein Zeilenumbruch im Namen fügt keine eigenen Felder mehr ein.
+- Meldungen in der Monatsansicht und im CSV-/PDF-Import werden als Text ausgegeben, nicht als HTML.
+
 ### Hinweise
 
 - Ohne `DEMO_MODE` ändert sich am Verhalten der App nichts. Die Demo wird nur vom Demo-Container aktiviert.

@@ -686,8 +686,8 @@ document.getElementById('csv-import-btn').addEventListener('click', async () => 
   const res = await fetch('/api/import/csv', {method:'POST', body: fd});
   const d = await res.json();
   document.getElementById('csv-import-result').innerHTML = d.success
-    ? `<div class="alert alert-success py-2">${t('settings.csv_result_success', {imported: d.imported, months: d.months})}</div>`
-    : `<div class="alert alert-danger py-2">${t('settings.csv_result_error', {error: d.error})}</div>`;
+    ? `<div class="alert alert-success py-2">${t('settings.csv_result_success', {imported: escHtml(d.imported), months: escHtml(d.months)})}</div>`
+    : `<div class="alert alert-danger py-2">${t('settings.csv_result_error', {error: escHtml(d.error)})}</div>`;
 });
 
 initActivityWatch({ scope: 'settings', version: ACTIVITY_VERSION, container: 'settingsActivityBar' });
