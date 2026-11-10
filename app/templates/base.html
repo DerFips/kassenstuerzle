@@ -220,7 +220,15 @@ function showToast(msg, type='success') {
   document.getElementById('toast-container').appendChild(el);
   setTimeout(() => el.remove(), 3500);
 }
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+// /sw.js statt /static/sw.js: nur so gilt der Worker fuer die ganze Anwendung
+// (Scope '/'). Mit '/static/' steuerte er keine Seite - keine Offline-Seite,
+// und "Push aktivieren" wartete endlos. Die alte Registrierung wird entfernt.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => {
+    if (new URL(r.scope).pathname === '/static/') r.unregister();
+  })).catch(() => {});
+}
 let deferredPrompt;
 window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault(); deferredPrompt = e;

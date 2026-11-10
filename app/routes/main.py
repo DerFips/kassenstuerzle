@@ -3,7 +3,7 @@ from functools import wraps
 from flask import g, session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
-from flask import Flask, render_template, request, jsonify, Response, redirect, url_for
+from flask import Flask, render_template, request, jsonify, Response, redirect, url_for, abort
 import os
 import re as _re_modul
 import math
@@ -208,6 +208,24 @@ MONTH_NAMES = ['Januar','Februar','März','April','Mai','Juni',
                'Juli','August','September','Oktober','November','Dezember']
 MONTH_NAMES_EN = ['January','February','March','April','May','June',
                    'July','August','September','October','November','December']
+
+class _Monatsnamen(list):
+    """Die zwoelf Monatsnamen; ein Index ausserhalb liefert die Monatszahl als
+    Text statt eines IndexError.
+
+    Aeltere Datenbanken koennen Buchungen mit Monat 0 oder 13 enthalten (der
+    CSV-Import pruefte das frueher nicht). Eine einzige solche Zeile liess
+    sonst Uebersicht und Profil fuer alle mit einem Serverfehler antworten.
+    """
+    def __getitem__(self, index):
+        if isinstance(index, int) and not 0 <= index < len(self):
+            return str(index + 1)
+        return super().__getitem__(index)
+
+
+MONTH_NAMES = _Monatsnamen(MONTH_NAMES)
+MONTH_NAMES_EN = _Monatsnamen(MONTH_NAMES_EN)
+
 
 def month_name(month_idx: int, lang: str = 'de') -> str:
     names = MONTH_NAMES_EN if lang == 'en' else MONTH_NAMES
@@ -1964,6 +1982,8 @@ def index():
 @main_bp.route('/month/<int:year>/<int:month>')
 @login_required
 def month_view(year, month):
+    if not _jahr_monat_ok(year, month):
+        abort(404)
     conn = get_db()
     # Version VOR den Datenabfragen lesen: ein Save, das dazwischen landet,
     # darf höchstens einen unnötigen "jemand anderes hat geändert"-Banner
@@ -2018,6 +2038,145 @@ def month_view(year, month):
         activity_scope=_scope, activity_version=activity_version,
         current_user_person_name=current_user_person_name)
 
+# ── Eingabepruefung der Buchungs-Endpunkte ───────────────────────────────────
+# Monat, Jahr, Tag und Betrag kamen frueher ungeprueft in die Datenbank: Monat
+# 13 legte Uebersicht und Profil lahm, ein Betrag von 1e999 (in JSON gueltig,
+# in Python `inf`) machte jede Antwort mit den Summen des Monats zu ungueltigem
+# JSON. Geprueft wird der ganze Request VOR dem ersten Schreibzugriff.
+JAHR_MIN, JAHR_MAX = 1900, 2200
+BETRAG_GRENZE = 1e12     # wie bei den Vermoegenssalden (_wealth_balance_ok)
+
+
+class _Ungueltig(ValueError):
+    """Abgelehnte Eingabe; `schluessel` ist der Uebersetzungsschluessel."""
+    def __init__(self, schluessel):
+        super().__init__(schluessel)
+        self.schluessel = schluessel
+
+
+def _abgelehnt(exc):
+    return jsonify(success=False, error=t(exc.schluessel)), 400
+
+
+def _ganzzahl(raw):
+    """int aus int, ganzzahligem float oder Ziffern-Text; sonst None."""
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw) if math.isfinite(raw) and raw.is_integer() else None
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _jahr_monat_ok(year, month) -> bool:
+    return JAHR_MIN <= year <= JAHR_MAX and 1 <= month <= 12
+
+
+def _lies_jahr_monat(d):
+    if not isinstance(d, dict):
+        raise _Ungueltig('srv.invalid_month')
+    year, month = _ganzzahl(d.get('year')), _ganzzahl(d.get('month'))
+    if year is None or month is None or not _jahr_monat_ok(year, month):
+        raise _Ungueltig('srv.invalid_month')
+    return year, month
+
+
+def _lies_liste(raw):
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise _Ungueltig('srv.invalid_row')
+    return raw
+
+
+def _lies_zeilen(raw):
+    rows = _lies_liste(raw)
+    if any(not isinstance(r, dict) for r in rows):
+        raise _Ungueltig('srv.invalid_row')
+    return rows
+
+
+def _betrag_ok(amt: float) -> bool:
+    return math.isfinite(amt) and abs(amt) < BETRAG_GRENZE
+
+
+def _lies_betrag(raw) -> float:
+    """Betrag einer Zeile. Leer oder nicht lesbar bleibt 0 (die Zeile gilt dann
+    als geleert, wie bisher); unendlich, NaN oder zu gross wird abgelehnt."""
+    try:
+        amt = float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not _betrag_ok(amt):
+        raise _Ungueltig('srv.invalid_amount')
+    return amt
+
+
+def _lies_tag(raw) -> int:
+    """Tag 1..31; ein leeres Feld bleibt wie bisher Tag 1."""
+    if raw is None or raw == '':
+        return 1
+    day = _ganzzahl(raw)
+    if day is None or not 1 <= day <= 31:
+        raise _Ungueltig('srv.invalid_day')
+    return day
+
+
+def _lies_fremd_id(raw, gueltige):
+    """Optionale Kategorie-/Personen-id. Leer -> None. Eine id, die es nicht
+    (mehr) gibt, wird ebenfalls None - genau das macht die Datenbank beim
+    Loeschen selbst (ON DELETE SET NULL); ein Tab mit einer inzwischen
+    geloeschten Kategorie scheiterte sonst am Fremdschluessel (Serverfehler)."""
+    if raw is None or raw == '' or raw is False:
+        return None
+    wert = _ganzzahl(raw)
+    if wert is None:
+        raise _Ungueltig('srv.invalid_row')
+    return wert if wert in gueltige else None
+
+
+def _lies_zeilen_id(raw):
+    """id einer bestehenden Zeile; alles Unlesbare gilt wie bisher als neu."""
+    wert = _ganzzahl(raw) if raw else None
+    return wert if wert is not None and 0 < wert <= 2**63 - 1 else None
+
+
+def _lies_text(raw) -> str:
+    if raw is None:
+        return ''
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+        raise _Ungueltig('srv.invalid_row')
+    return str(raw)
+
+
+def _ids(conn, tabelle):
+    return {r[0] for r in conn.execute('SELECT id FROM %s' % tabelle)}
+
+
+def _pruefe_buchungszeilen(conn, rows, mit_bezahlt_fuer):
+    """Liest alle Zeilen eines Speicherns, bevor irgendetwas geschrieben wird."""
+    kategorien = _ids(conn, 'categories')
+    personen = _ids(conn, 'persons') if mit_bezahlt_fuer else set()
+    geprueft = []
+    for e in rows:
+        z = {'roh': e, 'amt': _lies_betrag(e.get('amount')),
+             'rid': _lies_zeilen_id(e.get('id'))}
+        if z['amt'] != 0:      # eine geleerte Zeile wird nur geloescht
+            z['cid'] = _lies_fremd_id(e.get('category_id'), kategorien)
+            z['day'] = _lies_tag(e.get('day'))
+            z['desc'] = _lies_text(e.get('description'))
+            if mit_bezahlt_fuer:
+                z['pfpid'] = _lies_fremd_id(e.get('paid_for_person_id'), personen)
+        geprueft.append(z)
+    return geprueft
+
+
 def _legt_neue_zeile_an(rows) -> bool:
     """True, wenn mindestens eine Zeile dieses Speicherns NEU angelegt wuerde
     (kein gueltiges `id`, Betrag ungleich 0) - dieselbe Unterscheidung wie in
@@ -2055,9 +2214,14 @@ def save_expenses():
     stale = _require_v2(d)
     if stale:
         return stale
-    year, month = int(d['year']), int(d['month'])
-    rows = d.get('rows') or []
-    deleted_ids = d.get('deleted_ids') or []
+    conn = get_db()
+    try:
+        year, month = _lies_jahr_monat(d)
+        rows = _lies_zeilen(d.get('rows'))
+        deleted_ids = _lies_liste(d.get('deleted_ids'))
+        geprueft = _pruefe_buchungszeilen(conn, rows, mit_bezahlt_fuer=True)
+    except _Ungueltig as exc:
+        return _abgelehnt(exc)
     # Vor jedem Schreibzugriff pruefen: der Request wird als Ganzes abgewiesen,
     # nicht halb ausgefuehrt. Bearbeiten/Loeschen bestehender Zeilen braucht
     # keine eigene Person und bleibt erlaubt.
@@ -2065,7 +2229,6 @@ def save_expenses():
         abgewiesen = _konto_ohne_person_abweisen()
         if abgewiesen:
             return abgewiesen
-    conn = get_db()
     id_map = {}
     # Belege, deren letzte Referenz in diesem Request verschwinden koennte.
     # Gesammelt VOR dem Schreiben, aufgeraeumt am Ende (Befund I5) - siehe
@@ -2081,23 +2244,15 @@ def save_expenses():
 
     # 1) Ausdrücklich gelöschte Zeilen entfernen
     for raw in deleted_ids:
-        try:
-            rid = int(raw)
-        except (TypeError, ValueError):
+        rid = _lies_zeilen_id(raw)
+        if rid is None:
             continue
         _belegkandidaten.add(_beleg_von(rid))
         conn.execute('DELETE FROM expenses WHERE id=? AND year=? AND month=?', (rid, year, month))
 
     # 2) Zeilen anlegen bzw. aktualisieren (nie löschen, was hier fehlt)
-    for e in rows:
-        try:
-            amt = float(e.get('amount') or 0)
-        except (TypeError, ValueError):
-            amt = 0
-        try:
-            rid = int(e['id']) if e.get('id') else None
-        except (TypeError, ValueError):
-            rid = None
+    for z in geprueft:
+        e, amt, rid = z['roh'], z['amt'], z['rid']
 
         if amt == 0:
             # Geleerter Betrag: bestehende Zeile löschen, neue ignorieren
@@ -2107,12 +2262,9 @@ def save_expenses():
                              (rid, year, month))
             continue
 
-        cid     = int(e['category_id'])        if e.get('category_id')        else None
-        pfpid   = int(e['paid_for_person_id']) if e.get('paid_for_person_id') else None
+        cid, pfpid, day, desc = z['cid'], z['pfpid'], z['day'], z['desc']
         is_cash = 1 if e.get('is_cash') else 0
         rfn, _name_abgelehnt = _pruefe_belegname(e.get('receipt_filename'))
-        day     = int(e.get('day') or 1)
-        desc    = e.get('description', '')
 
         if rid is not None:
             # Wird der Beleg ausgetauscht oder entfernt, ist der alte danach
@@ -2198,6 +2350,17 @@ def save_persons():
                 any(not _hat_gueltige_id(p) for p in (d.get('rows') or [])):
             return jsonify(success=False, error=t('srv.persons_admin_only')), 403
 
+    # Startbetrag der Geldboerse vor jedem Schreibzugriff pruefen (siehe
+    # _lies_betrag): unendlich oder NaN machte die Geldboerse unbrauchbar.
+    try:
+        for p in _lies_zeilen(d.get('rows')):
+            _lies_betrag(p.get('wallet_start_amount'))
+            _lies_text(p.get('name'))
+            _lies_text(p.get('wallet_start_date'))
+        _lies_liste(d.get('deleted_ids'))
+    except _Ungueltig as exc:
+        return _abgelehnt(exc)
+
     conn = get_db()
     id_map = {}
     conflicts = []
@@ -2221,10 +2384,10 @@ def save_persons():
         conn.execute('DELETE FROM persons WHERE id=?', (did,))
 
     for p in (d.get('rows') or []):
-        n = (p.get('name') or '').strip()
+        n = _lies_text(p.get('name')).strip()
         if not n:
             continue
-        wd_raw = (p.get('wallet_start_date') or '').strip()
+        wd_raw = _lies_text(p.get('wallet_start_date')).strip()
         wd = wd_raw if _re.match(r'^\d{4}-\d{2}$', wd_raw) else None
         try:
             wa = float(p.get('wallet_start_amount') or 0)
@@ -2391,12 +2554,32 @@ def import_csv():
     conn = get_db()
     persons = {r['name']: r['id'] for r in conn.execute('SELECT id,name FROM persons')}
     cats    = {r['name']: r['id'] for r in conn.execute('SELECT id,name FROM categories')}
-    # collect affected months for optional overwrite
-    affected = set()
-    for row in rows[1:]:
-        if len(row) < 4: continue
-        try: affected.add((int(row[1]), int(row[2])))
-        except: pass
+    # Erst alle Zeilen lesen und pruefen, dann schreiben: "ueberschreiben"
+    # leert jeden betroffenen Monat, und betroffen ist nur ein Monat, fuer den
+    # auch wirklich eine Zeile importiert wird. Frueher genuegte dafuer eine
+    # Zeile, die danach als fehlerhaft uebersprungen wurde.
+    gelesen = []; skipped = []
+    for i, row in enumerate(rows[1:], 2):
+        if len(row) < 8: skipped.append(f'Zeile {i}: zu wenig Spalten'); continue
+        try:
+            typ  = row[0].strip()
+            year,month,day = int(row[1]),int(row[2]),int(row[3])
+            person = row[4].strip(); category = row[5].strip()
+            desc   = row[6].strip()
+            amount = float(row[7].replace(',','.').replace(' ',''))
+            if not _jahr_monat_ok(year, month):
+                raise ValueError('ungültiger Monat oder ungültiges Jahr')
+            if not 1 <= day <= 31:
+                raise ValueError('ungültiger Tag')
+            if not _betrag_ok(amount):
+                raise ValueError('ungültiger Betrag')
+            if typ not in ('Ausgabe', 'Einnahme'):
+                skipped.append(f'Zeile {i}: unbekannter Typ "{typ}"'); continue
+            is_cash = len(row)>8 and row[8].strip()=='Ja'
+            gelesen.append((typ, year, month, day, persons.get(person),
+                            cats.get(category), desc, amount, 1 if is_cash else 0))
+        except Exception as e: skipped.append(f'Zeile {i}: {e}')
+    affected = {(z[1], z[2]) for z in gelesen}
     _belegkandidaten = set()
     if overwrite:
         for y,m in affected:
@@ -2409,28 +2592,15 @@ def import_csv():
                     ' WHERE year=? AND month=? AND receipt_filename IS NOT NULL', (y, m)))
             conn.execute('DELETE FROM expenses WHERE year=? AND month=?',(y,m))
             conn.execute('DELETE FROM income   WHERE year=? AND month=?',(y,m))
-    imported = ok = 0; skipped = []
-    for i, row in enumerate(rows[1:], 2):
-        if len(row) < 8: skipped.append(f'Zeile {i}: zu wenig Spalten'); continue
-        try:
-            typ  = row[0].strip()
-            year,month,day = int(row[1]),int(row[2]),int(row[3])
-            person = row[4].strip(); category = row[5].strip()
-            desc   = row[6].strip()
-            amount = float(row[7].replace(',','.').replace(' ',''))
-            pid = persons.get(person)
-            if typ == 'Ausgabe':
-                is_cash = len(row)>8 and row[8].strip()=='Ja'
-                cid = cats.get(category)
-                conn.execute('INSERT INTO expenses (year,month,day,description,person_id,category_id,amount,is_cash) VALUES (?,?,?,?,?,?,?,?)',
-                             (year,month,day,desc,pid,cid,amount,1 if is_cash else 0))
-                imported += 1
-            elif typ == 'Einnahme':
-                conn.execute('INSERT INTO income (year,month,day,description,person_id,amount) VALUES (?,?,?,?,?,?)',
-                             (year,month,day,desc,pid,amount))
-                imported += 1
-            else: skipped.append(f'Zeile {i}: unbekannter Typ "{typ}"')
-        except Exception as e: skipped.append(f'Zeile {i}: {e}')
+    imported = 0
+    for typ, year, month, day, pid, cid, desc, amount, is_cash in gelesen:
+        if typ == 'Ausgabe':
+            conn.execute('INSERT INTO expenses (year,month,day,description,person_id,category_id,amount,is_cash) VALUES (?,?,?,?,?,?,?,?)',
+                         (year,month,day,desc,pid,cid,amount,is_cash))
+        else:
+            conn.execute('INSERT INTO income (year,month,day,description,person_id,amount) VALUES (?,?,?,?,?,?)',
+                         (year,month,day,desc,pid,amount))
+        imported += 1
     # Betroffene Monate koennen bei jemand anderem offen sein (v.a. bei
     # overwrite=true, das ihre Zeilen-ids unter der Hand entfernt) - Banner
     # ueber den Aenderungszaehler anstossen.
@@ -2503,8 +2673,11 @@ def save_recurring():
     stale = _require_v2(d)
     if stale:
         return stale
-    rows = d.get('rows') or []
-    deleted_ids = d.get('deleted_ids') or []
+    try:
+        rows = _lies_zeilen(d.get('rows'))
+        deleted_ids = _lies_liste(d.get('deleted_ids'))
+    except _Ungueltig as exc:
+        return _abgelehnt(exc)
     # Wiederkehrende Vorlagen sind streng persoenlich (Nutzerentscheidung):
     # jede Person verwaltet nur noch ihre eigenen, kein globales Widget mehr,
     # keine Ausnahme fuer Admins. Serverseitig durchgesetzt, nicht nur im
@@ -2516,10 +2689,32 @@ def save_recurring():
     conn = get_db()
     id_map = {}
 
+    # Alle Zeilen lesen, bevor irgendetwas geschrieben wird.
+    try:
+        kategorien = _ids(conn, 'categories')
+        geprueft = []
+        for r in rows:
+            z = {'roh': r, 'amt': _lies_betrag(r.get('amount')),
+                 'desc': _lies_text(r.get('description')).strip(),
+                 'rid': _lies_zeilen_id(r.get('id'))}
+            if z['desc'] or z['amt'] != 0:
+                z['cid'] = _lies_fremd_id(r.get('category_id'), kategorien)
+                z['freq'] = r.get('frequency', 'monthly')
+                if z['freq'] not in ('monthly', 'quarterly', 'yearly'):
+                    raise _Ungueltig('srv.invalid_row')
+                z['sm'] = 1
+                if z['freq'] != 'monthly':
+                    z['sm'] = _ganzzahl(r.get('start_month', 1))
+                    if z['sm'] is None or not 1 <= z['sm'] <= 12:
+                        raise _Ungueltig('srv.invalid_month')
+                z['day'] = _lies_tag(r.get('day'))
+            geprueft.append(z)
+    except _Ungueltig as exc:
+        return _abgelehnt(exc)
+
     for raw in deleted_ids:
-        try:
-            did = int(raw)
-        except (TypeError, ValueError):
+        did = _lies_zeilen_id(raw)
+        if did is None:
             continue
         # AND person_id=? verhindert, dass jemand per direktem API-Aufruf eine
         # fremde Vorlage loescht - die Oberflaeche zeigt ohnehin nur die
@@ -2528,16 +2723,8 @@ def save_recurring():
         conn.execute('DELETE FROM recurring_expenses WHERE id=? AND person_id=?',
                      (did, eigene_person_id))
 
-    for r in rows:
-        try:
-            amt = float(r.get('amount') or 0)
-        except (TypeError, ValueError):
-            amt = 0
-        desc = (r.get('description') or '').strip()
-        try:
-            rid = int(r['id']) if r.get('id') else None
-        except (TypeError, ValueError):
-            rid = None
+    for z in geprueft:
+        r, amt, desc, rid = z['roh'], z['amt'], z['desc'], z['rid']
 
         if not desc and amt == 0:
             # Geleerte Zeile: bestehende Zeile löschen, nie ausgefüllte ignorieren
@@ -2545,10 +2732,7 @@ def save_recurring():
                 conn.execute('DELETE FROM recurring_expenses WHERE id=? AND person_id=?',
                              (rid, eigene_person_id))
             continue
-        cid  = int(r['category_id']) if r.get('category_id') else None
-        freq = r.get('frequency', 'monthly')
-        sm   = int(r.get('start_month', 1)) if freq != 'monthly' else 1
-        day  = int(r.get('day') or 1)
+        cid, freq, sm, day = z['cid'], z['freq'], z['sm'], z['day']
 
         if rid is not None:
             # person_id fehlt hier bewusst in der SET-Klausel (gleiches Prinzip
@@ -2737,6 +2921,8 @@ def save_wealth_balances():
 @main_bp.route('/api/recurring/for-month/<int:year>/<int:month>')
 @login_required
 def recurring_for_month(year, month):
+    if not _jahr_monat_ok(year, month):
+        abort(404)
     conn = get_db()
     result = get_recurring_for_month(year, month, conn, person_id=g.current_user['person_id'])
     conn.close()
@@ -2749,33 +2935,29 @@ def save_income():
     stale = _require_v2(d)
     if stale:
         return stale
-    year, month = int(d['year']), int(d['month'])
-    rows = d.get('rows') or []
-    deleted_ids = d.get('deleted_ids') or []
+    conn = get_db()
+    try:
+        year, month = _lies_jahr_monat(d)
+        rows = _lies_zeilen(d.get('rows'))
+        deleted_ids = _lies_liste(d.get('deleted_ids'))
+        geprueft = _pruefe_buchungszeilen(conn, rows, mit_bezahlt_fuer=False)
+    except _Ungueltig as exc:
+        return _abgelehnt(exc)
     # Wie in save_expenses(): vor jedem Schreibzugriff, der ganze Request.
     if _legt_neue_zeile_an(rows):
         abgewiesen = _konto_ohne_person_abweisen()
         if abgewiesen:
             return abgewiesen
-    conn = get_db()
     id_map = {}
 
     for raw in deleted_ids:
-        try:
-            rid = int(raw)
-        except (TypeError, ValueError):
+        rid = _lies_zeilen_id(raw)
+        if rid is None:
             continue
         conn.execute('DELETE FROM income WHERE id=? AND year=? AND month=?', (rid, year, month))
 
-    for i in rows:
-        try:
-            amt = float(i.get('amount') or 0)
-        except (TypeError, ValueError):
-            amt = 0
-        try:
-            rid = int(i['id']) if i.get('id') else None
-        except (TypeError, ValueError):
-            rid = None
+    for z in geprueft:
+        i, amt, rid = z['roh'], z['amt'], z['rid']
 
         if amt == 0:
             if rid is not None:
@@ -2783,9 +2965,7 @@ def save_income():
                              (rid, year, month))
             continue
 
-        cid  = int(i['category_id']) if i.get('category_id') else None
-        day  = int(i.get('day') or 1)
-        desc = i.get('description', '')
+        cid, day, desc = z['cid'], z['day'], z['desc']
 
         if rid is not None:
             # "Wer" ist nach dem Anlegen unveraenderbar (Nutzerentscheidung) -
@@ -2824,14 +3004,18 @@ def save_income():
 @main_bp.route('/api/month/settle', methods=['POST'])
 @login_required
 def settle_month():
-    d = request.json; year, month = d['year'], d['month']
+    d = request.get_json(silent=True)
+    try:
+        year, month = _lies_jahr_monat(d)
+    except _Ungueltig as exc:
+        return _abgelehnt(exc)
     settled = 1 if d.get('settled') else 0
     from datetime import datetime as dt
     settled_at = dt.now().strftime('%d.%m.%Y %H:%M') if settled else None
     conn = get_db()
     conn.execute("INSERT OR REPLACE INTO month_status (year,month,settled,settled_at) VALUES (?,?,?,?)",
                  (year, month, settled, settled_at))
-    _bump_activity(conn, _month_scope(int(year), int(month)))
+    _bump_activity(conn, _month_scope(year, month))
     conn.commit()
     ov_p, ov_c = build_ov(conn, year, month, bool(settled))
     settlement = calculate_settlement(year, month, conn)
@@ -3415,8 +3599,9 @@ def extract_bank_statement(pdf_bytes):
         with pdfplumber.open(pdf_io) as pdf:
             pages_text = []
             for page in pdf.pages:
-                t = page.extract_text() or ''
-                pages_text.append(t)
+                # Nicht `t` nennen: das waere in der ganzen Funktion lokal und
+                # verdeckte die Uebersetzungsfunktion t() der Fehlerpfade.
+                pages_text.append(page.extract_text() or '')
             full_text = '\n'.join(pages_text)
     except Exception as e:
         import logging as _logging
@@ -3688,16 +3873,29 @@ def api_commit_pdf():
     if not txns:
         current_app.logger.warning("PDF-Commit: Fehlende Daten – keine Transaktionen")
         return jsonify({'success': False, 'error': t('srv.missing_data')}), 400
+    # Alle Buchungen pruefen, bevor die erste geschrieben wird.
+    geprueft = []
+    try:
+        for txn in _lies_zeilen(txns):
+            if not txn.get('include'):
+                continue
+            try:
+                amt = float(txn['amount'])
+            except (KeyError, TypeError, ValueError):
+                raise _Ungueltig('srv.invalid_amount')
+            if not _betrag_ok(amt):
+                raise _Ungueltig('srv.invalid_amount')
+            yr, mon = _lies_jahr_monat(txn)
+            if txn.get('day') in (None, ''):
+                raise _Ungueltig('srv.invalid_day')
+            geprueft.append((txn, amt, _lies_tag(txn.get('day')), mon, yr))
+    except _Ungueltig as exc:
+        return _abgelehnt(exc)
     conn = get_db()
     imported_exp = imported_inc = 0
     affected_months = set()
-    for txn in txns:
-        if not txn.get('include'): continue
+    for txn, amt, day, mon, yr in geprueft:
         try:
-            amt  = float(txn['amount'])
-            day  = int(txn['day'])
-            mon  = int(txn['month'])
-            yr   = int(txn['year'])
             desc = str(txn.get('counterpart') or txn.get('description') or '')[:200]
             if txn.get('is_income'):
                 conn.execute(
@@ -3753,7 +3951,30 @@ if __name__ == '__main__':
 def set_language(lang):
     if lang in SUPPORTED_LANGUAGES:
         session['lang'] = lang
-    return redirect(request.referrer or url_for('main.index'))
+    return redirect(_eigener_pfad(request.referrer) or url_for('main.index'))
+
+
+def _eigener_pfad(url):
+    """Pfad (samt Query) einer URL dieser Anwendung, sonst None.
+
+    Der Referer ist frei waehlbar: ohne Pruefung leitete /set_language auf
+    jede beliebige fremde Seite weiter (offener Redirect). Zurueck geht es
+    deshalb nur als Pfad auf dem eigenen Host.
+    """
+    from urllib.parse import urlsplit
+    if not url:
+        return None
+    try:
+        teile = urlsplit(url)
+    except ValueError:
+        return None
+    if teile.scheme not in ('http', 'https') or teile.netloc != request.host:
+        return None
+    pfad = teile.path or '/'
+    # '//host' und '/\\host' deutet ein Browser als fremden Host.
+    if not pfad.startswith('/') or pfad.startswith('//') or '\\' in pfad:
+        return None
+    return pfad + ('?' + teile.query if teile.query else '')
 
 
 
@@ -4534,7 +4755,11 @@ from flask import send_from_directory, current_app
 
 @main_bp.route('/sw.js')
 def service_worker():
-    return send_from_directory(os.path.join(current_app.root_path, 'static'), 'sw.js', mimetype='application/javascript')
+    antwort = send_from_directory(os.path.join(current_app.root_path, 'static'), 'sw.js', mimetype='application/javascript')
+    # Der Browser soll eine neue Version sofort sehen, nicht erst nach Ablauf
+    # eines Zwischenspeichers.
+    antwort.headers['Cache-Control'] = 'no-cache'
+    return antwort
 
 @main_bp.route('/offline')
 def pwa_offline():
@@ -4557,12 +4782,21 @@ def get_vapid_key():
 @main_bp.route('/api/notifications/register', methods=['POST'])
 @login_required
 def register_notification():
-    sub_data = request.json or {}
+    sub_data = request.get_json(silent=True)
+    if not isinstance(sub_data, dict):
+        return jsonify(success=False, error=t('srv.missing_data')), 400
     endpoint = sub_data.get('endpoint')
-    keys = sub_data.get('keys') or {}
+    keys = sub_data.get('keys')
+    if not isinstance(keys, dict):
+        keys = {}
     p256dh, auth = keys.get('p256dh'), keys.get('auth')
     if not endpoint or not p256dh or not auth:
         return jsonify(success=False, error=t('srv.missing_data')), 400
+    if not (isinstance(p256dh, str) and isinstance(auth, str)
+            and len(p256dh) <= 512 and len(auth) <= 512):
+        return jsonify(success=False, error=t('srv.missing_data')), 400
+    if not _push_endpoint_ok(endpoint):
+        return jsonify(success=False, error=t('srv.push_invalid_endpoint')), 400
 
     from datetime import datetime as _dt
     conn = get_db()
@@ -4580,13 +4814,51 @@ def register_notification():
 @login_required
 def unregister_notification():
     """Entfernt eine Push-Subscription (z.B. wenn der Nutzer Push im Browser deaktiviert)."""
-    endpoint = (request.json or {}).get('endpoint')
-    if not endpoint:
+    daten = request.get_json(silent=True)
+    endpoint = daten.get('endpoint') if isinstance(daten, dict) else None
+    if not endpoint or not isinstance(endpoint, str):
         return jsonify(success=False, error=t('srv.missing_data')), 400
     conn = get_db()
     conn.execute('DELETE FROM push_subscriptions WHERE endpoint=?', (endpoint,))
     conn.commit()
     return jsonify(success=True)
+
+
+def _push_endpoint_ok(endpoint) -> bool:
+    """True fuer eine Adresse, wie sie ein Push-Dienst vergibt.
+
+    Der Server ruft die Adresse spaeter selbst auf (Erinnerungen). Ohne
+    Pruefung konnte ein angemeldetes Mitglied ihn damit auf beliebige, auch
+    interne Adressen zeigen lassen (SSRF). Erlaubt ist nur https auf einen
+    oeffentlichen Hostnamen: keine IP-Adresse, kein Name ohne Punkt
+    (localhost, Compose-Dienste), keine internen Endungen, keine Zugangsdaten.
+    Ein Name, der auf eine interne Adresse aufloest, ist damit nicht
+    ausgeschlossen - die Pruefung haelt den einfachen Missbrauch ab.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+    if not isinstance(endpoint, str) or not 0 < len(endpoint) <= 2048:
+        return False
+    try:
+        teile = urlsplit(endpoint)
+        host = teile.hostname
+        teile.port      # ungueltiger Port -> ValueError
+    except ValueError:
+        return False
+    if teile.scheme != 'https' or not host or teile.username or teile.password:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return False
+    except ValueError:
+        pass
+    host = host.rstrip('.').lower()
+    if '.' not in host or host.endswith(('.local', '.localhost', '.internal',
+                                         '.lan', '.home', '.intranet', '.test')):
+        return False
+    # Rein numerische Schreibweisen ('127.1', '0x7f.1') deuten manche
+    # Bibliotheken als IP-Adresse.
+    return not all(teil.isdigit() or teil.startswith('0x') for teil in host.split('.'))
 
 
 # ── Web-Push: VAPID-Schlüssel & Versand ───────────────────────────────────────
@@ -4622,6 +4894,10 @@ def get_vapid_public_key_b64() -> str:
 def _send_one_push(sub_row, title: str, body: str, url: str = '/') -> bool:
     """Sendet eine einzelne Push-Nachricht. Gibt False zurück wenn die Subscription
     ungültig/abgelaufen ist (Aufrufer sollte sie dann aus der DB löschen)."""
+    # Eintraege aus der Zeit vor der Pruefung: nicht aufrufen, als ungueltig
+    # melden - der Aufrufer loescht sie dann.
+    if not _push_endpoint_ok(sub_row['endpoint']):
+        return False
     from pywebpush import webpush, WebPushException
     import json as _json
     subscription_info = {
@@ -4635,6 +4911,9 @@ def _send_one_push(sub_row, title: str, body: str, url: str = '/') -> bool:
             data=payload,
             vapid_private_key=_VAPID_KEY_PATH,
             vapid_claims={"sub": os.environ.get('VAPID_SUBJECT', 'mailto:admin@localhost')},
+            # Ohne Zeitlimit haengt der Erinnerungs-Job an einem Endpunkt,
+            # der die Verbindung annimmt und nie antwortet.
+            timeout=10,
         )
         return True
     except WebPushException as e:
@@ -4954,6 +5233,12 @@ def export_calendar():
     """Exportiert offene (noch nicht abgerechnete) Ausgleichszahlungen als iCal-Datei."""
     from datetime import datetime
 
+    def _ical_text(wert) -> str:
+        """Text nach RFC 5545 maskieren. Ein Zeilenumbruch in einem Namen
+        begann sonst eine neue Zeile der Datei, also ein eigenes Feld."""
+        text = str(wert).replace('\\', '\\\\').replace(';', '\\;').replace(',', '\\,')
+        return text.replace('\r\n', '\\n').replace('\n', '\\n').replace('\r', '\\n')
+
     conn = get_db()
     month_keys = conn.execute(
         'SELECT DISTINCT year, month FROM expenses '
@@ -4980,7 +5265,7 @@ def export_calendar():
                 f"UID:settlement-{year}-{month:02d}-{i}@kassenstuerzle",
                 f"DTSTAMP:{dtstamp}",
                 f"DTSTART:{due_date}",
-                f"SUMMARY:Ausgleich: {t['from']} -> {t['to']} ({t['amount']} EUR)",
+                "SUMMARY:" + _ical_text(f"Ausgleich: {t['from']} -> {t['to']} ({t['amount']} EUR)"),
                 f"DESCRIPTION:Monatsabrechnung {month}/{year}",
                 "END:VEVENT"
             ])

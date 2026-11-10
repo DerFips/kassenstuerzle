@@ -1,10 +1,18 @@
 // Kassenstürzle Service Worker – Modul 1: PWA
-const CACHE_NAME   = 'kassenstuerzle-v2';  // v2: CSRF + Security Headers
-const CACHE_STATIC = 'kassenstuerzle-static-v1';
+//
+// Registriert wird /sw.js (Scope '/'), nicht /static/sw.js: mit dem Scope
+// '/static/' steuerte der Worker keine einzige Seite. Die Offline-Seite kam
+// nie, und "Push aktivieren" wartete endlos auf navigator.serviceWorker.ready.
+//
+// Seit der Worker alle Seiten steuert, gilt:
+//  * Nur Anfragen an den eigenen Host werden angefasst. Fuer den Worker gilt
+//    connect-src 'self'; ein fetch() auf ein CDN schluege fehl.
+//  * HTML-Seiten werden NICHT gecacht. Sie enthalten Finanzdaten und laegen
+//    sonst nach dem Abmelden weiter lesbar im Browser-Cache.
+const CACHE_STATIC = 'kassenstuerzle-static-v2';
 
 // Statische Assets voraufladen (App Shell)
 const PRECACHE = [
-  '/',
   '/offline',
   '/static/manifest.json',
   '/static/icons/icon-192.png',
@@ -21,11 +29,13 @@ self.addEventListener('install', event => {
 });
 
 // ── Activate: alte Caches bereinigen ──────────────────────────────────────────
+// Entfernt auch 'kassenstuerzle-v2', in dem fruehere Versionen ganze Seiten
+// ablegten.
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(keys =>
       Promise.all(keys
-        .filter(k => k !== CACHE_NAME && k !== CACHE_STATIC)
+        .filter(k => k !== CACHE_STATIC)
         .map(k => caches.delete(k))
       )
     ).then(() => self.clients.claim())
@@ -36,27 +46,31 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
-  // Nur GET-Requests cachen
   if (event.request.method !== 'GET') return;
+  // Fremde Hosts (CDN) laedt der Browser selbst.
+  if (url.origin !== self.location.origin) return;
 
-  // API-Aufrufe: Network-First (bei Offline: Fehler zurückgeben, kein Cache)
+  // API-Aufrufe: immer Netz; offline eine JSON-Fehlermeldung statt eines
+  // Netzwerkfehlers.
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(
       fetch(event.request).catch(() =>
         new Response(JSON.stringify({ success: false, error: 'Offline' }),
-          { headers: { 'Content-Type': 'application/json' } })
+          { status: 503, headers: { 'Content-Type': 'application/json' } })
       )
     );
     return;
   }
 
-  // Statische Assets (CSS, JS, Fonts, Icons): Cache-First
-  if (url.pathname.startsWith('/static/')) {
+  // Icons und Manifest: Cache-First
+  if (url.pathname.startsWith('/static/') && url.pathname !== '/static/sw.js') {
     event.respondWith(
       caches.match(event.request).then(cached =>
         cached || fetch(event.request).then(res => {
-          const clone = res.clone();
-          caches.open(CACHE_STATIC).then(c => c.put(event.request, clone));
+          if (res.ok) {
+            const clone = res.clone();
+            caches.open(CACHE_STATIC).then(c => c.put(event.request, clone));
+          }
           return res;
         })
       )
@@ -64,19 +78,12 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // HTML-Seiten: Network-First, Offline-Fallback
-  event.respondWith(
-    fetch(event.request)
-      .then(res => {
-        const clone = res.clone();
-        caches.open(CACHE_NAME).then(c => c.put(event.request, clone));
-        return res;
-      })
-      .catch(async () => {
-        const cached = await caches.match(event.request);
-        return cached || caches.match('/offline');
-      })
-  );
+  // Seitenaufrufe: immer Netz, ohne Verbindung die Offline-Seite.
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request).catch(() => caches.match('/offline'))
+    );
+  }
 });
 
 // ── Push Notifications (Modul 5 – vorbereitet) ────────────────────────────────
@@ -103,8 +110,15 @@ self.addEventListener('notificationclick', event => {
   event.notification.close();
   event.waitUntil(
     clients.matchAll({ type: 'window' }).then(list => {
-      for (const c of list) if (c.url === '/' && 'focus' in c) return c.focus();
-      if (clients.openWindow) return clients.openWindow(event.notification.data?.url || '/');
+      // c.url ist eine vollstaendige Adresse - der fruehere Vergleich mit '/'
+      // traf nie, jeder Klick oeffnete ein weiteres Fenster.
+      const ziel = new URL(event.notification.data?.url || '/', self.location.origin);
+      for (const c of list) {
+        if (new URL(c.url).origin === self.location.origin && 'focus' in c) {
+          return c.focus().then(w => (w && 'navigate' in w) ? w.navigate(ziel.href) : w);
+        }
+      }
+      if (clients.openWindow) return clients.openWindow(ziel.href);
     })
   );
 });

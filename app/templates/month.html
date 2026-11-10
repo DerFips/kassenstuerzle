@@ -883,6 +883,24 @@ function getIncomeRows() {
   }));
 }
 
+/* ── GELEERTE ZEILEN ──────────────────────────────────────────
+ * Eine bestehende Zeile ohne gueltigen Betrag loescht der Server beim
+ * Speichern. Blieb ihre id in der Tabelle stehen, lief ein spaeter wieder
+ * eingetragener Betrag als Aenderung einer Zeile, die es nicht mehr gibt: die
+ * Seite meldete "gespeichert", nach dem Neuladen fehlte die Buchung. Deshalb
+ * vor dem Senden merken, welche Zeilen geleert sind, und ihnen nach dem
+ * erfolgreichen Speichern die id nehmen - der naechste Betrag legt sie neu an. */
+function geleerteZeilen(bodyId) {
+  return Array.from(document.querySelectorAll(`#${bodyId} tr`)).filter(r => {
+    if (!r.dataset.rowId) return false;
+    const v = parseAmtVal(r.querySelector('[name=amount]'));
+    return isNaN(v) || v === 0;
+  });
+}
+function idsVergessen(zeilen) {
+  zeilen.forEach(r => { delete r.dataset.rowId; });
+}
+
 /* ── TABELLE SORTIEREN ────────────────────────────────────── */
 function sortTable() {
   const tbody = document.getElementById('expenseBody');
@@ -927,6 +945,7 @@ async function saveExpenses(silent=false) {
   btn.innerHTML = silent ? `<i class="fas fa-spinner fa-spin me-1"></i><small>${t('month.auto_saving')}</small>` : `<i class="fas fa-spinner fa-spin me-1"></i>${t('month.saving')}`;
   try {
     const sentDeletes = _pendingExpDeletes.slice();
+    const geleert = geleerteZeilen('expenseBody');
     const res = await fetch('/api/expenses/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
@@ -941,6 +960,7 @@ async function saveExpenses(silent=false) {
         const tr = document.querySelector(`#expenseBody tr[data-client-key="${ck}"]`);
         if (tr) { tr.dataset.rowId = id; delete tr.dataset.clientKey; }
       });
+      idsVergessen(geleert);
       _pendingExpDeletes = _pendingExpDeletes.filter(id => !sentDeletes.includes(id));
       if (typeof activityWatchVersion === 'function') activityWatchVersion(data.activity_version);
       _suppressAutoSave = true;
@@ -968,6 +988,7 @@ async function saveIncome(silent=false) {
   btn.innerHTML = silent ? `<i class="fas fa-spinner fa-spin me-1"></i><small>${t('month.auto_saving')}</small>` : `<i class="fas fa-spinner fa-spin me-1"></i>${t('month.saving')}`;
   try {
     const sentDeletes = _pendingIncDeletes.slice();
+    const geleert = geleerteZeilen('incomeBody');
     const res = await fetch('/api/income/save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrfToken() },
@@ -980,6 +1001,7 @@ async function saveIncome(silent=false) {
         const tr = document.querySelector(`#incomeBody tr[data-client-key="${ck}"]`);
         if (tr) { tr.dataset.rowId = id; delete tr.dataset.clientKey; }
       });
+      idsVergessen(geleert);
       _pendingIncDeletes = _pendingIncDeletes.filter(id => !sentDeletes.includes(id));
       if (typeof activityWatchVersion === 'function') activityWatchVersion(data.activity_version);
       _suppressAutoSave = true;
@@ -1040,8 +1062,12 @@ async function toggleSettle(checked) {
       renderSavings(data.savings_pp || []);
       updateSettleUI(isSettled, data.settled_at);
       showToast(data.settled ? t('month.toast_settled') : t('month.toast_reopened'), data.settled ? 'success' : 'warning');
+    } else {
+      // Abgelehnt: der Haken darf nicht stehen bleiben, als waere abgerechnet.
+      cb.checked = !checked;
+      showToast(data.error || t('month.toast_save_error'), 'danger');
     }
-  } catch (e) { showToast(t('month.toast_error', {message: e.message}), 'danger'); }
+  } catch (e) { cb.checked = !checked; showToast(t('month.toast_error', {message: e.message}), 'danger'); }
   cb.disabled = false;
 }
 
@@ -1252,7 +1278,10 @@ function showToast(msg, type='success') {
   const div = document.createElement('div');
   div.className = `toast align-items-center text-bg-${type} border-0 show position-fixed bottom-0 end-0 m-3`;
   div.style.zIndex = 2000;
-  div.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button type="button" class="btn-close btn-close-white me-2 m-auto"></button></div>`;
+  div.innerHTML = `<div class="d-flex"><div class="toast-body"></div><button type="button" class="btn-close btn-close-white me-2 m-auto"></button></div>`;
+  // Als Text, nie als HTML: die Meldung enthaelt Servertexte und bei einem
+  // Formelfehler die eigene Eingabe.
+  div.querySelector('.toast-body').textContent = msg;
   // Frueher ein onclick-Attribut mit this.closest('.toast').remove(): `this`
   // war der Knopf, sein naechstes .toast ist genau dieses div (I6).
   div.querySelector('.btn-close').addEventListener('click', () => div.remove());
@@ -1331,7 +1360,7 @@ function deleteReceipt(deleteBtn) {
   const btn = tr.querySelector('.btn-receipt');
   const preview = tr.querySelector('.receipt-preview');
   if (!hidden.value || !confirm(t('month.receipt_delete_confirm'))) return;
-  fetch(`/api/receipt/${hidden.value}`, { method: 'DELETE', headers: { 'X-CSRF-Token': getCsrfToken() } })
+  fetch(`/api/receipt/${encodeURIComponent(hidden.value)}`, { method: 'DELETE', headers: { 'X-CSRF-Token': getCsrfToken() } })
     .then(r => r.json()).then(data => { if (data.success) { hidden.value = ''; btn.classList.remove('has-receipt'); btn.title = t('month.receipt_add'); btn.innerHTML = '<i class="bi bi-camera"></i>'; preview.style.display = 'none'; preview.innerHTML = ''; } });
 }
 document.addEventListener('click', function(e) { if (!e.target.closest('.receipt-cell')) document.querySelectorAll('.receipt-preview').forEach(p => p.style.display = 'none'); });
